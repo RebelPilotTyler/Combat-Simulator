@@ -1,0 +1,1354 @@
+import { abilityModifier, rollDamageDice, rollDice, type RandomSource } from './dice';
+import type {
+  ActionDefinition,
+  CardinalDirection,
+  CombatHooks,
+  CombatLogEntry,
+  CombatState,
+  Creature,
+  GridPosition,
+  AppliedCondition,
+  ConditionDurationType,
+  StackBehavior,
+  Ability,
+  Skill,
+  RollMode
+} from './types';
+import { getShapeSquares, isBlocked, isInBounds, samePosition } from './shapes';
+import { getMovementCost, isOccupied } from './movement';
+import {
+  applyConditionToCreature,
+  applyBeforeDamageModifiers,
+  canCreatureMove,
+  canCreatureTakeAction,
+  canCreatureTakeReaction,
+  collectAbilityCheckModifiers,
+  collectAttackRollModifiers,
+  collectSavingThrowModifiers,
+  createAppliedCondition,
+  expireConditionsForTurn,
+  getConditionDefinition,
+  getConditionLabel,
+  hasCondition,
+  mergeRollModifiers,
+  normalizeConditions,
+  removeConditionFromCreature,
+  resolveRollMode,
+  runConditionTurnHooks,
+  runAfterDamageHooks,
+  tickRoundDurations
+} from './conditions';
+import {
+  getDistanceFeet,
+  getHostileCreaturesWithinReach,
+  getOpportunityAttackCandidates,
+  hasLineOfSight,
+  isInActionRange
+} from './targeting';
+import {
+  consumeActionResources,
+  getAvailableActions,
+  getEffectiveAC,
+  getEffectiveAttackBonus,
+  getEffectiveSaveBonus,
+  getEffectiveSpeed,
+  getUnavailableActionReason,
+  hasResourcesForAction,
+  resetResources
+} from './features';
+
+export const BASIC_ACTIONS = [
+  'Attack',
+  'Cast a Spell',
+  'Dash',
+  'Disengage',
+  'Dodge',
+  'Help',
+  'Hide',
+  'Ready',
+  'Search',
+  'Use an Object',
+  'Grapple',
+  'Shove',
+  'Improvised Action'
+] as const;
+
+export type BasicActionName = (typeof BASIC_ACTIONS)[number];
+
+export type HelpMode = 'ally' | 'enemy';
+
+export type ShoveOutcome = 'prone' | 'push';
+
+export type SearchMode = 'perception' | 'investigation';
+
+export interface AttackDebugStats {
+  trials: number;
+  hits: number;
+  misses: number;
+  crits: number;
+  hitPercentage: number;
+  expectedHitPercentage: number;
+  rollMode: RollMode;
+  attackBonus: number;
+  targetAc: number;
+}
+
+export function createCombatState(
+  creatures: Creature[],
+  width = 10,
+  height = 10,
+  blocked: GridPosition[] = []
+): CombatState {
+  const normalizedCreatures = normalizeCreatures(creatures);
+  return {
+    creatures: normalizedCreatures,
+    grid: { width, height, blocked },
+    initiative: [],
+    round: 0,
+    turnIndex: 0,
+    activeCreatureId: undefined,
+    turnState: createTurnState(undefined),
+    turnResources: Object.fromEntries(normalizedCreatures.map((creature) => [creature.id, createTurnState(creature)])),
+    pendingReactions: [],
+    log: []
+  };
+}
+
+export function rollInitiative(state: CombatState, random: RandomSource = Math.random): CombatState {
+  const next = normalizeState(cloneState(state));
+  const initiative = next.creatures
+    .filter((creature) => !isDefeated(creature))
+    .map((creature) => {
+    const modifier = abilityModifier(creature.abilityScores.dex);
+      const roll = rollDice('1d20', random).total;
+      return {
+        creatureId: creature.id,
+        roll,
+        modifier,
+        total: roll + modifier
+      };
+    })
+    .sort((a, b) => {
+      if (b.total !== a.total) {
+        return b.total - a.total;
+      }
+
+      const creatureA = findCreature(next, a.creatureId);
+      const creatureB = findCreature(next, b.creatureId);
+      return abilityModifier(creatureB.abilityScores.dex) - abilityModifier(creatureA.abilityScores.dex);
+    });
+
+  next.initiative = initiative;
+  next.round = initiative.length > 0 ? 1 : 0;
+  next.turnIndex = 0;
+  next.activeCreatureId = initiative[0]?.creatureId;
+  next.turnResources = Object.fromEntries(next.creatures.map((creature) => [creature.id, createTurnState(creature)]));
+  next.turnState = next.activeCreatureId ? next.turnResources[next.activeCreatureId] : createTurnState(undefined);
+  next.pendingReactions = [];
+
+  initiative.forEach((entry) => {
+    const creature = findCreature(next, entry.creatureId);
+    addLog(
+      next,
+      'initiative',
+      `${creature.name} rolls initiative: d20 ${entry.roll} + ${entry.modifier} = ${entry.total}.`
+    );
+  });
+
+  if (next.activeCreatureId) {
+    addLog(next, 'turn', `Round ${next.round} begins. ${findCreature(next, next.activeCreatureId).name} is active.`);
+  }
+
+  return next;
+}
+
+export function endTurn(state: CombatState, hooks: CombatHooks = {}): CombatState {
+  const next = normalizeState(cloneState(state));
+  if (next.initiative.length === 0 || !next.activeCreatureId) {
+    addLog(next, 'system', 'No initiative order exists. Roll initiative first.');
+    return next;
+  }
+
+  const endingCreature = findCreature(next, next.activeCreatureId);
+  runConditionTurnHooks(next, endingCreature, 'end');
+  hooks.onTurnEnd?.(next, endingCreature);
+  logExpiredConditions(next, expireConditionsForTurn(next, endingCreature, 'end'));
+  addLog(next, 'turn', `${endingCreature.name} ends their turn.`);
+
+  const nextIndex = findNextLivingInitiativeIndex(next);
+  if (nextIndex === -1) {
+    next.activeCreatureId = undefined;
+    addLog(next, 'system', 'Combat has no creatures able to act.');
+    return next;
+  }
+
+  if (nextIndex <= next.turnIndex) {
+    next.round += 1;
+    logExpiredConditions(next, tickRoundDurations(next));
+  }
+
+  next.turnIndex = nextIndex;
+  next.activeCreatureId = next.initiative[next.turnIndex].creatureId;
+
+  const activeCreature = findCreature(next, next.activeCreatureId);
+  resetResources(activeCreature, 'turnStart');
+  logExpiredConditions(next, expireConditionsForTurn(next, activeCreature, 'start'));
+  next.turnResources[activeCreature.id] = createTurnState(activeCreature);
+  next.turnState = next.turnResources[activeCreature.id];
+  runConditionTurnHooks(next, activeCreature, 'start');
+  hooks.onTurnStart?.(next, activeCreature);
+  addLog(next, 'turn', `Round ${next.round}: ${activeCreature.name} starts their turn.`);
+
+  return next;
+}
+
+export function moveActiveCreature(state: CombatState, destination: GridPosition): CombatState {
+  const next = ensureTurnState(normalizeState(cloneState(state)));
+  const creature = getActiveCreature(next);
+  if (!canCreatureMove(next, creature)) {
+    addLog(next, 'system', `${creature.name} cannot move because of a condition.`);
+    return next;
+  }
+
+  const cost = getMovementCost(next, creature.id, destination);
+
+  if (cost === undefined) {
+    addLog(next, 'system', `${creature.name} cannot move to ${destination.x},${destination.y}.`);
+    return next;
+  }
+
+  const from = { ...creature.position };
+  const opportunityCandidates = hasCondition(creature, 'disengaged')
+    ? []
+    : getOpportunityAttackCandidates(next, creature, from, destination);
+  creature.position = destination;
+  const resource = getResource(next, creature.id);
+  resource.remainingMovement -= cost;
+  resource.movementRemaining = resource.remainingMovement;
+  syncActiveTurnState(next);
+  addLog(
+    next,
+    'movement',
+    `${creature.name} moves from ${from.x},${from.y} to ${destination.x},${destination.y} for ${cost} feet. ${next.turnState.remainingMovement} feet remain.`
+  );
+  opportunityCandidates.forEach((enemy) => {
+    const action = findOpportunityAttackAction(enemy);
+    if (!action) {
+      return;
+    }
+
+    const pending = {
+      id: `${Date.now()}-${Math.random().toString(36).slice(2)}`,
+      trigger: 'opportunityAttack' as const,
+      reactorId: enemy.id,
+      targetId: creature.id,
+      actionId: action.id,
+      from,
+      to: destination,
+      description: `${enemy.name} can make an opportunity attack against ${creature.name}.`
+    };
+    next.pendingReactions.push(pending);
+    addLog(next, 'action', `Opportunity attack triggered: ${pending.description}`);
+  });
+
+  return next;
+}
+
+export function performBasicAction(state: CombatState, actionName: BasicActionName): CombatState {
+  const next = ensureTurnState(normalizeState(cloneState(state)));
+  const creature = getActiveCreature(next);
+
+  if (actionName === 'Attack') {
+    addLog(next, 'system', 'Choose one of the creature attack actions below, then choose a target.');
+    return next;
+  }
+
+  if (actionName === 'Disengage') {
+    return performDisengageAction(next);
+  }
+
+  if (actionName === 'Dash') {
+    if (!spendActionCost(next, creature, 'action')) {
+      return next;
+    }
+    const resource = getResource(next, creature.id);
+    resource.remainingMovement += getEffectiveSpeed(creature, next);
+    resource.movementRemaining = resource.remainingMovement;
+    syncActiveTurnState(next);
+    addLog(
+      next,
+      'action',
+      `${creature.name} takes the Dash action and gains ${getEffectiveSpeed(creature, next)} feet of movement. ${next.turnState.remainingMovement} feet remain.`
+    );
+    return next;
+  }
+
+  if (actionName === 'Dodge') {
+    if (!spendActionCost(next, creature, 'action')) {
+      return next;
+    }
+    const applied = createAppliedCondition('dodging', {
+      sourceCreatureId: creature.id,
+      durationType: 'untilStartOfTargetTurn'
+    });
+    const result = applyConditionToCreature(creature, applied);
+    addLog(next, 'action', `${creature.name} takes the Dodge action until the start of their next turn.`);
+    logConditionChange(next, creature, applied, result);
+    return next;
+  }
+
+  if (!spendActionCost(next, creature, 'action')) {
+    return next;
+  }
+  addLog(next, 'action', `${creature.name} takes ${actionName}. Placeholder action: no extra rules are implemented yet.`);
+  return next;
+}
+
+export function performDisengageAction(state: CombatState): CombatState {
+  const next = ensureTurnState(normalizeState(cloneState(state)));
+  const creature = getActiveCreature(next);
+  if (!spendAction(next, creature)) {
+    return next;
+  }
+
+  const condition = createAppliedCondition('disengaged', {
+    sourceCreatureId: creature.id,
+    durationType: 'untilEndOfTargetTurn'
+  });
+  const result = applyConditionToCreature(creature, condition);
+  addLog(next, 'action', `${creature.name} disengages until the end of their turn.`);
+  logConditionChange(next, creature, condition, result);
+  return next;
+}
+
+export function performHelpAction(state: CombatState, targetId: string, mode: HelpMode): CombatState {
+  const next = ensureTurnState(normalizeState(cloneState(state)));
+  const helper = getActiveCreature(next);
+  const target = findCreature(next, targetId);
+  if (!spendAction(next, helper)) {
+    return next;
+  }
+
+  const condition = createAppliedCondition(mode === 'ally' ? 'helped' : 'helpedTarget', {
+    sourceCreatureId: helper.id,
+    durationType: 'untilStartOfSourceTurn',
+    metadata: { mode }
+  });
+  const result = applyConditionToCreature(target, condition);
+  addLog(
+    next,
+    'action',
+    mode === 'ally'
+      ? `${helper.name} helps ${target.name}. ${target.name}'s next attack or ability check has advantage.`
+      : `${helper.name} distracts ${target.name}. The next allied attack against ${target.name} has advantage.`
+  );
+  logConditionChange(next, target, condition, result);
+  return next;
+}
+
+export function performHideAction(state: CombatState, random: RandomSource = Math.random): CombatState {
+  const next = ensureTurnState(normalizeState(cloneState(state)));
+  const creature = getActiveCreature(next);
+  if (!spendAction(next, creature)) {
+    return next;
+  }
+
+  const check = rollAbilityCheck(next, creature, 'dex', 'stealth', random);
+  const condition = createAppliedCondition('hidden', {
+    sourceCreatureId: creature.id,
+    metadata: { stealthTotal: check.total }
+  });
+  const result = applyConditionToCreature(creature, condition);
+  addLog(next, 'action', `${creature.name} hides: Stealth ${check.rollText} = ${check.total}.`);
+  logConditionChange(next, creature, condition, result);
+  consumeHelpedAbilityCheck(next, creature);
+  return next;
+}
+
+export function performReadyAction(state: CombatState, actionId: string, trigger: string): CombatState {
+  const next = ensureTurnState(normalizeState(cloneState(state)));
+  const creature = getActiveCreature(next);
+  if (!spendAction(next, creature)) {
+    return next;
+  }
+
+  const action = findAction(creature, actionId, next);
+  creature.readiedAction = {
+    actionId: action.id,
+    actionName: action.name,
+    trigger: trigger.trim() || 'No trigger specified'
+  };
+  addLog(next, 'action', `${creature.name} readies ${action.name}. Trigger: ${creature.readiedAction.trigger}.`);
+  return next;
+}
+
+export function performSearchAction(
+  state: CombatState,
+  mode: SearchMode,
+  random: RandomSource = Math.random
+): CombatState {
+  const next = ensureTurnState(normalizeState(cloneState(state)));
+  const creature = getActiveCreature(next);
+  if (!spendAction(next, creature)) {
+    return next;
+  }
+
+  const check =
+    mode === 'perception'
+      ? rollAbilityCheck(next, creature, 'wis', 'perception', random)
+      : rollAbilityCheck(next, creature, 'int', 'investigation', random);
+  addLog(next, 'action', `${creature.name} searches with ${mode}: ${check.rollText} = ${check.total}.`);
+  consumeHelpedAbilityCheck(next, creature);
+  return next;
+}
+
+export function performUseObjectAction(state: CombatState, note: string): CombatState {
+  const next = ensureTurnState(normalizeState(cloneState(state)));
+  const creature = getActiveCreature(next);
+  if (!spendAction(next, creature)) {
+    return next;
+  }
+
+  addLog(next, 'action', `${creature.name} uses an object. ${note.trim() || 'No note provided.'}`);
+  return next;
+}
+
+export function performImprovisedAction(
+  state: CombatState,
+  note: string,
+  ability?: Ability,
+  random: RandomSource = Math.random
+): CombatState {
+  const next = ensureTurnState(normalizeState(cloneState(state)));
+  const creature = getActiveCreature(next);
+  if (!spendAction(next, creature)) {
+    return next;
+  }
+
+  if (ability) {
+    const check = rollAbilityCheck(next, creature, ability, undefined, random);
+    addLog(next, 'action', `${creature.name} improvises: ${note.trim() || 'No note provided.'} ${ability.toUpperCase()} ${check.rollText} = ${check.total}.`);
+    consumeHelpedAbilityCheck(next, creature);
+    return next;
+  }
+
+  addLog(next, 'action', `${creature.name} improvises. ${note.trim() || 'No note provided.'}`);
+  return next;
+}
+
+export function performCreatureUtilityAction(state: CombatState, actionId: string): CombatState {
+  const next = ensureTurnState(normalizeState(cloneState(state)));
+  const creature = getActiveCreature(next);
+  const action = findAction(creature, actionId, next);
+  const featureActionHandled = performFeatureGeneratedBasicAction(next, creature, action);
+  if (featureActionHandled) {
+    return next;
+  }
+  if (!spendActionCost(next, creature, action.actionCost)) {
+    return next;
+  }
+  if (!spendActionResources(next, creature, action)) {
+    rollbackActionCost(next, creature, action.actionCost);
+    return next;
+  }
+
+  if (action.tags.includes('movement')) {
+    const extraMovement = action.normalRange ?? 10;
+    const resource = getResource(next, creature.id);
+    resource.remainingMovement += extraMovement;
+    resource.movementRemaining = resource.remainingMovement;
+    syncActiveTurnState(next);
+    addLog(next, 'action', `${creature.name} uses ${action.name} and gains ${extraMovement} feet of movement.`);
+    return next;
+  }
+
+  addLog(next, 'action', `${creature.name} uses ${action.name}. ${action.description ?? 'No extra rules implemented.'}`);
+  return next;
+}
+
+export function resolvePendingReaction(
+  state: CombatState,
+  pendingReactionId: string,
+  useReaction: boolean,
+  random: RandomSource = Math.random
+): CombatState {
+  const next = ensureTurnState(normalizeState(cloneState(state)));
+  const pending = next.pendingReactions.find((candidate) => candidate.id === pendingReactionId);
+  if (!pending) {
+    return next;
+  }
+
+  next.pendingReactions = next.pendingReactions.filter((candidate) => candidate.id !== pendingReactionId);
+
+  if (!useReaction) {
+    addLog(next, 'action', `Reaction skipped: ${pending.description}`);
+    return next;
+  }
+
+  const reactor = findCreature(next, pending.reactorId);
+  const target = findCreature(next, pending.targetId);
+  if (getResource(next, reactor.id).reactionUsed || !canCreatureTakeReaction(next, reactor)) {
+    addLog(next, 'system', `${reactor.name} cannot use a reaction.`);
+    return next;
+  }
+
+  const originalActiveId = next.activeCreatureId;
+  const action = findAction(reactor, pending.actionId, next);
+  const originalCost = action.actionCost;
+  action.actionCost = 'free';
+  getResource(next, reactor.id).reactionUsed = true;
+  syncActiveTurnState(next);
+  addLog(next, 'action', `${reactor.name} uses a reaction for ${action.name} against ${target.name}.`);
+
+  next.activeCreatureId = reactor.id;
+  next.turnState = getResource(next, reactor.id);
+  target.position = pending.from;
+  const resolved = performAttackAction(next, action.id, target.id, random);
+  findCreature(resolved, target.id).position = pending.to;
+  findCreature(resolved, reactor.id).actions.find((candidate) => candidate.id === action.id)!.actionCost = originalCost;
+  resolved.activeCreatureId = originalActiveId;
+  syncActiveTurnState(resolved);
+  return resolved;
+}
+
+export function performGrappleAction(
+  state: CombatState,
+  targetId: string,
+  random: RandomSource = Math.random
+): CombatState {
+  const next = ensureTurnState(normalizeState(cloneState(state)));
+  const attacker = getActiveCreature(next);
+  const target = findCreature(next, targetId);
+  if (!spendAction(next, attacker)) {
+    return next;
+  }
+
+  if (!isWithinMelee(attacker, target)) {
+    addLog(next, 'system', `${target.name} is out of melee range for grapple.`);
+    next.turnState.actionUsed = false;
+    return next;
+  }
+
+  const attackCheck = rollAbilityCheck(next, attacker, 'str', 'athletics', random);
+  const defenderSkill = getSkillModifier(target, 'athletics', 'str') >= getSkillModifier(target, 'acrobatics', 'dex') ? 'athletics' : 'acrobatics';
+  const defenseCheck = rollAbilityCheck(next, target, defenderSkill === 'athletics' ? 'str' : 'dex', defenderSkill, random);
+
+  if (attackCheck.total > defenseCheck.total) {
+    const condition = createAppliedCondition('grappled', { sourceCreatureId: attacker.id });
+    const result = applyConditionToCreature(target, condition);
+    addLog(next, 'action', `${attacker.name} grapples ${target.name}: ${attackCheck.total} vs ${defenseCheck.total}. Success.`);
+    logConditionChange(next, target, condition, result);
+  } else {
+    addLog(next, 'action', `${attacker.name} tries to grapple ${target.name}: ${attackCheck.total} vs ${defenseCheck.total}. Failure.`);
+  }
+
+  consumeHelpedAbilityCheck(next, attacker);
+  return next;
+}
+
+export function performShoveAction(
+  state: CombatState,
+  targetId: string,
+  outcome: ShoveOutcome,
+  random: RandomSource = Math.random
+): CombatState {
+  const next = ensureTurnState(normalizeState(cloneState(state)));
+  const attacker = getActiveCreature(next);
+  const target = findCreature(next, targetId);
+  if (!spendAction(next, attacker)) {
+    return next;
+  }
+
+  if (!isWithinMelee(attacker, target)) {
+    addLog(next, 'system', `${target.name} is out of melee range for shove.`);
+    next.turnState.actionUsed = false;
+    return next;
+  }
+
+  const attackCheck = rollAbilityCheck(next, attacker, 'str', 'athletics', random);
+  const defenderSkill = getSkillModifier(target, 'athletics', 'str') >= getSkillModifier(target, 'acrobatics', 'dex') ? 'athletics' : 'acrobatics';
+  const defenseCheck = rollAbilityCheck(next, target, defenderSkill === 'athletics' ? 'str' : 'dex', defenderSkill, random);
+
+  if (attackCheck.total <= defenseCheck.total) {
+    addLog(next, 'action', `${attacker.name} tries to shove ${target.name}: ${attackCheck.total} vs ${defenseCheck.total}. Failure.`);
+    consumeHelpedAbilityCheck(next, attacker);
+    return next;
+  }
+
+  if (outcome === 'prone') {
+    const condition = createAppliedCondition('prone', { sourceCreatureId: attacker.id });
+    const result = applyConditionToCreature(target, condition);
+    addLog(next, 'action', `${attacker.name} shoves ${target.name}: ${attackCheck.total} vs ${defenseCheck.total}. ${target.name} falls prone.`);
+    logConditionChange(next, target, condition, result);
+    consumeHelpedAbilityCheck(next, attacker);
+    return next;
+  }
+
+  const destination = getPushDestination(attacker.position, target.position);
+  if (isInBounds(destination, next.grid) && !isBlocked(destination, next.grid) && !isOccupied(next, destination, target.id)) {
+    target.position = destination;
+    addLog(
+      next,
+      'action',
+      `${attacker.name} shoves ${target.name}: ${attackCheck.total} vs ${defenseCheck.total}. ${target.name} is pushed to ${destination.x},${destination.y}.`
+    );
+  } else {
+    addLog(next, 'action', `${attacker.name} shoves ${target.name}: ${attackCheck.total} vs ${defenseCheck.total}. Push blocked.`);
+  }
+
+  consumeHelpedAbilityCheck(next, attacker);
+  return next;
+}
+
+export function applyHpChange(
+  state: CombatState,
+  targetId: string,
+  amount: number,
+  mode: 'damage' | 'heal'
+): CombatState {
+  const next = normalizeState(cloneState(state));
+  const target = findCreature(next, targetId);
+  const delta = Math.max(0, amount);
+
+  if (mode === 'heal') {
+    target.hp = Math.min(target.maxHp, target.hp + delta);
+    if (target.hp > 0) {
+      removeConditionFromCreature(target, 'defeated');
+    }
+    addLog(next, 'damage', `${target.name} heals ${delta} HP.`);
+    return next;
+  }
+
+  target.hp = Math.max(0, target.hp - delta);
+  addLog(next, 'damage', `${target.name} takes ${delta} manual damage.`);
+  if (target.hp === 0 && !hasCondition(target, 'defeated')) {
+    applyConditionToCreature(target, createAppliedCondition('defeated'));
+    addLog(next, 'defeat', `${target.name} is defeated.`);
+  }
+
+  return next;
+}
+
+export function performAttackAction(
+  state: CombatState,
+  actionId: string,
+  targetId: string,
+  random: RandomSource = Math.random,
+  hooks: CombatHooks = {}
+): CombatState {
+  const next = ensureTurnState(normalizeState(cloneState(state)));
+  const attacker = getActiveCreature(next);
+  const target = findCreature(next, targetId);
+  const action = findAction(attacker, actionId, next);
+  const actionKind = getRulesKind(action);
+
+  if (actionKind !== 'meleeAttack' && actionKind !== 'rangedAttack' && !action.tags.includes('attack')) {
+    throw new Error(`${action.name} is not an attack action.`);
+  }
+
+  if (!isInActionRange(action, attacker.position, target.position)) {
+    addLog(next, 'system', `${target.name} is out of range for ${action.name}.`);
+    return next;
+  }
+
+  if ((actionKind === 'rangedAttack' || action.tags.includes('ranged')) && !hasLineOfSight(next, attacker.position, target.position)) {
+    addLog(next, 'system', `${attacker.name} does not have line of sight to ${target.name}.`);
+    return next;
+  }
+
+  if (!spendActionCost(next, attacker, action.actionCost)) {
+    return next;
+  }
+  if (!spendActionResources(next, attacker, action)) {
+    rollbackActionCost(next, attacker, action.actionCost);
+    return next;
+  }
+
+  hooks.beforeAttackRoll?.(next, { attacker, target, action });
+  let attackModifier = collectAttackRollModifiers(
+    next,
+    attacker,
+    target,
+    action,
+    getDistanceFeet(attacker.position, target.position)
+  );
+  if ((actionKind === 'rangedAttack' || action.tags.includes('ranged')) && getHostileCreaturesWithinReach(next, attacker).length > 0) {
+    attackModifier = mergeRollModifiers(attackModifier, {
+      disadvantage: true,
+      notes: ['hostile creature within 5 ft']
+    });
+  }
+  const rollMode = resolveRollMode(attackModifier);
+  const firstD20 = rollDice('1d20', random);
+  const secondD20 = rollMode === 'normal' ? undefined : rollDice('1d20', random);
+  const d20Total = chooseD20(firstD20.total, secondD20?.total, rollMode);
+  const naturalRoll = d20Total;
+  const attackBonus = getEffectiveAttackBonus(action, attacker, next);
+  const flatModifier = attackModifier.flatModifier ?? 0;
+  const attackTotal = d20Total + attackBonus + flatModifier;
+  const critical = naturalRoll === 20;
+  const naturalMiss = naturalRoll === 1;
+  const targetAc = getEffectiveAC(target, next);
+  const hit = naturalMiss ? false : critical ? true : attackModifier.autoFail ? false : attackModifier.autoSuccess ? true : attackTotal >= targetAc;
+
+  hooks.afterAttackRoll?.(next, { attacker, target, action, attackTotal });
+  addLog(
+    next,
+    'attack',
+    `${attacker.name} ${action.tags.includes('spell') || action.kind === 'spell' ? 'casts' : 'uses'} ${action.name} on ${target.name}: ${formatD20Roll(firstD20.total, secondD20?.total, rollMode)}${formatRollReasons(attackModifier.notes)} + ${attackBonus}${flatModifier ? ` ${formatSigned(flatModifier)}` : ''} = ${attackTotal} vs AC ${targetAc}. ${critical ? 'Critical hit.' : hit ? 'Hit.' : naturalMiss ? 'Natural 1 miss.' : 'Miss.'}`
+  );
+  consumeHelpAfterAttack(next, attacker, target);
+
+  if (hit && action.damage) {
+    spendActionResources(next, attacker, action, 'hit');
+    const damage = rollDamageDice(action.damage.dice, random, critical);
+    applyDamage(next, attacker.id, target.id, action, damage.total, hooks);
+    addLog(
+      next,
+      'damage',
+      `${target.name} takes ${damage.total} ${action.damage.type ?? 'damage'}${critical ? ' (critical)' : ''} (${damage.rolls.join(', ')} + ${damage.modifier}).`
+    );
+  }
+
+  return next;
+}
+
+export function performSavingThrowAction(
+  state: CombatState,
+  actionId: string,
+  targetIds: string[],
+  random: RandomSource = Math.random,
+  hooks: CombatHooks = {}
+): CombatState {
+  const next = ensureTurnState(normalizeState(cloneState(state)));
+  const source = getActiveCreature(next);
+  const action = findAction(source, actionId, next);
+  const actionKind = getRulesKind(action);
+  const effect = action.effects.find((candidate) => candidate.type === 'damage' && candidate.save);
+  const save = action.save ?? effect?.save;
+  const damageDefinition = action.damage ?? effect?.damage;
+
+  if (actionKind !== 'savingThrowEffect' || !save || !damageDefinition) {
+    throw new Error(`${action.name} is not a valid saving throw damage action.`);
+  }
+
+  if (!spendActionCost(next, source, action.actionCost)) {
+    return next;
+  }
+  if (!spendActionResources(next, source, action)) {
+    rollbackActionCost(next, source, action.actionCost);
+    return next;
+  }
+  if (action.tags.includes('spell') || action.kind === 'spell') {
+    addLog(next, 'action', `${source.name} casts ${action.name}.`);
+  }
+
+  targetIds.forEach((targetId) => {
+    const target = findCreature(next, targetId);
+    if (isDefeated(target)) {
+      return;
+    }
+
+    const saveRollModifier = collectSavingThrowModifiers(next, target, save.ability);
+    const rollMode = resolveRollMode(saveRollModifier);
+    const firstSaveRoll = rollDice('1d20', random);
+    const secondSaveRoll = rollMode === 'normal' ? undefined : rollDice('1d20', random);
+    const saveModifier = getEffectiveSaveBonus(target, save.ability, next);
+    const flatModifier = saveRollModifier.flatModifier ?? 0;
+    const d20Total = chooseD20(firstSaveRoll.total, secondSaveRoll?.total, rollMode);
+    const saveTotal = d20Total + saveModifier + flatModifier;
+    const success = saveRollModifier.autoFail ? false : saveRollModifier.autoSuccess ? true : saveTotal >= save.dc;
+    if (!success) {
+      spendActionResources(next, source, action, 'failedSave');
+    }
+    const damageRoll = rollDice(damageDefinition.dice, random);
+    const amount = success && save.halfDamageOnSuccess ? Math.floor(damageRoll.total / 2) : damageRoll.total;
+
+    addLog(
+      next,
+      'save',
+      `${target.name} rolls ${save.ability.toUpperCase()} save against ${action.name}: ${formatD20Roll(firstSaveRoll.total, secondSaveRoll?.total, rollMode)} + ${saveModifier}${flatModifier ? ` ${formatSigned(flatModifier)}` : ''} = ${saveTotal} vs DC ${save.dc}. ${success ? 'Success.' : 'Failure.'}`
+    );
+
+    applyDamage(next, source.id, target.id, action, amount, hooks);
+    addLog(
+      next,
+      'damage',
+      `${target.name} takes ${amount} ${damageDefinition.type ?? 'damage'} from ${action.name} (${damageRoll.rolls.join(', ')} + ${damageRoll.modifier}${success ? ', halved' : ''}).`
+    );
+  });
+
+  return next;
+}
+
+export function getTargetsInShape(
+  state: CombatState,
+  actionId: string,
+  origin: GridPosition,
+  direction?: CardinalDirection
+): Creature[] {
+  const source = getActiveCreature(state);
+  const action = findAction(source, actionId, state);
+  const squares = getActionShapeSquares(state, action, origin, direction);
+
+  return state.creatures.filter(
+    (creature) =>
+      creature.id !== source.id &&
+      !isDefeated(creature) &&
+      squares.some((square) => samePosition(square, creature.position))
+  );
+}
+
+export function getAttackDebugStats(
+  state: CombatState,
+  actionId: string,
+  targetId: string,
+  trials = 1000,
+  random: RandomSource = Math.random
+): AttackDebugStats {
+  const normalized = ensureTurnState(normalizeState(cloneState(state)));
+  const attacker = getActiveCreature(normalized);
+  const target = findCreature(normalized, targetId);
+  const action = findAction(attacker, actionId, normalized);
+  const attackModifier = collectAttackRollModifiers(
+    normalized,
+    attacker,
+    target,
+    action,
+    getDistanceFeet(attacker.position, target.position)
+  );
+  const rollMode = resolveRollMode(attackModifier);
+  const attackBonus = getEffectiveAttackBonus(action, attacker, normalized) + (attackModifier.flatModifier ?? 0);
+  let hits = 0;
+  let crits = 0;
+
+  for (let index = 0; index < trials; index += 1) {
+    const first = rollDice('1d20', random).total;
+    const second = rollMode === 'normal' ? undefined : rollDice('1d20', random).total;
+    const d20 = chooseD20(first, second, rollMode);
+    const result = getAttackRollResult(d20, attackBonus, target.ac);
+    if (result.hit) {
+      hits += 1;
+    }
+    if (result.critical) {
+      crits += 1;
+    }
+  }
+
+  return {
+    trials,
+    hits,
+    misses: trials - hits,
+    crits,
+    hitPercentage: trials > 0 ? (hits / trials) * 100 : 0,
+    expectedHitPercentage: getExpectedHitChance(attackBonus, target.ac, rollMode) * 100,
+    rollMode,
+    attackBonus,
+    targetAc: target.ac
+  };
+}
+
+export function getExpectedHitChance(attackBonus: number, targetAc: number, rollMode: RollMode = 'normal'): number {
+  const rolls: Array<[number, number | undefined]> = [];
+
+  for (let first = 1; first <= 20; first += 1) {
+    if (rollMode === 'normal') {
+      rolls.push([first, undefined]);
+    } else {
+      for (let second = 1; second <= 20; second += 1) {
+        rolls.push([first, second]);
+      }
+    }
+  }
+
+  const hits = rolls.filter(([first, second]) => {
+    const d20 = chooseD20(first, second, rollMode);
+    return getAttackRollResult(d20, attackBonus, targetAc).hit;
+  }).length;
+
+  return hits / rolls.length;
+}
+
+export function getActionShapeSquares(
+  state: CombatState,
+  action: ActionDefinition,
+  origin: GridPosition,
+  direction?: CardinalDirection
+): GridPosition[] {
+  return getShapeSquares(action.shape ?? { type: 'single' }, origin, state.grid, direction);
+}
+
+export function getActiveCreature(state: CombatState): Creature {
+  if (!state.activeCreatureId) {
+    throw new Error('No active creature. Roll initiative first.');
+  }
+
+  return findCreature(state, state.activeCreatureId);
+}
+
+export function hasActionAvailable(state: CombatState): boolean {
+  return !ensureTurnState(normalizeState(cloneState(state))).turnState.actionUsed;
+}
+
+export function applyCondition(
+  state: CombatState,
+  targetId: string,
+  conditionId: string,
+  options: {
+    sourceCreatureId?: string;
+    durationType?: ConditionDurationType;
+    remainingRounds?: number;
+    stackBehavior?: StackBehavior;
+    stackCount?: number;
+    intensity?: number;
+  } = {}
+): CombatState {
+  const next = normalizeState(cloneState(state));
+  const target = findCreature(next, targetId);
+  const applied = createAppliedCondition(conditionId, options);
+  const result = applyConditionToCreature(target, applied);
+  logConditionChange(next, target, applied, result);
+  return next;
+}
+
+export function removeCondition(state: CombatState, targetId: string, conditionId: string): CombatState {
+  const next = normalizeState(cloneState(state));
+  const target = findCreature(next, targetId);
+  if (removeConditionFromCreature(target, conditionId)) {
+    addLog(next, 'condition', `${getConditionDefinition(conditionId).name} removed from ${target.name}.`);
+  }
+
+  return next;
+}
+
+export function resetAllResources(state: CombatState, resetOn: 'turnStart' | 'shortRest' | 'longRest' | 'dawn' | 'manual' | 'never'): CombatState {
+  const next = normalizeState(cloneState(state));
+  next.creatures.forEach((creature) => resetResources(creature, resetOn));
+  addLog(next, 'system', `Resources reset: ${resetOn}.`);
+  return next;
+}
+
+export function findCreature(state: CombatState, creatureId: string): Creature {
+  const creature = state.creatures.find((candidate) => candidate.id === creatureId);
+  if (!creature) {
+    throw new Error(`Creature not found: ${creatureId}`);
+  }
+
+  return creature;
+}
+
+export function isDefeated(creature: Creature): boolean {
+  return creature.hp <= 0 || hasCondition(creature, 'defeated');
+}
+
+function applyDamage(
+  state: CombatState,
+  sourceId: string,
+  targetId: string,
+  action: ActionDefinition,
+  amount: number,
+  hooks: CombatHooks
+): void {
+  const source = findCreature(state, sourceId);
+  const target = findCreature(state, targetId);
+  const modifiedAmount = Math.max(0, applyBeforeDamageModifiers(state, source, target, action, amount));
+  hooks.beforeDamage?.(state, { source, target, action, amount: modifiedAmount });
+
+  target.hp = Math.max(0, target.hp - modifiedAmount);
+
+  runAfterDamageHooks(state, source, target, action, modifiedAmount);
+  hooks.afterDamage?.(state, { source, target, action, amount: modifiedAmount });
+  if (target.hp === 0 && !hasCondition(target, 'defeated')) {
+    applyConditionToCreature(target, createAppliedCondition('defeated'));
+    hooks.onCreatureDefeated?.(state, target);
+    addLog(state, 'defeat', `${target.name} is defeated.`);
+  }
+}
+
+function findAction(creature: Creature, actionId: string, state?: CombatState): ActionDefinition {
+  const actions = state ? getAvailableActions(creature, state) : creature.actions;
+  const action = actions.find((candidate) => candidate.id === actionId);
+  if (!action) {
+    throw new Error(`${creature.name} does not have action ${actionId}.`);
+  }
+
+  return action;
+}
+
+function getRulesKind(action: ActionDefinition) {
+  return action.type ?? action.kind;
+}
+
+function spendAction(state: CombatState, creature: Creature): boolean {
+  return spendActionCost(state, creature, 'action');
+}
+
+function spendActionCost(state: CombatState, creature: Creature, actionCost: ActionDefinition['actionCost']): boolean {
+  const resource = getResource(state, creature.id);
+
+  if (actionCost === 'free') {
+    return true;
+  }
+
+  if (actionCost === 'reaction') {
+    if (resource.reactionUsed) {
+      addLog(state, 'system', `${creature.name} has already used their reaction.`);
+      return false;
+    }
+
+    if (!canCreatureTakeReaction(state, creature)) {
+      addLog(state, 'system', `${creature.name} cannot take reactions because of a condition.`);
+      return false;
+    }
+
+    resource.reactionUsed = true;
+    syncActiveTurnState(state);
+    return true;
+  }
+
+  if (!canCreatureTakeAction(state, creature)) {
+    addLog(state, 'system', `${creature.name} cannot take actions because of a condition.`);
+    return false;
+  }
+
+  if (actionCost === 'bonusAction') {
+    if (resource.bonusActionUsed) {
+      addLog(state, 'system', `${creature.name} has already used their bonus action.`);
+      return false;
+    }
+
+    resource.bonusActionUsed = true;
+    syncActiveTurnState(state);
+    return true;
+  }
+
+  if (resource.actionUsed) {
+    addLog(state, 'system', `${creature.name} has already used their action this turn.`);
+    return false;
+  }
+
+  resource.actionUsed = true;
+  syncActiveTurnState(state);
+  return true;
+}
+
+function rollbackActionCost(state: CombatState, creature: Creature, actionCost: ActionDefinition['actionCost']): void {
+  const resource = getResource(state, creature.id);
+  if (actionCost === 'action') {
+    resource.actionUsed = false;
+  } else if (actionCost === 'bonusAction') {
+    resource.bonusActionUsed = false;
+  } else if (actionCost === 'reaction') {
+    resource.reactionUsed = false;
+  }
+  syncActiveTurnState(state);
+}
+
+function spendActionResources(
+  state: CombatState,
+  creature: Creature,
+  action: ActionDefinition,
+  consumeOn: 'use' | 'hit' | 'failedSave' | 'manual' = 'use'
+): boolean {
+  if (consumeOn === 'use' && !hasResourcesForAction(creature, action)) {
+    addLog(state, 'system', `${creature.name} cannot use ${action.name}. ${getUnavailableActionReason(creature, action)}`);
+    return false;
+  }
+
+  consumeActionResources(creature, action, consumeOn).forEach((message) => addLog(state, 'action', message));
+  return true;
+}
+
+function performFeatureGeneratedBasicAction(state: CombatState, creature: Creature, action: ActionDefinition): boolean {
+  if (!action.generatedByFeatureId) {
+    return false;
+  }
+
+  if (!spendActionCost(state, creature, action.actionCost)) {
+    return true;
+  }
+
+  if (!spendActionResources(state, creature, action)) {
+    rollbackActionCost(state, creature, action.actionCost);
+    return true;
+  }
+
+  if (action.baseActionName === 'Dash') {
+    const resource = getResource(state, creature.id);
+    resource.remainingMovement += getEffectiveSpeed(creature, state);
+    resource.movementRemaining = resource.remainingMovement;
+    syncActiveTurnState(state);
+    addLog(state, 'action', `${creature.name} uses ${action.name} and gains ${getEffectiveSpeed(creature, state)} feet of movement.`);
+    return true;
+  }
+
+  if (action.baseActionName === 'Disengage') {
+    const condition = createAppliedCondition('disengaged', {
+      sourceCreatureId: creature.id,
+      durationType: 'untilEndOfTargetTurn'
+    });
+    const result = applyConditionToCreature(creature, condition);
+    addLog(state, 'action', `${creature.name} uses ${action.name}.`);
+    logConditionChange(state, creature, condition, result);
+    return true;
+  }
+
+  if (action.baseActionName === 'Hide') {
+    const check = rollAbilityCheck(state, creature, 'dex', 'stealth', Math.random);
+    const condition = createAppliedCondition('hidden', {
+      sourceCreatureId: creature.id,
+      metadata: { stealthTotal: check.total }
+    });
+    const result = applyConditionToCreature(creature, condition);
+    addLog(state, 'action', `${creature.name} uses ${action.name}: Stealth ${check.rollText} = ${check.total}.`);
+    logConditionChange(state, creature, condition, result);
+    consumeHelpedAbilityCheck(state, creature);
+    return true;
+  }
+
+  addLog(state, 'action', `${creature.name} uses ${action.name}. ${action.description ?? ''}`);
+  return true;
+}
+
+function rollAbilityCheck(
+  state: CombatState,
+  creature: Creature,
+  ability: Ability,
+  skill: Skill | undefined,
+  random: RandomSource
+) {
+  const conditionModifier = collectAbilityCheckModifiers(state, creature, ability);
+  const rollMode = resolveRollMode(conditionModifier);
+  const first = rollDice('1d20', random);
+  const second = rollMode === 'normal' ? undefined : rollDice('1d20', random);
+  const d20 = chooseD20(first.total, second?.total, rollMode);
+  const modifier = skill ? getSkillModifier(creature, skill, ability) : abilityModifier(creature.abilityScores[ability]);
+  const flatModifier = conditionModifier.flatModifier ?? 0;
+  const total = conditionModifier.autoFail
+    ? Number.NEGATIVE_INFINITY
+    : conditionModifier.autoSuccess
+      ? Number.POSITIVE_INFINITY
+      : d20 + modifier + flatModifier;
+
+  return {
+    total,
+    rollText: `${formatD20Roll(first.total, second?.total, rollMode)} + ${modifier}${flatModifier ? ` ${formatSigned(flatModifier)}` : ''}`
+  };
+}
+
+function getSkillModifier(creature: Creature, skill: Skill, fallbackAbility: Ability): number {
+  return creature.skillBonuses?.[skill] ?? abilityModifier(creature.abilityScores[fallbackAbility]);
+}
+
+function isWithinMelee(attacker: Creature, target: Creature): boolean {
+  return getDistanceFeet(attacker.position, target.position) <= 5;
+}
+
+function getPushDestination(from: GridPosition, target: GridPosition): GridPosition {
+  const dx = Math.sign(target.x - from.x);
+  const dy = Math.sign(target.y - from.y);
+  return {
+    x: target.x + dx,
+    y: target.y + dy
+  };
+}
+
+function consumeHelpAfterAttack(state: CombatState, attacker: Creature, target: Creature): void {
+  if (removeConditionFromCreature(attacker, 'helped')) {
+    addLog(state, 'condition', `Help advantage consumed by ${attacker.name}.`);
+  }
+
+  const helpedTarget = target.conditions.find((condition) => condition.id === 'helpedTarget');
+  if (!helpedTarget?.sourceCreatureId) {
+    return;
+  }
+
+  const helper = state.creatures.find((creature) => creature.id === helpedTarget.sourceCreatureId);
+  if (helper && helper.team === attacker.team && helper.id !== attacker.id && removeConditionFromCreature(target, 'helpedTarget')) {
+    addLog(state, 'condition', `Help against ${target.name} consumed.`);
+  }
+}
+
+function consumeHelpedAbilityCheck(state: CombatState, creature: Creature): void {
+  if (removeConditionFromCreature(creature, 'helped')) {
+    addLog(state, 'condition', `Help advantage consumed by ${creature.name}.`);
+  }
+}
+
+function findNextLivingInitiativeIndex(state: CombatState): number {
+  for (let step = 1; step <= state.initiative.length; step += 1) {
+    const index = (state.turnIndex + step) % state.initiative.length;
+    const entry = state.initiative[index];
+    const creature = findCreature(state, entry.creatureId);
+    if (!isDefeated(creature)) {
+      return index;
+    }
+  }
+
+  return -1;
+}
+
+function createTurnState(creature?: Creature) {
+  const movement = creature ? getEffectiveSpeed(creature, undefined as never) : 0;
+  return {
+    creatureId: creature?.id,
+    remainingMovement: movement,
+    movementRemaining: movement,
+    actionUsed: false,
+    bonusActionUsed: false,
+    reactionUsed: false
+  };
+}
+
+function ensureTurnState(state: CombatState): CombatState {
+  state.turnResources = state.turnResources ?? {};
+  state.creatures.forEach((creature) => {
+    const existing = state.turnResources[creature.id];
+    state.turnResources[creature.id] = {
+      ...createTurnState(creature),
+      ...existing,
+      movementRemaining: existing?.movementRemaining ?? existing?.remainingMovement ?? creature.speed,
+      remainingMovement: existing?.remainingMovement ?? existing?.movementRemaining ?? creature.speed,
+      bonusActionUsed: existing?.bonusActionUsed ?? false,
+      reactionUsed: existing?.reactionUsed ?? false
+    };
+  });
+
+  if (!state.turnState) {
+    const creature = state.activeCreatureId ? findCreature(state, state.activeCreatureId) : undefined;
+    state.turnState = createTurnState(creature);
+  }
+
+  if (state.activeCreatureId && state.turnState.creatureId !== state.activeCreatureId) {
+    state.turnState = getResource(state, state.activeCreatureId);
+  }
+
+  return state;
+}
+
+function getResource(state: CombatState, creatureId: string) {
+  const creature = findCreature(state, creatureId);
+  state.turnResources = state.turnResources ?? {};
+  state.turnResources[creatureId] = state.turnResources[creatureId] ?? createTurnState(creature);
+  return state.turnResources[creatureId];
+}
+
+function syncActiveTurnState(state: CombatState): void {
+  if (state.activeCreatureId) {
+    state.turnState = getResource(state, state.activeCreatureId);
+  }
+}
+
+function findOpportunityAttackAction(creature: Creature): ActionDefinition | undefined {
+  return (
+    creature.actions.find((action) => action.tags.includes('opportunity')) ??
+    creature.actions.find((action) => action.tags.includes('melee') || action.type === 'meleeAttack' || action.kind === 'meleeAttack')
+  );
+}
+
+function formatD20Roll(first: number, second?: number, mode: 'normal' | 'advantage' | 'disadvantage' = 'normal'): string {
+  if (second === undefined) {
+    return `d20 ${first}`;
+  }
+
+  const kept = mode === 'advantage' ? Math.max(first, second) : Math.min(first, second);
+  return `d20 ${first}/${second} ${mode}, kept ${kept}`;
+}
+
+function formatRollReasons(notes: string[] | undefined): string {
+  return notes && notes.length > 0 ? ` (${notes.join(', ')})` : '';
+}
+
+function getAttackRollResult(d20: number, attackBonus: number, targetAc: number): { total: number; hit: boolean; critical: boolean } {
+  const total = d20 + attackBonus;
+  const critical = d20 === 20;
+  const naturalMiss = d20 === 1;
+  return {
+    total,
+    critical,
+    hit: naturalMiss ? false : critical ? true : total >= targetAc
+  };
+}
+
+function chooseD20(first: number, second: number | undefined, mode: 'normal' | 'advantage' | 'disadvantage'): number {
+  if (second === undefined || mode === 'normal') {
+    return first;
+  }
+
+  return mode === 'advantage' ? Math.max(first, second) : Math.min(first, second);
+}
+
+function formatSigned(value: number): string {
+  return value >= 0 ? `+ ${value}` : `- ${Math.abs(value)}`;
+}
+
+function normalizeState(state: CombatState): CombatState {
+  state.creatures = normalizeCreatures(state.creatures);
+  state.turnResources = state.turnResources ?? {};
+  state.creatures.forEach((creature) => {
+    const existing = state.turnResources[creature.id];
+    state.turnResources[creature.id] = {
+      ...createTurnState(creature),
+      ...existing,
+      remainingMovement: existing?.remainingMovement ?? existing?.movementRemaining ?? state.turnState?.remainingMovement ?? creature.speed,
+      movementRemaining: existing?.movementRemaining ?? existing?.remainingMovement ?? state.turnState?.remainingMovement ?? creature.speed,
+      actionUsed: existing?.actionUsed ?? (state.turnState?.creatureId === creature.id ? state.turnState.actionUsed : false),
+      bonusActionUsed: existing?.bonusActionUsed ?? false,
+      reactionUsed: existing?.reactionUsed ?? false
+    };
+  });
+  state.pendingReactions = state.pendingReactions ?? [];
+  if (!state.turnState) {
+    state.turnState = createTurnState(state.activeCreatureId ? findCreature(state, state.activeCreatureId) : undefined);
+  }
+  syncActiveTurnState(state);
+
+  return state;
+}
+
+function normalizeCreatures(creatures: Creature[]): Creature[] {
+  return creatures.map((creature) => ({
+    ...creature,
+    conditions: normalizeConditions(creature.conditions),
+    skillBonuses: creature.skillBonuses ?? {},
+    actions: creature.actions.map((action) => ({
+      ...action,
+      kind: action.kind ?? action.type ?? 'custom',
+      actionCost: action.actionCost ?? 'action',
+      tags: action.tags ?? [],
+      effects: action.effects ?? []
+    }))
+  }));
+}
+
+function logConditionChange(
+  state: CombatState,
+  creature: Creature,
+  condition: AppliedCondition,
+  result: 'applied' | 'refreshed' | 'stacked'
+): void {
+  const label = getConditionLabel(condition);
+  const verb = result === 'applied' ? 'applied to' : result === 'refreshed' ? 'refreshed on' : 'stacked on';
+  addLog(state, 'condition', `${label} ${verb} ${creature.name}.`);
+}
+
+function logExpiredConditions(state: CombatState, conditions: AppliedCondition[]): void {
+  conditions.forEach((condition) => {
+    addLog(state, 'condition', `${getConditionLabel(condition)} expired.`);
+  });
+}
+
+function addLog(state: CombatState, type: CombatLogEntry['type'], message: string): void {
+  state.log.unshift({
+    id: `${Date.now()}-${Math.random().toString(36).slice(2)}`,
+    round: state.round,
+    turn: state.turnIndex,
+    type,
+    message,
+    timestamp: new Date().toISOString()
+  });
+}
+
+function cloneState(state: CombatState): CombatState {
+  return JSON.parse(JSON.stringify(state)) as CombatState;
+}
