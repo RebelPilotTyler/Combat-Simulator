@@ -37,3 +37,15 @@ export function getConditionTag(condition: AppliedCondition): string {
 export function getConditionTags(conditions: AppliedCondition[]): string[] {
   return conditions.map(getConditionTag);
 }
+
+export function formatBaseEffectiveNumber(base: number, effective: number): string {
+  return base === effective ? `${base}` : `${base} / effective ${effective}`;
+}
+
+export function formatBaseEffectiveBonus(base: number, effective: number): string {
+  return base === effective ? formatSignedBonus(base) : `${formatSignedBonus(base)} / effective ${formatSignedBonus(effective)}`;
+}
+
+function formatSignedBonus(value: number): string {
+  return value >= 0 ? `+${value}` : `${value}`;
+}

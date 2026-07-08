@@ -103,7 +103,7 @@ const cracklingPulse: ActionDefinition = {
 
 const heavyClub: ActionDefinition = {
   id: 'heavy-club',
-  name: 'Heavy Club',
+  name: 'Moldy Maul',
   kind: 'meleeAttack',
   type: 'meleeAttack',
   actionCost: 'action',
@@ -132,6 +132,24 @@ const thornDart: ActionDefinition = {
   shape: { type: 'single' },
   effects: [],
   description: 'A simple ranged attack.'
+};
+
+const rotcapMultiattack: ActionDefinition = {
+  id: 'rotcap-multiattack',
+  name: 'Rotcap Multiattack',
+  kind: 'multiattack',
+  actionCost: 'action',
+  tags: ['attack', 'melee'],
+  range: 1,
+  effects: [],
+  description: 'Make two Moldy Maul attacks against the same target.',
+  multiattack: {
+    targetMode: 'sameTarget',
+    steps: [
+      { id: 'maul-1', name: 'Moldy Maul 1', actionId: 'heavy-club' },
+      { id: 'maul-2', name: 'Moldy Maul 2', actionId: 'heavy-club' }
+    ]
+  }
 };
 
 export const sampleCreatures: Creature[] = [
@@ -247,6 +265,7 @@ export const sampleCreatures: Creature[] = [
     conditions: [],
     actions: [
       heavyClub,
+      rotcapMultiattack,
       reactiveStrike,
       {
         id: 'once-per-day-slam',

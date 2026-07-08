@@ -19,6 +19,7 @@ import {
   performAttackAction,
   performBasicAction,
   performCreatureUtilityAction,
+  performMultiattackAction,
   performReadyAction,
   performSearchAction,
   performShoveAction,
@@ -32,10 +33,11 @@ import {
   type SearchMode,
   type ShoveOutcome
 } from './engine/combat';
-import { ALL_CONDITION_IDS, getConditionDefinition, getConditionLabel, normalizeConditions } from './engine/conditions';
-import { getAvailableActions, getEffectiveAC, getEffectiveSpeed, getUnavailableActionReason } from './engine/features';
+import { ALL_CONDITION_IDS, getConditionDefinition, getConditionLabel } from './engine/conditions';
+import { getAvailableActions, getEffectiveAC, getEffectiveAttackBonus, getEffectiveSpeed, getUnavailableActionReason } from './engine/features';
 import { getReachableMovementSquares } from './engine/movement';
-import { getConditionTags, getHpPercent } from './engine/presentation';
+import { formatBaseEffectiveBonus, formatBaseEffectiveNumber, getConditionTags, getHpPercent } from './engine/presentation';
+import { parseCombatStateJson, serializeCombatState } from './engine/serialization';
 import { positionKey, samePosition } from './engine/shapes';
 import type { Ability, ActionDefinition, CardinalDirection, CombatState, Creature, GridPosition, TurnState } from './engine/types';
 
@@ -61,8 +63,9 @@ export function App() {
   const [hpAmount, setHpAmount] = useState(5);
   const [attackDebugStats, setAttackDebugStats] = useState<ReturnType<typeof getAttackDebugStats> | undefined>();
   const [direction, setDirection] = useState<CardinalDirection>('east');
-  const [jsonText, setJsonText] = useState(() => JSON.stringify(createSampleEncounter(), null, 2));
+  const [jsonText, setJsonText] = useState(() => serializeCombatState(createSampleEncounter()));
   const [jsonError, setJsonError] = useState<string | undefined>();
+  const [multiattackTargets, setMultiattackTargets] = useState<Record<string, string>>({});
 
   const activeCreature = combat.activeCreatureId ? findCreature(combat, combat.activeCreatureId) : undefined;
   const selectedCreature = selectedCreatureId ? findCreature(combat, selectedCreatureId) : undefined;
@@ -97,6 +100,7 @@ export function App() {
   function resetTargeting(actionId?: string) {
     setSelectedActionId(actionId);
     setSelectedTargetId(undefined);
+    setMultiattackTargets({});
     setAreaOrigin(undefined);
     setSelectionMode(actionId ? 'target' : 'move');
   }
@@ -116,7 +120,7 @@ export function App() {
     if (creature) {
       setSelectedCreatureId(creature.id);
       setBasicTargetId(creature.id);
-      if (selectedAction && selectedAction.shape?.type === 'single') {
+      if (selectedAction && (selectedAction.shape?.type === 'single' || isMultiattackAction(selectedAction))) {
         setSelectedTargetId(creature.id);
         setAreaOrigin(creature.position);
       }
@@ -206,6 +210,16 @@ export function App() {
     }
 
     const rulesKind = selectedAction.type ?? selectedAction.kind;
+    if (rulesKind === 'multiattack') {
+      setCombat((current) =>
+        performMultiattackAction(current, selectedAction.id, {
+          targetId: selectedTargetId,
+          stepTargets: multiattackTargets
+        })
+      );
+      return;
+    }
+
     if (rulesKind === 'meleeAttack' || rulesKind === 'rangedAttack') {
       if (!selectedTargetId) {
         return;
@@ -230,32 +244,16 @@ export function App() {
   }
 
   function loadJson() {
-    try {
-      const parsed = JSON.parse(jsonText) as CombatState;
-      if (!Array.isArray(parsed.creatures) || !parsed.grid) {
-        throw new Error('JSON must look like a CombatState with creatures and grid.');
-      }
-
-      const normalized = {
-        ...parsed,
-        creatures: parsed.creatures.map((creature) => ({
-          ...creature,
-          conditions: normalizeConditions(creature.conditions),
-          resources: creature.resources ?? [],
-          features: creature.features ?? []
-        })),
-        turnState: parsed.turnState ?? { creatureId: parsed.activeCreatureId, remainingMovement: 0, actionUsed: false, bonusActionUsed: false, reactionUsed: false },
-        turnResources: parsed.turnResources ?? {},
-        pendingReactions: parsed.pendingReactions ?? []
-      };
-
-      setCombat(normalized);
-      setSelectedCreatureId(parsed.activeCreatureId ?? parsed.creatures[0]?.id);
-      resetTargeting();
-      setJsonError(undefined);
-    } catch (error) {
-      setJsonError(error instanceof Error ? error.message : 'Invalid JSON.');
+    const result = parseCombatStateJson(jsonText);
+    if (!result.ok || !result.state) {
+      setJsonError(result.error ?? 'Invalid combat JSON.');
+      return;
     }
+
+    setCombat(result.state);
+    setSelectedCreatureId(result.state.activeCreatureId ?? result.state.creatures[0]?.id);
+    resetTargeting();
+    setJsonError(undefined);
   }
 
   function loadSample() {
@@ -263,12 +261,41 @@ export function App() {
     setCombat(sample);
     setSelectedCreatureId(sample.creatures[0]?.id);
     resetTargeting();
-    setJsonText(JSON.stringify(sample, null, 2));
+    setJsonText(serializeCombatState(sample));
     setJsonError(undefined);
   }
 
   function exportCurrent() {
-    setJsonText(JSON.stringify(combat, null, 2));
+    setJsonText(serializeCombatState(combat));
+    setJsonError(undefined);
+  }
+
+  function downloadJson() {
+    const blob = new Blob([serializeCombatState(combat)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = `combat-state-${new Date().toISOString().slice(0, 10)}.json`;
+    link.click();
+    URL.revokeObjectURL(url);
+  }
+
+  async function uploadJson(file: File | undefined) {
+    if (!file) {
+      return;
+    }
+
+    const text = await file.text();
+    setJsonText(text);
+    const result = parseCombatStateJson(text);
+    if (!result.ok || !result.state) {
+      setJsonError(result.error ?? 'Invalid combat JSON.');
+      return;
+    }
+
+    setCombat(result.state);
+    setSelectedCreatureId(result.state.activeCreatureId ?? result.state.creatures[0]?.id);
+    resetTargeting();
     setJsonError(undefined);
   }
 
@@ -371,7 +398,7 @@ export function App() {
           <h2>Active Creature</h2>
           {activeCreature ? (
             <>
-              <CreatureSummary creature={activeCreature} />
+              <CreatureSummary creature={activeCreature} state={combat} />
               <div className="turn-state">
                 <span>Movement: {combat.turnState.remainingMovement} ft</span>
                 <span>Action used: {combat.turnState.actionUsed ? 'yes' : 'no'}</span>
@@ -484,8 +511,13 @@ export function App() {
                   <p>{describeAction(selectedAction)}</p>
                   {isAttackAction(selectedAction) && (
                     <div className="attack-debug">
-                      <span>Attack bonus: +{selectedAction.attackBonus ?? 0}</span>
-                      <span>Target AC: {selectedTarget?.ac ?? 'choose target'}</span>
+                      <span>Attack bonus: {formatBaseEffectiveBonus(selectedAction.attackBonus ?? 0, getEffectiveAttackBonus(selectedAction, activeCreature, combat))}</span>
+                      <span>
+                        Target AC:{' '}
+                        {selectedTarget
+                          ? formatBaseEffectiveNumber(selectedTarget.ac, getEffectiveAC(selectedTarget, combat))
+                          : 'choose target'}
+                      </span>
                       <span>
                         Expected hit: {selectedAttackDebug ? `${selectedAttackDebug.expectedHitPercentage.toFixed(1)}%` : 'choose target'}
                       </span>
@@ -507,6 +539,38 @@ export function App() {
                       )}
                     </div>
                   )}
+                  {isMultiattackAction(selectedAction) && (
+                    <div className="multiattack-targets">
+                      <strong>Multiattack steps</strong>
+                      {(selectedAction.multiattack?.steps ?? []).map((step) => (
+                        <label key={step.id}>
+                          {step.name}
+                          {selectedAction.multiattack?.targetMode === 'chooseEach' ? (
+                            <select
+                              value={multiattackTargets[step.id] ?? ''}
+                              onChange={(event) =>
+                                setMultiattackTargets((current) => ({
+                                  ...current,
+                                  [step.id]: event.target.value
+                                }))
+                              }
+                            >
+                              <option value="">None</option>
+                              {combat.creatures
+                                .filter((creature) => creature.id !== activeCreature.id && !isDefeated(creature))
+                                .map((creature) => (
+                                  <option key={creature.id} value={creature.id}>
+                                    {creature.name} AC {formatBaseEffectiveNumber(creature.ac, getEffectiveAC(creature, combat))}
+                                  </option>
+                                ))}
+                            </select>
+                          ) : (
+                            <span>{selectedTarget?.name ?? 'choose target below'}</span>
+                          )}
+                        </label>
+                      ))}
+                    </div>
+                  )}
                   {(selectedAction.shape?.type === 'line' || selectedAction.shape?.type === 'cone') && (
                     <div className="direction-buttons">
                       {directions.map((candidate) => (
@@ -520,21 +584,23 @@ export function App() {
                       ))}
                     </div>
                   )}
-                  <label>
-                    Target
-                    <select value={selectedTargetId ?? ''} onChange={(event) => setSelectedTargetId(event.target.value || undefined)}>
-                      <option value="">None</option>
-                      {combat.creatures
-                        .filter((creature) => creature.id !== activeCreature.id && !isDefeated(creature))
-                        .map((creature) => (
-                          <option key={creature.id} value={creature.id}>
-                            {creature.name}
-                          </option>
-                        ))}
-                    </select>
-                  </label>
+                  {(!isMultiattackAction(selectedAction) || selectedAction.multiattack?.targetMode !== 'chooseEach') && (
+                    <label>
+                      Target
+                      <select value={selectedTargetId ?? ''} onChange={(event) => setSelectedTargetId(event.target.value || undefined)}>
+                        <option value="">None</option>
+                        {combat.creatures
+                          .filter((creature) => creature.id !== activeCreature.id && !isDefeated(creature))
+                          .map((creature) => (
+                            <option key={creature.id} value={creature.id}>
+                              {creature.name} AC {formatBaseEffectiveNumber(creature.ac, getEffectiveAC(creature, combat))}
+                            </option>
+                          ))}
+                      </select>
+                    </label>
+                  )}
                   <p>Area targets: {targetsInArea.map((target) => target.name).join(', ') || 'none'}</p>
-                  <button disabled={combat.turnState.actionUsed} onClick={applySelectedAction}>
+                  <button disabled={Boolean(getActionDisabledReason(activeCreature, selectedAction, combat.turnState))} onClick={applySelectedAction}>
                     Apply Action
                   </button>
                 </div>
@@ -545,7 +611,7 @@ export function App() {
           )}
 
           <h2>Selected</h2>
-          {selectedCreature ? <CreatureSummary creature={selectedCreature} /> : <p>No creature selected.</p>}
+          {selectedCreature ? <CreatureSummary creature={selectedCreature} state={combat} /> : <p>No creature selected.</p>}
           {selectedCreature?.id === combat.activeCreatureId && (
             <div className="turn-state">
               <span>Remaining movement: {combat.turnState.remainingMovement} ft</span>
@@ -626,6 +692,11 @@ export function App() {
           <div className="json-actions">
             <button onClick={exportCurrent}>Export Current</button>
             <button onClick={loadJson}>Load JSON</button>
+            <button onClick={downloadJson}>Download JSON</button>
+            <label>
+              Upload JSON
+              <input accept="application/json,.json" type="file" onChange={(event) => void uploadJson(event.target.files?.[0])} />
+            </label>
           </div>
           {jsonError && <p className="error">{jsonError}</p>}
           <textarea value={jsonText} onChange={(event) => setJsonText(event.target.value)} spellCheck={false} />
@@ -635,7 +706,10 @@ export function App() {
   );
 }
 
-function CreatureSummary({ creature }: { creature: Creature }) {
+function CreatureSummary({ creature, state }: { creature: Creature; state: CombatState }) {
+  const effectiveAc = getEffectiveAC(creature, state);
+  const effectiveSpeed = getEffectiveSpeed(creature, state);
+
   return (
     <div className="creature-summary">
       <strong>{creature.name}</strong>
@@ -644,8 +718,8 @@ function CreatureSummary({ creature }: { creature: Creature }) {
       <span>
         HP {creature.hp}/{creature.maxHp}
       </span>
-      <span>AC {creature.ac} effective {getEffectiveAC(creature, undefined as never)}</span>
-      <span>Speed {creature.speed} effective {getEffectiveSpeed(creature, undefined as never)}</span>
+      <span>AC {formatBaseEffectiveNumber(creature.ac, effectiveAc)}</span>
+      <span>Speed {formatBaseEffectiveNumber(creature.speed, effectiveSpeed)}</span>
       {(creature.resources ?? []).length > 0 && (
         <span>Resources: {(creature.resources ?? []).map((resource) => `${resource.name} ${resource.current}/${resource.max}`).join(', ')}</span>
       )}
@@ -662,6 +736,7 @@ function CreatureSummary({ creature }: { creature: Creature }) {
     </div>
   );
 }
+
 
 function CreatureActionGroups({
   activeCreature,
@@ -709,6 +784,7 @@ function CreatureActionGroups({
                     onClick={() => onSelect(action)}
                   >
                     {action.tags.includes('spell') || action.kind === 'spell' ? '[Spell] ' : ''}
+                    {action.kind === 'multiattack' ? '[Multi] ' : ''}
                     {action.generatedByFeatureId ? '[Feature] ' : ''}
                     {action.name}
                     {isAttackAction(action) ? ` (+${action.attackBonus ?? 0})` : ''}
@@ -730,17 +806,26 @@ function describeAction(action: ActionDefinition): string {
     return `${rulesKind} - ${action.damage?.dice ?? action.effects[0]?.damage?.dice ?? 'no damage'} - ${save?.ability.toUpperCase() ?? '?'} DC ${save?.dc ?? '?'}`;
   }
 
+  if (rulesKind === 'multiattack') {
+    const steps = action.multiattack?.steps.map((step) => step.name).join(', ') || 'no steps';
+    return `multiattack - ${steps}`;
+  }
+
   return `${rulesKind} - +${action.attackBonus ?? 0} to hit - ${action.damage?.dice ?? 'no damage'} - range ${action.range}`;
 }
 
 function isAttackAction(action: ActionDefinition): boolean {
   const rulesKind = action.type ?? action.kind;
-  return rulesKind === 'meleeAttack' || rulesKind === 'rangedAttack' || action.tags.includes('attack');
+  return rulesKind !== 'multiattack' && (rulesKind === 'meleeAttack' || rulesKind === 'rangedAttack' || action.tags.includes('attack'));
 }
 
 function isUtilityAction(action: ActionDefinition): boolean {
   const rulesKind = action.type ?? action.kind;
-  return rulesKind !== 'meleeAttack' && rulesKind !== 'rangedAttack' && rulesKind !== 'savingThrowEffect';
+  return rulesKind !== 'meleeAttack' && rulesKind !== 'rangedAttack' && rulesKind !== 'savingThrowEffect' && rulesKind !== 'multiattack';
+}
+
+function isMultiattackAction(action: ActionDefinition): boolean {
+  return action.kind === 'multiattack';
 }
 
 function isActionCostSpent(turnState: TurnState, actionCost: ActionDefinition['actionCost']): boolean {

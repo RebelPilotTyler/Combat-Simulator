@@ -18,7 +18,7 @@ export type RollMode = 'normal' | 'advantage' | 'disadvantage';
 
 export type Skill = 'athletics' | 'acrobatics' | 'stealth' | 'perception' | 'investigation';
 
-export type ActionKind = 'meleeAttack' | 'rangedAttack' | 'savingThrowEffect' | 'basicAction' | 'spell' | 'custom';
+export type ActionKind = 'meleeAttack' | 'rangedAttack' | 'savingThrowEffect' | 'basicAction' | 'spell' | 'multiattack' | 'custom';
 
 export type ActionCost = 'action' | 'bonusAction' | 'reaction' | 'free';
 
@@ -236,6 +236,15 @@ export interface FeatureDefinition {
 
 export type ActionType = 'meleeAttack' | 'rangedAttack' | 'savingThrowEffect';
 
+export interface MultiattackStep {
+  id: string;
+  name: string;
+  actionId?: string;
+  inlineAction?: ActionDefinition;
+  targetId?: string;
+  required?: boolean;
+}
+
 export interface ActionDefinition {
   id: string;
   name: string;
@@ -256,6 +265,10 @@ export interface ActionDefinition {
   resourceCosts?: ResourceCost[];
   generatedByFeatureId?: string;
   baseActionName?: string;
+  multiattack?: {
+    steps: MultiattackStep[];
+    targetMode?: 'sameTarget' | 'chooseEach' | 'fixed';
+  };
 }
 
 export interface ReadiedAction {

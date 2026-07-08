@@ -1,0 +1,966 @@
+{
+  "creatures": [
+    {
+      "id": "sable-warden",
+      "name": "Sable Warden",
+      "team": "players",
+      "hp": 32,
+      "maxHp": 32,
+      "ac": 16,
+      "abilityScores": {
+        "str": 16,
+        "dex": 10,
+        "con": 15,
+        "int": 9,
+        "wis": 12,
+        "cha": 11
+      },
+      "proficiencyBonus": 2,
+      "speed": 30,
+      "position": {
+        "x": 1,
+        "y": 4
+      },
+      "conditions": [],
+      "actions": [
+        {
+          "id": "warden-spear",
+          "name": "Warden Spear",
+          "kind": "meleeAttack",
+          "type": "meleeAttack",
+          "actionCost": "action",
+          "tags": ["attack", "melee"],
+          "range": 1,
+          "reach": 5,
+          "attackBonus": 5,
+          "damage": {
+            "dice": "1d8+3",
+            "type": "piercing"
+          },
+          "shape": {
+            "type": "single"
+          },
+          "effects": [],
+          "description": "A steady melee weapon attack."
+        },
+        {
+          "id": "shield-bash",
+          "name": "Shield Bash",
+          "kind": "meleeAttack",
+          "type": "meleeAttack",
+          "actionCost": "bonusAction",
+          "tags": ["attack", "melee", "bonus"],
+          "range": 1,
+          "reach": 5,
+          "attackBonus": 5,
+          "damage": {
+            "dice": "1d4+3",
+            "type": "bludgeoning"
+          },
+          "shape": {
+            "type": "single"
+          },
+          "effects": [],
+          "description": "A bonus action shield strike."
+        },
+        {
+          "id": "guarding-riposte",
+          "name": "Guarding Riposte",
+          "kind": "meleeAttack",
+          "type": "meleeAttack",
+          "actionCost": "reaction",
+          "tags": ["attack", "melee", "reaction", "opportunity"],
+          "range": 1,
+          "reach": 5,
+          "attackBonus": 5,
+          "damage": {
+            "dice": "1d6+3",
+            "type": "piercing"
+          },
+          "shape": {
+            "type": "single"
+          },
+          "effects": [],
+          "description": "A reaction melee attack for opportunity attacks."
+        }
+      ],
+      "resources": [
+        {
+          "id": "warden-grit",
+          "name": "Warden Grit",
+          "current": 2,
+          "max": 2,
+          "resetOn": "shortRest",
+          "display": {
+            "showOnCreaturePanel": true,
+            "mode": "pips"
+          }
+        }
+      ],
+      "features": [
+        {
+          "id": "tower-shield",
+          "name": "Tower Shield",
+          "description": "+1 AC while braced behind a heavy shield.",
+          "enabled": true,
+          "source": "encounter",
+          "modifiers": {
+            "ac": 1
+          }
+        }
+      ],
+      "skillBonuses": {
+        "athletics": 5,
+        "perception": 3
+      }
+    },
+    {
+      "id": "lyra-mirewitch",
+      "name": "Lyra Mirewitch",
+      "team": "players",
+      "hp": 20,
+      "maxHp": 20,
+      "ac": 13,
+      "abilityScores": {
+        "str": 8,
+        "dex": 14,
+        "con": 12,
+        "int": 15,
+        "wis": 13,
+        "cha": 12
+      },
+      "proficiencyBonus": 2,
+      "speed": 30,
+      "position": {
+        "x": 1,
+        "y": 6
+      },
+      "conditions": [],
+      "actions": [
+        {
+          "id": "mire-bolt",
+          "name": "Mire Bolt",
+          "kind": "spell",
+          "type": "rangedAttack",
+          "actionCost": "action",
+          "tags": ["attack", "spell", "ranged"],
+          "range": 6,
+          "normalRange": 30,
+          "longRange": 120,
+          "attackBonus": 5,
+          "damage": {
+            "dice": "1d10+2",
+            "type": "acid"
+          },
+          "shape": {
+            "type": "single"
+          },
+          "effects": [],
+          "description": "A ranged spell attack of hissing green energy."
+        },
+        {
+          "id": "fen-burst",
+          "name": "Fen Burst",
+          "kind": "spell",
+          "type": "savingThrowEffect",
+          "actionCost": "action",
+          "tags": ["spell", "area"],
+          "range": 6,
+          "damage": {
+            "dice": "2d6",
+            "type": "poison"
+          },
+          "save": {
+            "ability": "con",
+            "dc": 13,
+            "halfDamageOnSuccess": true
+          },
+          "shape": {
+            "type": "radius",
+            "radius": 1
+          },
+          "effects": [
+            {
+              "id": "fen-burst-damage",
+              "name": "Fen Burst Damage",
+              "type": "damage",
+              "damage": {
+                "dice": "2d6",
+                "type": "poison"
+              },
+              "save": {
+                "ability": "con",
+                "dc": 13,
+                "halfDamageOnSuccess": true
+              }
+            }
+          ],
+          "description": "A small poison burst. Apply Poisoned manually if you want the condition rider."
+        },
+        {
+          "id": "witch-step",
+          "name": "Witch Step",
+          "kind": "custom",
+          "actionCost": "bonusAction",
+          "tags": ["movement", "bonus"],
+          "range": 0,
+          "normalRange": 10,
+          "effects": [],
+          "description": "Gain 10 feet of extra movement."
+        }
+      ],
+      "resources": [
+        {
+          "id": "spell-slot-1",
+          "name": "Spell Slots L1",
+          "current": 3,
+          "max": 3,
+          "resetOn": "longRest",
+          "display": {
+            "showOnCreaturePanel": true,
+            "mode": "pips"
+          }
+        },
+        {
+          "id": "witch-focus",
+          "name": "Witch Focus",
+          "current": 2,
+          "max": 2,
+          "resetOn": "shortRest",
+          "display": {
+            "showOnCreaturePanel": true,
+            "mode": "number"
+          }
+        }
+      ],
+      "features": [
+        {
+          "id": "quickened-hex",
+          "name": "Quickened Hex",
+          "description": "Spend focus to cast Mire Bolt as a bonus action placeholder.",
+          "enabled": true,
+          "source": "encounter",
+          "alternateActions": [
+            {
+              "id": "quickened-mire-bolt",
+              "name": "Quickened Mire Bolt",
+              "baseActionName": "Cast a Spell",
+              "actionCost": "bonusAction",
+              "tags": ["spell", "bonus", "placeholder"],
+              "resourceCosts": [
+                {
+                  "resourceId": "witch-focus",
+                  "amount": 2,
+                  "consumeOn": "use"
+                }
+              ],
+              "description": "Placeholder bonus-action spell conversion."
+            }
+          ]
+        }
+      ],
+      "skillBonuses": {
+        "stealth": 4,
+        "investigation": 5,
+        "perception": 3
+      }
+    },
+    {
+      "id": "pip-quickknife",
+      "name": "Pip Quickknife",
+      "team": "players",
+      "hp": 22,
+      "maxHp": 22,
+      "ac": 14,
+      "abilityScores": {
+        "str": 9,
+        "dex": 16,
+        "con": 12,
+        "int": 12,
+        "wis": 12,
+        "cha": 11
+      },
+      "proficiencyBonus": 2,
+      "speed": 30,
+      "position": {
+        "x": 0,
+        "y": 5
+      },
+      "conditions": [],
+      "actions": [
+        {
+          "id": "quickknife-stab",
+          "name": "Quickknife Stab",
+          "kind": "meleeAttack",
+          "type": "meleeAttack",
+          "actionCost": "action",
+          "tags": ["attack", "melee"],
+          "range": 1,
+          "reach": 5,
+          "attackBonus": 5,
+          "damage": {
+            "dice": "1d6+3",
+            "type": "piercing"
+          },
+          "shape": {
+            "type": "single"
+          },
+          "effects": [],
+          "description": "A fast dagger strike."
+        },
+        {
+          "id": "throwing-knife",
+          "name": "Throwing Knife",
+          "kind": "rangedAttack",
+          "type": "rangedAttack",
+          "actionCost": "action",
+          "tags": ["attack", "ranged"],
+          "range": 4,
+          "normalRange": 20,
+          "longRange": 60,
+          "attackBonus": 5,
+          "damage": {
+            "dice": "1d4+3",
+            "type": "piercing"
+          },
+          "shape": {
+            "type": "single"
+          },
+          "effects": [],
+          "description": "A thrown dagger."
+        },
+        {
+          "id": "offhand-dagger",
+          "name": "Offhand Dagger",
+          "kind": "meleeAttack",
+          "type": "meleeAttack",
+          "actionCost": "bonusAction",
+          "tags": ["attack", "melee", "bonus"],
+          "range": 1,
+          "reach": 5,
+          "attackBonus": 5,
+          "damage": {
+            "dice": "1d4",
+            "type": "piercing"
+          },
+          "shape": {
+            "type": "single"
+          },
+          "effects": [],
+          "description": "A light offhand strike."
+        }
+      ],
+      "resources": [
+        {
+          "id": "luck",
+          "name": "Luck",
+          "current": 1,
+          "max": 1,
+          "resetOn": "longRest",
+          "display": {
+            "showOnCreaturePanel": true,
+            "mode": "pips"
+          }
+        }
+      ],
+      "features": [
+        {
+          "id": "cunning-action",
+          "name": "Cunning Action",
+          "description": "Dash, Disengage, and Hide can be used as bonus actions.",
+          "enabled": true,
+          "source": "encounter",
+          "alternateActions": [
+            {
+              "id": "cunning-action-dash",
+              "name": "Cunning Action: Dash",
+              "baseActionName": "Dash",
+              "actionCost": "bonusAction",
+              "tags": ["movement", "bonus"],
+              "description": "Dash as a bonus action."
+            },
+            {
+              "id": "cunning-action-disengage",
+              "name": "Cunning Action: Disengage",
+              "baseActionName": "Disengage",
+              "actionCost": "bonusAction",
+              "tags": ["bonus"],
+              "description": "Disengage as a bonus action."
+            },
+            {
+              "id": "cunning-action-hide",
+              "name": "Cunning Action: Hide",
+              "baseActionName": "Hide",
+              "actionCost": "bonusAction",
+              "tags": ["bonus"],
+              "description": "Hide as a bonus action."
+            }
+          ]
+        },
+        {
+          "id": "light-footed",
+          "name": "Light Footed",
+          "description": "+5 ft speed.",
+          "enabled": true,
+          "source": "encounter",
+          "modifiers": {
+            "speed": 5
+          }
+        }
+      ],
+      "skillBonuses": {
+        "acrobatics": 5,
+        "stealth": 5,
+        "perception": 3
+      }
+    },
+    {
+      "id": "rotcap-brute",
+      "name": "Rotcap Brute",
+      "team": "enemies",
+      "hp": 34,
+      "maxHp": 34,
+      "ac": 13,
+      "abilityScores": {
+        "str": 16,
+        "dex": 9,
+        "con": 15,
+        "int": 7,
+        "wis": 10,
+        "cha": 8
+      },
+      "proficiencyBonus": 2,
+      "speed": 25,
+      "position": {
+        "x": 8,
+        "y": 4
+      },
+      "conditions": [],
+      "actions": [
+        {
+          "id": "moldy-maul",
+          "name": "Moldy Maul",
+          "kind": "meleeAttack",
+          "type": "meleeAttack",
+          "actionCost": "action",
+          "tags": ["attack", "melee"],
+          "range": 1,
+          "reach": 5,
+          "attackBonus": 5,
+          "damage": {
+            "dice": "1d10+3",
+            "type": "bludgeoning"
+          },
+          "shape": {
+            "type": "single"
+          },
+          "effects": [],
+          "description": "A heavy fungal club attack."
+        },
+        {
+          "id": "brute-sweep",
+          "name": "Brute Sweep",
+          "kind": "meleeAttack",
+          "type": "meleeAttack",
+          "actionCost": "action",
+          "tags": ["attack", "melee"],
+          "range": 1,
+          "reach": 5,
+          "attackBonus": 5,
+          "damage": {
+            "dice": "2d6+3",
+            "type": "bludgeoning"
+          },
+          "shape": {
+            "type": "single"
+          },
+          "effects": [],
+          "resourceCosts": [
+            {
+              "resourceId": "brute-sweep",
+              "amount": 1,
+              "consumeOn": "use"
+            }
+          ],
+          "description": "A limited-use heavy swing."
+        },
+        {
+          "id": "maul-reaction",
+          "name": "Maul Reaction",
+          "kind": "meleeAttack",
+          "type": "meleeAttack",
+          "actionCost": "reaction",
+          "tags": ["attack", "melee", "reaction", "opportunity"],
+          "range": 1,
+          "reach": 5,
+          "attackBonus": 5,
+          "damage": {
+            "dice": "1d8+3",
+            "type": "bludgeoning"
+          },
+          "shape": {
+            "type": "single"
+          },
+          "effects": [],
+          "description": "A reaction attack for opportunity attacks."
+        }
+      ],
+      "resources": [
+        {
+          "id": "brute-sweep",
+          "name": "Brute Sweep",
+          "current": 1,
+          "max": 1,
+          "resetOn": "shortRest",
+          "display": {
+            "showOnCreaturePanel": true,
+            "mode": "pips"
+          }
+        }
+      ],
+      "features": [
+        {
+          "id": "fungal-hide",
+          "name": "Fungal Hide",
+          "description": "+1 AC from thick fungal plates.",
+          "enabled": true,
+          "source": "encounter",
+          "modifiers": {
+            "ac": 1
+          }
+        }
+      ],
+      "skillBonuses": {
+        "athletics": 5
+      }
+    },
+    {
+      "id": "glasswing-archer",
+      "name": "Glasswing Archer",
+      "team": "enemies",
+      "hp": 18,
+      "maxHp": 18,
+      "ac": 14,
+      "abilityScores": {
+        "str": 9,
+        "dex": 16,
+        "con": 11,
+        "int": 10,
+        "wis": 12,
+        "cha": 8
+      },
+      "proficiencyBonus": 2,
+      "speed": 35,
+      "position": {
+        "x": 9,
+        "y": 2
+      },
+      "conditions": [],
+      "actions": [
+        {
+          "id": "glass-arrow",
+          "name": "Glass Arrow",
+          "kind": "rangedAttack",
+          "type": "rangedAttack",
+          "actionCost": "action",
+          "tags": ["attack", "ranged"],
+          "range": 8,
+          "normalRange": 40,
+          "longRange": 120,
+          "attackBonus": 5,
+          "damage": {
+            "dice": "1d8+3",
+            "type": "piercing"
+          },
+          "shape": {
+            "type": "single"
+          },
+          "effects": [],
+          "description": "A sharp ranged attack."
+        },
+        {
+          "id": "wing-hop",
+          "name": "Wing Hop",
+          "kind": "custom",
+          "actionCost": "bonusAction",
+          "tags": ["movement", "bonus"],
+          "range": 0,
+          "normalRange": 10,
+          "effects": [],
+          "description": "Gain 10 feet of extra movement."
+        }
+      ],
+      "resources": [
+        {
+          "id": "glass-shot",
+          "name": "Glass Shot",
+          "current": 1,
+          "max": 1,
+          "resetOn": "shortRest",
+          "display": {
+            "showOnCreaturePanel": true,
+            "mode": "pips"
+          }
+        }
+      ],
+      "features": [
+        {
+          "id": "skirmisher",
+          "name": "Skirmisher",
+          "description": "Dash, Disengage, and Hide can be used as bonus actions.",
+          "enabled": true,
+          "source": "encounter",
+          "alternateActions": [
+            {
+              "id": "skirmisher-dash",
+              "name": "Skirmisher: Dash",
+              "baseActionName": "Dash",
+              "actionCost": "bonusAction",
+              "tags": ["movement", "bonus"],
+              "description": "Dash as a bonus action."
+            },
+            {
+              "id": "skirmisher-disengage",
+              "name": "Skirmisher: Disengage",
+              "baseActionName": "Disengage",
+              "actionCost": "bonusAction",
+              "tags": ["bonus"],
+              "description": "Disengage as a bonus action."
+            },
+            {
+              "id": "skirmisher-hide",
+              "name": "Skirmisher: Hide",
+              "baseActionName": "Hide",
+              "actionCost": "bonusAction",
+              "tags": ["bonus"],
+              "description": "Hide as a bonus action."
+            }
+          ]
+        }
+      ],
+      "skillBonuses": {
+        "acrobatics": 5,
+        "stealth": 5,
+        "perception": 3
+      }
+    },
+    {
+      "id": "bog-hexer",
+      "name": "Bog Hexer",
+      "team": "enemies",
+      "hp": 21,
+      "maxHp": 21,
+      "ac": 12,
+      "abilityScores": {
+        "str": 8,
+        "dex": 12,
+        "con": 13,
+        "int": 14,
+        "wis": 14,
+        "cha": 10
+      },
+      "proficiencyBonus": 2,
+      "speed": 30,
+      "position": {
+        "x": 8,
+        "y": 6
+      },
+      "conditions": [],
+      "actions": [
+        {
+          "id": "bog-curse",
+          "name": "Bog Curse",
+          "kind": "spell",
+          "type": "rangedAttack",
+          "actionCost": "action",
+          "tags": ["attack", "spell", "ranged"],
+          "range": 6,
+          "normalRange": 30,
+          "longRange": 90,
+          "attackBonus": 4,
+          "damage": {
+            "dice": "1d8+2",
+            "type": "necrotic"
+          },
+          "shape": {
+            "type": "single"
+          },
+          "effects": [],
+          "description": "A ranged spell attack."
+        },
+        {
+          "id": "sickening-cloud",
+          "name": "Sickening Cloud",
+          "kind": "spell",
+          "type": "savingThrowEffect",
+          "actionCost": "action",
+          "tags": ["spell", "area"],
+          "range": 6,
+          "damage": {
+            "dice": "2d6",
+            "type": "poison"
+          },
+          "save": {
+            "ability": "con",
+            "dc": 13,
+            "halfDamageOnSuccess": true
+          },
+          "shape": {
+            "type": "radius",
+            "radius": 1
+          },
+          "effects": [
+            {
+              "id": "sickening-cloud-damage",
+              "name": "Sickening Cloud Damage",
+              "type": "damage",
+              "damage": {
+                "dice": "2d6",
+                "type": "poison"
+              },
+              "save": {
+                "ability": "con",
+                "dc": 13,
+                "halfDamageOnSuccess": true
+              }
+            }
+          ],
+          "resourceCosts": [
+            {
+              "resourceId": "hexer-spell-slot-1",
+              "amount": 1,
+              "consumeOn": "use"
+            }
+          ],
+          "description": "A poison cloud. Apply Poisoned manually if you want it to linger."
+        }
+      ],
+      "resources": [
+        {
+          "id": "hexer-spell-slot-1",
+          "name": "Spell Slots L1",
+          "current": 2,
+          "max": 2,
+          "resetOn": "longRest",
+          "display": {
+            "showOnCreaturePanel": true,
+            "mode": "pips"
+          }
+        }
+      ],
+      "features": [
+        {
+          "id": "bog-ritualist",
+          "name": "Bog Ritualist",
+          "description": "+1 spell attack bonus from ritual focus.",
+          "enabled": true,
+          "source": "encounter",
+          "modifiers": {
+            "attackBonus": 1
+          }
+        }
+      ],
+      "skillBonuses": {
+        "investigation": 4,
+        "perception": 4
+      }
+    },
+    {
+      "id": "mudbound-hound",
+      "name": "Mudbound Hound",
+      "team": "enemies",
+      "hp": 16,
+      "maxHp": 16,
+      "ac": 13,
+      "abilityScores": {
+        "str": 14,
+        "dex": 14,
+        "con": 12,
+        "int": 4,
+        "wis": 12,
+        "cha": 6
+      },
+      "proficiencyBonus": 2,
+      "speed": 40,
+      "position": {
+        "x": 7,
+        "y": 7
+      },
+      "conditions": [],
+      "actions": [
+        {
+          "id": "mud-bite",
+          "name": "Mud Bite",
+          "kind": "meleeAttack",
+          "type": "meleeAttack",
+          "actionCost": "action",
+          "tags": ["attack", "melee"],
+          "range": 1,
+          "reach": 5,
+          "attackBonus": 4,
+          "damage": {
+            "dice": "1d6+2",
+            "type": "piercing"
+          },
+          "shape": {
+            "type": "single"
+          },
+          "effects": [],
+          "description": "A snapping bite."
+        },
+        {
+          "id": "hound-snap",
+          "name": "Hound Snap",
+          "kind": "meleeAttack",
+          "type": "meleeAttack",
+          "actionCost": "reaction",
+          "tags": ["attack", "melee", "reaction", "opportunity"],
+          "range": 1,
+          "reach": 5,
+          "attackBonus": 4,
+          "damage": {
+            "dice": "1d4+2",
+            "type": "piercing"
+          },
+          "shape": {
+            "type": "single"
+          },
+          "effects": [],
+          "description": "A reaction bite for opportunity attacks."
+        },
+        {
+          "id": "mud-sprint",
+          "name": "Mud Sprint",
+          "kind": "custom",
+          "actionCost": "bonusAction",
+          "tags": ["movement", "bonus"],
+          "range": 0,
+          "normalRange": 10,
+          "effects": [],
+          "description": "Gain 10 feet of extra movement."
+        }
+      ],
+      "resources": [],
+      "features": [
+        {
+          "id": "pack-hunter",
+          "name": "Pack Hunter",
+          "description": "+1 attack bonus from pack instincts.",
+          "enabled": true,
+          "source": "encounter",
+          "modifiers": {
+            "attackBonus": 1
+          }
+        }
+      ],
+      "skillBonuses": {
+        "athletics": 4,
+        "perception": 4
+      }
+    }
+  ],
+  "grid": {
+    "width": 10,
+    "height": 10,
+    "blocked": [
+      {
+        "x": 4,
+        "y": 3
+      },
+      {
+        "x": 4,
+        "y": 4
+      },
+      {
+        "x": 4,
+        "y": 5
+      },
+      {
+        "x": 5,
+        "y": 5
+      },
+      {
+        "x": 6,
+        "y": 5
+      },
+      {
+        "x": 5,
+        "y": 1
+      },
+      {
+        "x": 5,
+        "y": 2
+      }
+    ]
+  },
+  "initiative": [],
+  "round": 0,
+  "turnIndex": 0,
+  "turnState": {
+    "remainingMovement": 0,
+    "movementRemaining": 0,
+    "actionUsed": false,
+    "bonusActionUsed": false,
+    "reactionUsed": false
+  },
+  "turnResources": {
+    "sable-warden": {
+      "creatureId": "sable-warden",
+      "remainingMovement": 30,
+      "movementRemaining": 30,
+      "actionUsed": false,
+      "bonusActionUsed": false,
+      "reactionUsed": false
+    },
+    "lyra-mirewitch": {
+      "creatureId": "lyra-mirewitch",
+      "remainingMovement": 30,
+      "movementRemaining": 30,
+      "actionUsed": false,
+      "bonusActionUsed": false,
+      "reactionUsed": false
+    },
+    "pip-quickknife": {
+      "creatureId": "pip-quickknife",
+      "remainingMovement": 35,
+      "movementRemaining": 35,
+      "actionUsed": false,
+      "bonusActionUsed": false,
+      "reactionUsed": false
+    },
+    "rotcap-brute": {
+      "creatureId": "rotcap-brute",
+      "remainingMovement": 25,
+      "movementRemaining": 25,
+      "actionUsed": false,
+      "bonusActionUsed": false,
+      "reactionUsed": false
+    },
+    "glasswing-archer": {
+      "creatureId": "glasswing-archer",
+      "remainingMovement": 35,
+      "movementRemaining": 35,
+      "actionUsed": false,
+      "bonusActionUsed": false,
+      "reactionUsed": false
+    },
+    "bog-hexer": {
+      "creatureId": "bog-hexer",
+      "remainingMovement": 30,
+      "movementRemaining": 30,
+      "actionUsed": false,
+      "bonusActionUsed": false,
+      "reactionUsed": false
+    },
+    "mudbound-hound": {
+      "creatureId": "mudbound-hound",
+      "remainingMovement": 40,
+      "movementRemaining": 40,
+      "actionUsed": false,
+      "bonusActionUsed": false,
+      "reactionUsed": false
+    }
+  },
+  "pendingReactions": [],
+  "log": []
+}

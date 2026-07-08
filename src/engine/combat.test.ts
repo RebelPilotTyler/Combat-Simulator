@@ -13,6 +13,7 @@ import {
   performHideAction,
   performAttackAction,
   performBasicAction,
+  performMultiattackAction,
   performReadyAction,
   performSavingThrowAction,
   performShoveAction,
@@ -24,9 +25,10 @@ import {
 import { collectAbilityCheckModifiers, createAppliedCondition, hasCondition, resolveRollMode } from './conditions';
 import { getAvailableActions, getEffectiveAC, getEffectiveSpeed, getUnavailableActionReason } from './features';
 import { getReachableMovementSquares } from './movement';
-import { getConditionTag, getHpPercent } from './presentation';
+import { formatBaseEffectiveNumber, getConditionTag, getHpPercent } from './presentation';
+import { parseCombatStateJson, serializeCombatState, validateCombatStateShape } from './serialization';
 import { getOpportunityAttackCandidates } from './targeting';
-import type { Creature } from './types';
+import type { ActionDefinition, Creature } from './types';
 
 function sequence(values: number[]) {
   let index = 0;
@@ -835,6 +837,292 @@ describe('combat engine', () => {
     expect(secondStep.log[0].message).toContain('already used their bonus action');
   });
 
+  it('bonus action attacks can be used after an action is spent', () => {
+    const offhand = {
+      ...baseCreature.actions[0],
+      id: 'offhand',
+      name: 'Offhand',
+      actionCost: 'bonusAction' as const,
+      tags: ['attack' as const, 'melee' as const, 'bonus' as const],
+      damage: { dice: '1d4' }
+    };
+    const state = rollInitiative(
+      createCombatState([
+        creature({ id: 'a', name: 'Alpha', actions: [...baseCreature.actions, offhand] }),
+        creature({ id: 'b', name: 'Bravo', hp: 20, position: { x: 1, y: 0 } })
+      ]),
+      sequence([0.9, 0.1])
+    );
+
+    const actionUsed = performAttackAction(state, 'strike', 'b', sequence([0.5, 0]));
+    const bonusUsed = performAttackAction(actionUsed, 'offhand', 'b', sequence([0.5, 0]));
+
+    expect(bonusUsed.turnState.actionUsed).toBe(true);
+    expect(bonusUsed.turnState.bonusActionUsed).toBe(true);
+    expect(bonusUsed.creatures.find((candidate) => candidate.id === 'b')?.hp).toBe(16);
+  });
+
+  it('multiattack consumes one action and same-target steps damage separately', () => {
+    const multiattack: ActionDefinition = {
+      id: 'double-strike',
+      name: 'Double Strike',
+      kind: 'multiattack',
+      actionCost: 'action',
+      tags: ['attack'],
+      range: 1,
+      effects: [],
+      multiattack: {
+        targetMode: 'sameTarget',
+        steps: [
+          { id: 'first', name: 'Strike 1', actionId: 'strike' },
+          { id: 'second', name: 'Strike 2', actionId: 'strike' }
+        ]
+      }
+    };
+    const state = rollInitiative(
+      createCombatState([
+        creature({ id: 'a', name: 'Alpha', actions: [...baseCreature.actions, multiattack] }),
+        creature({ id: 'b', name: 'Bravo', hp: 20, position: { x: 1, y: 0 } })
+      ]),
+      sequence([0.9, 0.1])
+    );
+
+    const result = performMultiattackAction(state, 'double-strike', { targetId: 'b' }, sequence([0.5, 0, 0.5, 0]));
+
+    expect(result.turnState.actionUsed).toBe(true);
+    expect(result.turnState.bonusActionUsed).toBe(false);
+    expect(result.creatures.find((candidate) => candidate.id === 'b')?.hp).toBe(14);
+    expect(result.log.filter((entry) => entry.type === 'attack')).toHaveLength(2);
+  });
+
+  it('cannot multiattack if action is already used', () => {
+    const multiattack: ActionDefinition = {
+      id: 'double-strike',
+      name: 'Double Strike',
+      kind: 'multiattack',
+      actionCost: 'action',
+      tags: ['attack'],
+      range: 1,
+      effects: [],
+      multiattack: { steps: [{ id: 'first', name: 'Strike 1', actionId: 'strike' }] }
+    };
+    const state = rollInitiative(
+      createCombatState([
+        creature({ id: 'a', name: 'Alpha', actions: [...baseCreature.actions, multiattack] }),
+        creature({ id: 'b', name: 'Bravo', hp: 20, position: { x: 1, y: 0 } })
+      ]),
+      sequence([0.9, 0.1])
+    );
+    const actionUsed = performAttackAction(state, 'strike', 'b', sequence([0.5, 0]));
+    const blocked = performMultiattackAction(actionUsed, 'double-strike', { targetId: 'b' }, sequence([0.5, 0]));
+
+    expect(blocked.creatures.find((candidate) => candidate.id === 'b')?.hp).toBe(17);
+    expect(blocked.log[0].message).toContain('already used their action');
+  });
+
+  it('choose-each-target multiattack works', () => {
+    const multiattack: ActionDefinition = {
+      id: 'split-strike',
+      name: 'Split Strike',
+      kind: 'multiattack',
+      actionCost: 'action',
+      tags: ['attack'],
+      range: 1,
+      effects: [],
+      multiattack: {
+        targetMode: 'chooseEach',
+        steps: [
+          { id: 'left', name: 'Left Strike', actionId: 'strike' },
+          { id: 'right', name: 'Right Strike', actionId: 'strike' }
+        ]
+      }
+    };
+    const state = rollInitiative(
+      createCombatState([
+        creature({ id: 'a', name: 'Alpha', actions: [...baseCreature.actions, multiattack] }),
+        creature({ id: 'b', name: 'Bravo', hp: 10, position: { x: 1, y: 0 } }),
+        creature({ id: 'c', name: 'Charlie', team: 'enemies', hp: 10, position: { x: 0, y: 1 } })
+      ]),
+      sequence([0.9, 0.1, 0.2])
+    );
+
+    const result = performMultiattackAction(
+      state,
+      'split-strike',
+      { stepTargets: { left: 'b', right: 'c' } },
+      sequence([0.5, 0, 0.5, 0])
+    );
+
+    expect(result.creatures.find((candidate) => candidate.id === 'b')?.hp).toBe(7);
+    expect(result.creatures.find((candidate) => candidate.id === 'c')?.hp).toBe(7);
+  });
+
+  it('out-of-range multiattack step logs and skips without crashing', () => {
+    const shortStrike = { ...baseCreature.actions[0], range: 1 };
+    const multiattack: ActionDefinition = {
+      id: 'double-strike',
+      name: 'Double Strike',
+      kind: 'multiattack',
+      actionCost: 'action',
+      tags: ['attack'],
+      range: 1,
+      effects: [],
+      multiattack: { steps: [{ id: 'first', name: 'Strike 1', inlineAction: shortStrike }] }
+    };
+    const state = rollInitiative(
+      createCombatState([
+        creature({ id: 'a', name: 'Alpha', actions: [multiattack] }),
+        creature({ id: 'b', name: 'Bravo', hp: 10, position: { x: 5, y: 0 } })
+      ]),
+      sequence([0.9, 0.1])
+    );
+
+    const result = performMultiattackAction(state, 'double-strike', { targetId: 'b' }, sequence([0.5, 0]));
+
+    expect(result.creatures.find((candidate) => candidate.id === 'b')?.hp).toBe(10);
+    expect(result.log.some((entry) => entry.message.includes('out of range'))).toBe(true);
+  });
+
+  it('defeated target mid-multiattack does not crash', () => {
+    const heavyStrike = { ...baseCreature.actions[0], damage: { dice: '1d6+10' } };
+    const multiattack: ActionDefinition = {
+      id: 'double-strike',
+      name: 'Double Strike',
+      kind: 'multiattack',
+      actionCost: 'action',
+      tags: ['attack'],
+      range: 1,
+      effects: [],
+      multiattack: {
+        steps: [
+          { id: 'first', name: 'Strike 1', inlineAction: heavyStrike },
+          { id: 'second', name: 'Strike 2', inlineAction: heavyStrike }
+        ]
+      }
+    };
+    const state = rollInitiative(
+      createCombatState([
+        creature({ id: 'a', name: 'Alpha', actions: [multiattack] }),
+        creature({ id: 'b', name: 'Bravo', hp: 5, position: { x: 1, y: 0 } })
+      ]),
+      sequence([0.9, 0.1])
+    );
+
+    const result = performMultiattackAction(state, 'double-strike', { targetId: 'b' }, sequence([0.5, 0]));
+
+    expect(result.creatures.find((candidate) => candidate.id === 'b')?.hp).toBe(0);
+    expect(result.log.some((entry) => entry.message.includes('skips Bravo because they are defeated'))).toBe(true);
+  });
+
+  it('crits still work inside multiattack', () => {
+    const multiattack: ActionDefinition = {
+      id: 'single-routine',
+      name: 'Single Routine',
+      kind: 'multiattack',
+      actionCost: 'action',
+      tags: ['attack'],
+      range: 1,
+      effects: [],
+      multiattack: { steps: [{ id: 'crit', name: 'Critical Strike', actionId: 'strike' }] }
+    };
+    const state = rollInitiative(
+      createCombatState([
+        creature({ id: 'a', name: 'Alpha', actions: [...baseCreature.actions, multiattack] }),
+        creature({ id: 'b', name: 'Bravo', hp: 20, ac: 30, position: { x: 1, y: 0 } })
+      ]),
+      sequence([0.9, 0.1])
+    );
+
+    const result = performMultiattackAction(state, 'single-routine', { targetId: 'b' }, sequence([0.999, 0, 0]));
+
+    expect(result.creatures.find((candidate) => candidate.id === 'b')?.hp).toBe(16);
+    expect(result.log.some((entry) => entry.message.includes('Critical hit'))).toBe(true);
+  });
+
+  it('ranged-in-melee disadvantage applies inside multiattack', () => {
+    const shot: ActionDefinition = {
+      id: 'shot',
+      name: 'Shot',
+      kind: 'rangedAttack',
+      type: 'rangedAttack',
+      actionCost: 'action',
+      tags: ['attack', 'ranged'],
+      range: 6,
+      attackBonus: 4,
+      damage: { dice: '1d6+2' },
+      shape: { type: 'single' },
+      effects: []
+    };
+    const multiattack: ActionDefinition = {
+      id: 'shot-routine',
+      name: 'Shot Routine',
+      kind: 'multiattack',
+      actionCost: 'action',
+      tags: ['attack'],
+      range: 6,
+      effects: [],
+      multiattack: { steps: [{ id: 'shot-step', name: 'Shot', actionId: 'shot' }] }
+    };
+    const state = rollInitiative(
+      createCombatState([
+        creature({ id: 'a', name: 'Alpha', position: { x: 0, y: 0 }, actions: [shot, multiattack] }),
+        creature({ id: 'b', name: 'Bravo', team: 'enemies', hp: 10, ac: 12, position: { x: 3, y: 0 } }),
+        creature({ id: 'c', name: 'Close Enemy', team: 'enemies', position: { x: 0, y: 1 } })
+      ]),
+      sequence([0.9, 0.1, 0.2])
+    );
+
+    const result = performMultiattackAction(state, 'shot-routine', { targetId: 'b' }, sequence([0.99, 0]));
+
+    expect(result.creatures.find((candidate) => candidate.id === 'b')?.hp).toBe(10);
+    expect(result.log.some((entry) => entry.message.includes('hostile creature within 5 ft'))).toBe(true);
+  });
+
+  it('resources on parent multiattack are consumed once and child costs are ignored', () => {
+    const costlyStrike = {
+      ...baseCreature.actions[0],
+      id: 'costly-strike',
+      name: 'Costly Strike',
+      resourceCosts: [{ resourceId: 'child-power', amount: 1, consumeOn: 'use' as const }]
+    };
+    const multiattack: ActionDefinition = {
+      id: 'powered-routine',
+      name: 'Powered Routine',
+      kind: 'multiattack',
+      actionCost: 'action',
+      tags: ['attack'],
+      range: 1,
+      effects: [],
+      resourceCosts: [{ resourceId: 'routine-use', amount: 1, consumeOn: 'use' }],
+      multiattack: {
+        steps: [
+          { id: 'first', name: 'Costly 1', actionId: 'costly-strike' },
+          { id: 'second', name: 'Costly 2', actionId: 'costly-strike' }
+        ]
+      }
+    };
+    const state = rollInitiative(
+      createCombatState([
+        creature({
+          id: 'a',
+          name: 'Alpha',
+          actions: [costlyStrike, multiattack],
+          resources: [
+            { id: 'routine-use', name: 'Routine Use', current: 1, max: 1, resetOn: 'longRest' },
+            { id: 'child-power', name: 'Child Power', current: 1, max: 1, resetOn: 'longRest' }
+          ]
+        }),
+        creature({ id: 'b', name: 'Bravo', hp: 20, position: { x: 1, y: 0 } })
+      ]),
+      sequence([0.9, 0.1])
+    );
+
+    const result = performMultiattackAction(state, 'powered-routine', { targetId: 'b' }, sequence([0.5, 0, 0.5, 0]));
+
+    expect(result.creatures[0].resources?.find((resource) => resource.id === 'routine-use')?.current).toBe(0);
+    expect(result.creatures[0].resources?.find((resource) => resource.id === 'child-power')?.current).toBe(1);
+  });
+
   it('resources are consumed on action use and unavailable resources prevent actions', () => {
     const costlyStrike = {
       ...baseCreature.actions[0],
@@ -946,8 +1234,56 @@ describe('combat engine', () => {
     expect(getReachableMovementSquares(state, 'a').some((option) => option.costFeet === 40)).toBe(true);
     expect(getEffectiveAC(state.creatures[1], state)).toBe(15);
 
-    const miss = performAttackAction(state, 'strike', 'b', sequence([0.5]));
+    const miss = performAttackAction(state, 'strike', 'b', sequence([0.25]));
     expect(miss.creatures.find((candidate) => candidate.id === 'b')?.hp).toBe(10);
+  });
+
+  it('effective AC affects attack debug stats', () => {
+    const state = rollInitiative(
+      createCombatState([
+        creature({
+          id: 'a',
+          name: 'Alpha',
+          features: [{ id: 'accurate', name: 'Accurate', description: '+2 attack', enabled: true, source: 'test', modifiers: { attackBonus: 2 } }]
+        }),
+        creature({
+          id: 'b',
+          name: 'Bravo',
+          ac: 10,
+          position: { x: 1, y: 0 },
+          features: [{ id: 'armor', name: 'Armor', description: '+3 AC', enabled: true, source: 'test', modifiers: { ac: 3 } }]
+        })
+      ]),
+      sequence([0.9, 0.1])
+    );
+
+    const stats = getAttackDebugStats(state, 'strike', 'b', 0);
+
+    expect(stats.attackBonus).toBe(6);
+    expect(stats.targetAc).toBe(13);
+    expect(stats.expectedHitPercentage).toBeCloseTo(70);
+  });
+
+  it('effective speed initializes turn movement', () => {
+    const state = rollInitiative(
+      createCombatState([
+        creature({
+          id: 'a',
+          name: 'Alpha',
+          speed: 30,
+          features: [{ id: 'fleet', name: 'Fleet', description: '+5 speed', enabled: true, source: 'test', modifiers: { speed: 5 } }]
+        })
+      ]),
+      sequence([0.9])
+    );
+
+    expect(state.turnState.remainingMovement).toBe(35);
+    expect(state.turnResources.a.remainingMovement).toBe(35);
+  });
+
+  it('feature AC modifier display includes base and effective values', () => {
+    expect(formatBaseEffectiveNumber(16, 17)).toBe('16 / effective 17');
+    expect(formatBaseEffectiveNumber(14, 14)).toBe('14');
   });
 
   it('feature-derived bonus action consumes bonus action resource', () => {
@@ -1012,5 +1348,27 @@ describe('combat engine', () => {
 
     expect(blocked.creatures[0].resources?.[0].current).toBe(0);
     expect(blocked.log[0].message).toContain('Needs 1 Limited Use');
+  });
+
+  it('pasted JSON import/export round trips CombatState', () => {
+    const state = rollInitiative(createCombatState([creature({ id: 'a', name: 'Alpha' })]), sequence([0.9]));
+    const exported = serializeCombatState(state);
+    const parsed = parseCombatStateJson(exported);
+
+    expect(parsed.ok).toBe(true);
+    expect(parsed.state).toEqual(state);
+  });
+
+  it('bad JSON returns a friendly validation error', () => {
+    expect(parseCombatStateJson('{ nope').error).toContain('Invalid JSON');
+    expect(parseCombatStateJson(JSON.stringify({ creatures: [] })).error).toContain('missing grid object');
+  });
+
+  it('exported JSON shape validates as CombatState', () => {
+    const state = createCombatState([creature({ id: 'a', name: 'Alpha' })]);
+    const exported = serializeCombatState(state);
+    const parsed = JSON.parse(exported) as unknown;
+
+    expect(validateCombatStateShape(parsed)).toBeUndefined();
   });
 });
