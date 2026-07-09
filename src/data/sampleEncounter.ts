@@ -200,23 +200,21 @@ export const sampleCreatures: Creature[] = [
     speed: 30,
     position: { x: 2, y: 6 },
     conditions: [],
-    actions: [
-      {
-        ...sparkBolt,
-        resourceCosts: [{ resourceId: 'spell-slot-1', amount: 1, consumeOn: 'use' }]
-      },
-      {
-        ...cracklingPulse,
-        resourceCosts: [{ resourceId: 'spell-slot-1', amount: 1, consumeOn: 'use' }]
-      },
-      quickStep
-    ],
+    actions: [quickStep],
     resources: [
       {
         id: 'spell-slot-1',
         name: 'Spell Slots L1',
         current: 2,
         max: 2,
+        resetOn: 'longRest',
+        display: { showOnCreaturePanel: true, mode: 'pips' }
+      },
+      {
+        id: 'spell-slot-2',
+        name: 'Spell Slots L2',
+        current: 1,
+        max: 1,
         resetOn: 'longRest',
         display: { showOnCreaturePanel: true, mode: 'pips' }
       },
@@ -249,7 +247,13 @@ export const sampleCreatures: Creature[] = [
         ]
       }
     ],
-    skillBonuses: { stealth: 4, investigation: 4 }
+    skillBonuses: { stealth: 4, investigation: 4 },
+    spellcasting: {
+      ability: 'int',
+      saveDc: 13,
+      attackBonus: 5,
+      knownSpells: ['fire-bolt', 'magic-missile', 'shield', 'burning-hands', 'sleep']
+    }
   },
   {
     id: 'training-brute',

@@ -13,7 +13,8 @@ import type {
   Ability,
   Skill,
   RollMode,
-  MultiattackStep
+  MultiattackStep,
+  SpellDefinition
 } from './types';
 import { getShapeSquares, isBlocked, isInBounds, samePosition } from './shapes';
 import { getMovementCost, isOccupied } from './movement';
@@ -58,6 +59,16 @@ import {
   hasResourcesForAction,
   resetResources
 } from './features';
+import {
+  canCreatureCastSpell,
+  consumeSpellSlot,
+  getScaledSpellHealingDice,
+  getSpellDefinition,
+  getSpellUnavailableReason,
+  getSpellcastingAbilityModifier,
+  hasSpellSlot,
+  spellToActionDefinition
+} from './spells';
 
 export const BASIC_ACTIONS = [
   'Attack',
@@ -86,6 +97,15 @@ export type SearchMode = 'perception' | 'investigation';
 export interface MultiattackTargetSelections {
   targetId?: string;
   stepTargets?: Record<string, string>;
+}
+
+export interface SpellCastOptions {
+  spellId: string;
+  targetId?: string;
+  targetIds?: string[];
+  castAtLevel?: number;
+  areaOrigin?: GridPosition;
+  direction?: CardinalDirection;
 }
 
 export interface AttackDebugStats {
@@ -858,40 +878,108 @@ export function performSavingThrowAction(
     addLog(next, 'action', `${source.name} casts ${action.name}.`);
   }
 
-  targetIds.forEach((targetId) => {
+  resolveSavingThrowDamageAction(next, source.id, action, targetIds, random, hooks);
+
+  return next;
+}
+
+export function performSpellCast(
+  state: CombatState,
+  options: SpellCastOptions,
+  random: RandomSource = Math.random,
+  hooks: CombatHooks = {}
+): CombatState {
+  const next = ensureTurnState(normalizeState(cloneState(state)));
+  const caster = getActiveCreature(next);
+  const spell = getSpellDefinition(options.spellId);
+
+  if (!spell) {
+    addLog(next, 'system', `Spell not found: ${options.spellId}.`);
+    return next;
+  }
+
+  if (!canCreatureCastSpell(caster, spell)) {
+    addLog(next, 'system', `${caster.name} cannot cast ${spell.name}. ${getSpellUnavailableReason(caster, spell)}`);
+    return next;
+  }
+
+  const castAtLevel = options.castAtLevel ?? spell.level;
+  const action = spellToActionDefinition(spell, caster, castAtLevel);
+  const targetError = getSpellCastTargetError(next, caster, spell, action, options);
+  if (targetError) {
+    addLog(next, 'system', targetError);
+    return next;
+  }
+
+  if (!spendActionCost(next, caster, action.actionCost)) {
+    return next;
+  }
+
+  if (!hasSpellSlot(caster, spell, castAtLevel)) {
+    addLog(next, 'system', `${caster.name} cannot cast ${spell.name}. ${getSpellUnavailableReason(caster, spell, castAtLevel)}`);
+    rollbackActionCost(next, caster, action.actionCost);
+    return next;
+  }
+
+  consumeSpellSlot(caster, spell, castAtLevel).forEach((message) => addLog(next, 'action', message));
+  addLog(next, 'action', `${caster.name} casts ${spell.name}${castAtLevel > spell.level ? ` at level ${castAtLevel}` : ''}.`);
+  markConcentration(next, caster, spell);
+  logManualSpellResolution(next, caster, spell);
+
+  if (spell.automationLevel === 'manual' || spell.attackType === 'manual') {
+    return next;
+  }
+
+  if (spell.attackType === 'meleeSpellAttack' || spell.attackType === 'rangedSpellAttack') {
+    const targetId = options.targetId ?? options.targetIds?.[0];
+    if (!targetId) {
+      addLog(next, 'system', `${spell.name} needs a target.`);
+      return next;
+    }
+
+    resolveAttackAction(next, caster.id, action, targetId, random, hooks);
+    return next;
+  }
+
+  if (spell.attackType === 'save') {
+    const targetIds = options.targetIds ?? (options.targetId ? [options.targetId] : []);
+    if (targetIds.length === 0) {
+      addLog(next, 'system', `${spell.name} needs at least one target.`);
+      return next;
+    }
+
+    resolveSavingThrowDamageAction(next, caster.id, action, targetIds, random, hooks);
+    return next;
+  }
+
+  if (spell.healing) {
+    const targetId = options.targetId ?? options.targetIds?.[0] ?? (spell.targetType === 'self' ? caster.id : undefined);
+    if (!targetId) {
+      addLog(next, 'system', `${spell.name} needs a healing target.`);
+      return next;
+    }
+
+    resolveSpellHealing(next, caster.id, targetId, spell, action, castAtLevel, random);
+    return next;
+  }
+
+  if (spell.damage && spell.attackType === 'automatic') {
+    const targetId = options.targetId ?? options.targetIds?.[0];
+    if (!targetId) {
+      addLog(next, 'system', `${spell.name} needs a damage target.`);
+      return next;
+    }
+
     const target = findCreature(next, targetId);
-    if (isDefeated(target)) {
-      return;
+    if (!isInActionRange(action, caster.position, target.position)) {
+      addLog(next, 'system', `${target.name} is out of range for ${spell.name}.`);
+      return next;
     }
 
-    const saveRollModifier = collectSavingThrowModifiers(next, target, save.ability);
-    const rollMode = resolveRollMode(saveRollModifier);
-    const firstSaveRoll = rollDice('1d20', random);
-    const secondSaveRoll = rollMode === 'normal' ? undefined : rollDice('1d20', random);
-    const saveModifier = getEffectiveSaveBonus(target, save.ability, next);
-    const flatModifier = saveRollModifier.flatModifier ?? 0;
-    const d20Total = chooseD20(firstSaveRoll.total, secondSaveRoll?.total, rollMode);
-    const saveTotal = d20Total + saveModifier + flatModifier;
-    const success = saveRollModifier.autoFail ? false : saveRollModifier.autoSuccess ? true : saveTotal >= save.dc;
-    if (!success) {
-      spendActionResources(next, source, action, 'failedSave');
-    }
-    const damageRoll = rollDice(damageDefinition.dice, random);
-    const amount = success && save.halfDamageOnSuccess ? Math.floor(damageRoll.total / 2) : damageRoll.total;
-
-    addLog(
-      next,
-      'save',
-      `${target.name} rolls ${save.ability.toUpperCase()} save against ${action.name}: ${formatD20Roll(firstSaveRoll.total, secondSaveRoll?.total, rollMode)} + ${saveModifier}${flatModifier ? ` ${formatSigned(flatModifier)}` : ''} = ${saveTotal} vs DC ${save.dc}. ${success ? 'Success.' : 'Failure.'}`
-    );
-
-    applyDamage(next, source.id, target.id, action, amount, hooks);
-    addLog(
-      next,
-      'damage',
-      `${target.name} takes ${amount} ${damageDefinition.type ?? 'damage'} from ${action.name} (${damageRoll.rolls.join(', ')} + ${damageRoll.modifier}${success ? ', halved' : ''}).`
-    );
-  });
+    const damage = rollDice(action.damage?.dice ?? spell.damage.dice, random);
+    applyDamage(next, caster.id, target.id, action, damage.total, hooks);
+    addLog(next, 'damage', `${target.name} takes ${damage.total} ${spell.damage.type ?? 'damage'} from ${spell.name} (${damage.rolls.join(', ')} + ${damage.modifier}).`);
+  }
 
   return next;
 }
@@ -1081,14 +1169,190 @@ function applyDamage(
   }
 }
 
+function resolveSavingThrowDamageAction(
+  state: CombatState,
+  sourceId: string,
+  action: ActionDefinition,
+  targetIds: string[],
+  random: RandomSource,
+  hooks: CombatHooks
+): void {
+  const source = findCreature(state, sourceId);
+  const effect = action.effects.find((candidate) => candidate.type === 'damage' && candidate.save);
+  const save = action.save ?? effect?.save;
+  const damageDefinition = action.damage ?? effect?.damage;
+
+  if (!save || !damageDefinition) {
+    addLog(state, 'system', `${action.name} has no automated saving throw damage.`);
+    return;
+  }
+
+  targetIds.forEach((targetId) => {
+    const target = findCreature(state, targetId);
+    if (isDefeated(target)) {
+      return;
+    }
+
+    const saveRollModifier = collectSavingThrowModifiers(state, target, save.ability);
+    const rollMode = resolveRollMode(saveRollModifier);
+    const firstSaveRoll = rollDice('1d20', random);
+    const secondSaveRoll = rollMode === 'normal' ? undefined : rollDice('1d20', random);
+    const saveModifier = getEffectiveSaveBonus(target, save.ability, state);
+    const flatModifier = saveRollModifier.flatModifier ?? 0;
+    const d20Total = chooseD20(firstSaveRoll.total, secondSaveRoll?.total, rollMode);
+    const saveTotal = d20Total + saveModifier + flatModifier;
+    const success = saveRollModifier.autoFail ? false : saveRollModifier.autoSuccess ? true : saveTotal >= save.dc;
+    if (!success) {
+      spendActionResources(state, source, action, 'failedSave');
+    }
+    const damageRoll = rollDice(damageDefinition.dice, random);
+    const amount = success && save.halfDamageOnSuccess ? Math.floor(damageRoll.total / 2) : damageRoll.total;
+
+    addLog(
+      state,
+      'save',
+      `${target.name} rolls ${save.ability.toUpperCase()} save against ${action.name}: ${formatD20Roll(firstSaveRoll.total, secondSaveRoll?.total, rollMode)} + ${saveModifier}${flatModifier ? ` ${formatSigned(flatModifier)}` : ''} = ${saveTotal} vs DC ${save.dc}. ${success ? 'Success.' : 'Failure.'}`
+    );
+
+    applyDamage(state, source.id, target.id, action, amount, hooks);
+    addLog(
+      state,
+      'damage',
+      `${target.name} takes ${amount} ${damageDefinition.type ?? 'damage'} from ${action.name} (${damageRoll.rolls.join(', ')} + ${damageRoll.modifier}${success ? ', halved' : ''}).`
+    );
+  });
+}
+
+function resolveSpellHealing(
+  state: CombatState,
+  casterId: string,
+  targetId: string,
+  spell: SpellDefinition,
+  action: ActionDefinition,
+  castAtLevel: number,
+  random: RandomSource
+): void {
+  if (!spell.healing) {
+    return;
+  }
+
+  const caster = findCreature(state, casterId);
+  const target = findCreature(state, targetId);
+  if (!isInActionRange(action, caster.position, target.position)) {
+    addLog(state, 'system', `${target.name} is out of range for ${spell.name}.`);
+    return;
+  }
+
+  const healingDice = getScaledSpellHealingDice(spell, castAtLevel) ?? spell.healing.dice;
+  const roll = rollDice(healingDice, random);
+  const modifier = spell.healing.addSpellcastingModifier ? getSpellcastingAbilityModifier(caster) : 0;
+  const amount = Math.max(0, roll.total + modifier);
+  target.hp = Math.min(target.maxHp, target.hp + amount);
+  if (target.hp > 0) {
+    removeConditionFromCreature(target, 'defeated');
+  }
+
+  addLog(
+    state,
+    'damage',
+    `${target.name} regains ${amount} HP from ${spell.name} (${roll.rolls.join(', ')} + ${roll.modifier}${modifier ? ` ${formatSigned(modifier)}` : ''}).`
+  );
+}
+
+function markConcentration(state: CombatState, caster: Creature, spell: SpellDefinition): void {
+  if (!spell.concentration) {
+    return;
+  }
+
+  removeConditionFromCreature(caster, 'concentrating');
+  const condition = createAppliedCondition('concentrating', {
+    sourceCreatureId: caster.id,
+    metadata: { spellId: spell.id, spellName: spell.name }
+  });
+  const result = applyConditionToCreature(caster, condition);
+  logConditionChange(state, caster, condition, result);
+  addLog(state, 'system', `${caster.name} is concentrating on ${spell.name}. Concentration checks are manual for now.`);
+}
+
+function logManualSpellResolution(state: CombatState, caster: Creature, spell: SpellDefinition): void {
+  if (spell.automationLevel === 'full') {
+    return;
+  }
+
+  addLog(
+    state,
+    'system',
+    `${spell.name} automation is ${spell.automationLevel}. ${spell.manualResolution ?? 'Resolve the remaining spell effects manually.'}`
+  );
+}
+
+function getSpellCastTargetError(
+  state: CombatState,
+  caster: Creature,
+  spell: SpellDefinition,
+  action: ActionDefinition,
+  options: SpellCastOptions
+): string | undefined {
+  if (spell.automationLevel === 'manual' || spell.attackType === 'manual') {
+    return undefined;
+  }
+
+  if (spell.attackType === 'meleeSpellAttack' || spell.attackType === 'rangedSpellAttack') {
+    const targetId = options.targetId ?? options.targetIds?.[0];
+    if (!targetId) {
+      return `${spell.name} needs a target.`;
+    }
+
+    const target = findCreature(state, targetId);
+    if (!isInActionRange(action, caster.position, target.position)) {
+      return `${target.name} is out of range for ${spell.name}.`;
+    }
+
+    if (spell.attackType === 'rangedSpellAttack' && !hasLineOfSight(state, caster.position, target.position)) {
+      return `${caster.name} does not have line of sight to ${target.name}.`;
+    }
+  }
+
+  if (spell.attackType === 'save' && (options.targetIds ?? (options.targetId ? [options.targetId] : [])).length === 0) {
+    return `${spell.name} needs at least one target.`;
+  }
+
+  if (spell.healing || (spell.damage && spell.attackType === 'automatic')) {
+    const targetId = options.targetId ?? options.targetIds?.[0] ?? (spell.targetType === 'self' ? caster.id : undefined);
+    if (!targetId) {
+      return `${spell.name} needs a target.`;
+    }
+
+    const target = findCreature(state, targetId);
+    if (!isInActionRange(action, caster.position, target.position)) {
+      return `${target.name} is out of range for ${spell.name}.`;
+    }
+  }
+
+  return undefined;
+}
+
 function findAction(creature: Creature, actionId: string, state?: CombatState): ActionDefinition {
   const actions = state ? getAvailableActions(creature, state) : creature.actions;
-  const action = actions.find((candidate) => candidate.id === actionId);
+  const action = actions.find((candidate) => candidate.id === actionId) ?? findSpellAction(creature, actionId);
   if (!action) {
     throw new Error(`${creature.name} does not have action ${actionId}.`);
   }
 
   return action;
+}
+
+function findSpellAction(creature: Creature, actionId: string): ActionDefinition | undefined {
+  if (!actionId.startsWith('spell:')) {
+    return undefined;
+  }
+
+  const spell = getSpellDefinition(actionId.slice('spell:'.length));
+  if (!spell || !canCreatureCastSpell(creature, spell)) {
+    return undefined;
+  }
+
+  return spellToActionDefinition(spell, creature);
 }
 
 function getMultiattackStepAction(creature: Creature, step: MultiattackStep, state: CombatState): ActionDefinition | undefined {
@@ -1118,7 +1382,7 @@ function getMultiattackStepTarget(action: ActionDefinition, step: MultiattackSte
     return selections.stepTargets?.[step.id] ?? selections.targetId;
   }
 
-  return selections.targetId ?? selections.stepTargets?.[step.id];
+  return selections.stepTargets?.[step.id] ?? selections.targetId;
 }
 
 function getRulesKind(action: ActionDefinition) {

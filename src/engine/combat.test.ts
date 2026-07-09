@@ -957,6 +957,127 @@ describe('combat engine', () => {
     expect(result.creatures.find((candidate) => candidate.id === 'c')?.hp).toBe(7);
   });
 
+  it('same-target multiattack can split targets when step targets are provided', () => {
+    const multiattack: ActionDefinition = {
+      id: 'flex-strike',
+      name: 'Flexible Strike',
+      kind: 'multiattack',
+      actionCost: 'action',
+      tags: ['attack'],
+      range: 1,
+      effects: [],
+      multiattack: {
+        targetMode: 'sameTarget',
+        steps: [
+          { id: 'left', name: 'Left Strike', actionId: 'strike' },
+          { id: 'right', name: 'Right Strike', actionId: 'strike' }
+        ]
+      }
+    };
+    const state = rollInitiative(
+      createCombatState([
+        creature({ id: 'a', name: 'Alpha', actions: [...baseCreature.actions, multiattack] }),
+        creature({ id: 'b', name: 'Bravo', hp: 10, position: { x: 1, y: 0 } }),
+        creature({ id: 'c', name: 'Charlie', team: 'enemies', hp: 10, position: { x: 0, y: 1 } })
+      ]),
+      sequence([0.9, 0.1, 0.2])
+    );
+
+    const result = performMultiattackAction(
+      state,
+      'flex-strike',
+      { targetId: 'b', stepTargets: { left: 'b', right: 'c' } },
+      sequence([0.5, 0, 0.5, 0])
+    );
+
+    expect(result.turnState.actionUsed).toBe(true);
+    expect(result.turnState.bonusActionUsed).toBe(false);
+    expect(result.creatures.find((candidate) => candidate.id === 'b')?.hp).toBe(7);
+    expect(result.creatures.find((candidate) => candidate.id === 'c')?.hp).toBe(7);
+  });
+
+  it('effective AC is used for each multiattack step', () => {
+    const multiattack: ActionDefinition = {
+      id: 'double-strike',
+      name: 'Double Strike',
+      kind: 'multiattack',
+      actionCost: 'action',
+      tags: ['attack'],
+      range: 1,
+      effects: [],
+      multiattack: { steps: [{ id: 'first', name: 'Strike 1', actionId: 'strike' }] }
+    };
+    const state = rollInitiative(
+      createCombatState([
+        creature({ id: 'a', name: 'Alpha', actions: [...baseCreature.actions, multiattack] }),
+        creature({
+          id: 'b',
+          name: 'Bravo',
+          hp: 10,
+          ac: 10,
+          position: { x: 1, y: 0 },
+          features: [{ id: 'armor', name: 'Armor', description: '+5 AC', enabled: true, source: 'test', modifiers: { ac: 5 } }]
+        })
+      ]),
+      sequence([0.9, 0.1])
+    );
+
+    const result = performMultiattackAction(state, 'double-strike', { targetId: 'b' }, sequence([0.25]));
+
+    expect(result.creatures.find((candidate) => candidate.id === 'b')?.hp).toBe(10);
+    expect(result.log.some((entry) => entry.message.includes('vs AC 15'))).toBe(true);
+  });
+
+  it('advantage applies inside multiattack steps', () => {
+    const multiattack: ActionDefinition = {
+      id: 'single-routine',
+      name: 'Single Routine',
+      kind: 'multiattack',
+      actionCost: 'action',
+      tags: ['attack'],
+      range: 1,
+      effects: [],
+      multiattack: { steps: [{ id: 'first', name: 'Strike 1', actionId: 'strike' }] }
+    };
+    const state = rollInitiative(
+      createCombatState([
+        creature({ id: 'a', name: 'Alpha', actions: [...baseCreature.actions, multiattack] }),
+        creature({ id: 'b', name: 'Bravo', hp: 10, ac: 12, position: { x: 1, y: 0 }, conditions: [createAppliedCondition('restrained')] })
+      ]),
+      sequence([0.9, 0.1])
+    );
+
+    const result = performMultiattackAction(state, 'single-routine', { targetId: 'b' }, sequence([0, 0.5, 0]));
+
+    expect(result.creatures.find((candidate) => candidate.id === 'b')?.hp).toBe(7);
+    expect(result.log.some((entry) => entry.message.includes('advantage'))).toBe(true);
+  });
+
+  it('invalid multiattack child step logs clearly and skips safely', () => {
+    const multiattack: ActionDefinition = {
+      id: 'broken-routine',
+      name: 'Broken Routine',
+      kind: 'multiattack',
+      actionCost: 'action',
+      tags: ['attack'],
+      range: 1,
+      effects: [],
+      multiattack: { steps: [{ id: 'missing', name: 'Missing Strike', actionId: 'not-real' }] }
+    };
+    const state = rollInitiative(
+      createCombatState([
+        creature({ id: 'a', name: 'Alpha', actions: [...baseCreature.actions, multiattack] }),
+        creature({ id: 'b', name: 'Bravo', hp: 10, position: { x: 1, y: 0 } })
+      ]),
+      sequence([0.9, 0.1])
+    );
+
+    const result = performMultiattackAction(state, 'broken-routine', { targetId: 'b' }, sequence([0.5, 0]));
+
+    expect(result.creatures.find((candidate) => candidate.id === 'b')?.hp).toBe(10);
+    expect(result.log.some((entry) => entry.message.includes('Broken Routine: Missing Strike has no valid child attack'))).toBe(true);
+  });
+
   it('out-of-range multiattack step logs and skips without crashing', () => {
     const shortStrike = { ...baseCreature.actions[0], range: 1 };
     const multiattack: ActionDefinition = {

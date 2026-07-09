@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { createSampleEncounter } from './data/sampleEncounter';
 import {
   BASIC_ACTIONS,
@@ -8,7 +8,6 @@ import {
   findCreature,
   getActionShapeSquares,
   getAttackDebugStats,
-  getTargetsInShape,
   isDefeated,
   moveActiveCreature,
   performDisengageAction,
@@ -24,6 +23,7 @@ import {
   performSearchAction,
   performShoveAction,
   performSavingThrowAction,
+  performSpellCast,
   performUseObjectAction,
   removeCondition,
   resolvePendingReaction,
@@ -39,7 +39,9 @@ import { getReachableMovementSquares } from './engine/movement';
 import { formatBaseEffectiveBonus, formatBaseEffectiveNumber, getConditionTags, getHpPercent } from './engine/presentation';
 import { parseCombatStateJson, serializeCombatState } from './engine/serialization';
 import { positionKey, samePosition } from './engine/shapes';
-import type { Ability, ActionDefinition, CardinalDirection, CombatState, Creature, GridPosition, TurnState } from './engine/types';
+import { getAvailableSpellActions, getAvailableSpells, getSpellDefinition, getSpellSlotCost } from './engine/spells';
+import type { Ability, ActionDefinition, CardinalDirection, CombatState, Creature, GridPosition, SpellDefinition, TurnState } from './engine/types';
+import { getActionForNumberHotkey, getActionsForHotkeyCost, getNumberHotkeyIndex, isTypingShortcutTarget, moveGridCursor } from './ui/keyboard';
 
 const directions: CardinalDirection[] = ['north', 'east', 'south', 'west'];
 type SelectionMode = 'move' | 'target';
@@ -66,11 +68,31 @@ export function App() {
   const [jsonText, setJsonText] = useState(() => serializeCombatState(createSampleEncounter()));
   const [jsonError, setJsonError] = useState<string | undefined>();
   const [multiattackTargets, setMultiattackTargets] = useState<Record<string, string>>({});
+  const [actionTab, setActionTab] = useState<ActionDefinition['actionCost']>('action');
+  const [spellSearch, setSpellSearch] = useState('');
+  const [spellCastLevels, setSpellCastLevels] = useState<Record<string, number>>({});
+  const [gridCursor, setGridCursor] = useState<GridPosition>(combat.creatures[0]?.position ?? { x: 0, y: 0 });
+  const [debugOpen, setDebugOpen] = useState(false);
+  const [toolsOpen, setToolsOpen] = useState(false);
+  const [showHelp, setShowHelp] = useState(false);
+  const gridRef = useRef<HTMLDivElement>(null);
+  const logRef = useRef<HTMLOListElement>(null);
+  const targetPanelRef = useRef<HTMLDivElement>(null);
+  const debugDetailsRef = useRef<HTMLDetailsElement>(null);
+  const toolsDetailsRef = useRef<HTMLDetailsElement>(null);
 
   const activeCreature = combat.activeCreatureId ? findCreature(combat, combat.activeCreatureId) : undefined;
   const selectedCreature = selectedCreatureId ? findCreature(combat, selectedCreatureId) : undefined;
-  const activeActions = activeCreature ? getAvailableActions(activeCreature, combat) : [];
+  const activeCreatureActions = activeCreature ? getAvailableActions(activeCreature, combat) : [];
+  const activeSpellActions = activeCreature ? getAvailableSpellActions(activeCreature) : [];
+  const activeSpells = activeCreature ? getAvailableSpells(activeCreature) : [];
+  const activeActions = useMemo(
+    () => [...activeCreatureActions, ...activeSpellActions],
+    [activeCreatureActions, activeSpellActions]
+  );
   const selectedAction = activeActions.find((action) => action.id === selectedActionId);
+  const selectedSpell = selectedAction?.spellId ? getSpellDefinition(selectedAction.spellId) : undefined;
+  const selectedSpellCastLevel = selectedSpell ? spellCastLevels[selectedSpell.id] ?? selectedSpell.level : undefined;
   const movementOptions = useMemo(
     () => (activeCreature ? getReachableMovementSquares(combat, activeCreature.id) : []),
     [activeCreature, combat]
@@ -96,6 +118,92 @@ export function App() {
     selectedAction && selectedTarget && activeCreature && isAttackAction(selectedAction)
       ? getAttackDebugStats(combat, selectedAction.id, selectedTarget.id, 0)
       : undefined;
+  const keyboardHint = getKeyboardHint(selectionMode, selectedAction, gridCursor, combat);
+
+  useEffect(() => {
+    if (activeCreature) {
+      setGridCursor(activeCreature.position);
+    }
+  }, [activeCreature?.id]);
+
+  useEffect(() => {
+    function handleKeyDown(event: KeyboardEvent) {
+      if (showHelp && event.key === 'Escape') {
+        event.preventDefault();
+        setShowHelp(false);
+        return;
+      }
+
+      if (isTypingShortcutTarget(event.target as HTMLElement | null)) {
+        return;
+      }
+
+      const targetTag = (event.target as HTMLElement | null)?.tagName?.toLowerCase();
+      if (targetTag === 'button' && (event.key === ' ' || event.key === 'Enter')) {
+        return;
+      }
+
+      const key = event.key.toLowerCase();
+      const numberIndex = getNumberHotkeyIndex(event.key);
+
+      if (numberIndex !== undefined) {
+        const action = getActionForNumberHotkey(activeActions, event.key, event);
+        if (action && activeCreature && !getActionDisabledReason(activeCreature, action, combat.turnState)) {
+          event.preventDefault();
+          setActionTab(action.actionCost);
+          handleCreatureActionSelect(action);
+        }
+        return;
+      }
+
+      if (event.key === ' ' || ['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'].includes(event.key)) {
+        event.preventDefault();
+      }
+
+      if (event.key === ' ') {
+        setCombat((current) => endTurn(current));
+      } else if (key === 'r') {
+        setCombat((current) => rollInitiative(current));
+      } else if (key === 'm') {
+        resetTargeting();
+        gridRef.current?.focus();
+      } else if (event.key === 'Escape') {
+        cancelSelection();
+      } else if (key === 'l') {
+        logRef.current?.focus();
+      } else if (key === 'g') {
+        gridRef.current?.focus();
+      } else if (key === 't') {
+        targetPanelRef.current?.focus();
+      } else if (key === 'd') {
+        setDebugOpen((current) => !current);
+        setTimeout(() => debugDetailsRef.current?.focus(), 0);
+      } else if (key === 'i') {
+        setToolsOpen((current) => !current);
+        setTimeout(() => toolsDetailsRef.current?.focus(), 0);
+      } else if (key === '?' || key === 'h') {
+        setShowHelp(true);
+      } else if (['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'].includes(event.key)) {
+        setGridCursor((current) => moveGridCursor(current, event.key, combat.grid.width, combat.grid.height));
+      } else if (event.key === 'Enter') {
+        handleGridConfirm();
+      }
+    }
+
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [
+    actionTab,
+    activeActions,
+    activeCreature,
+    combat,
+    gridCursor,
+    selectedAction,
+    selectedTargetId,
+    selectionMode,
+    showHelp,
+    multiattackTargets
+  ]);
 
   function resetTargeting(actionId?: string) {
     setSelectedActionId(actionId);
@@ -107,6 +215,73 @@ export function App() {
 
   function cancelSelection() {
     resetTargeting();
+  }
+
+  function handleCreatureActionSelect(action: ActionDefinition) {
+    if (action.spellId) {
+      resetTargeting(action.id);
+      targetPanelRef.current?.focus();
+      return;
+    }
+
+    if (isUtilityAction(action)) {
+      setCombat((current) => performCreatureUtilityAction(current, action.id));
+    } else {
+      resetTargeting(action.id);
+      targetPanelRef.current?.focus();
+    }
+  }
+
+  function handleGridConfirm() {
+    const creature = combat.creatures.find((candidate) => samePosition(candidate.position, gridCursor));
+
+    if (selectedAction && isMultiattackAction(selectedAction) && areMultiattackTargetsComplete(selectedAction, multiattackTargets, selectedTargetId)) {
+      applySelectedAction();
+      return;
+    }
+
+    if (selectionMode === 'move' && activeCreature && movementKeys.has(positionKey(gridCursor))) {
+      setCombat((current) => moveActiveCreature(current, gridCursor));
+      setSelectedCreatureId(activeCreature.id);
+      return;
+    }
+
+    if (selectedAction && creature && creature.id !== activeCreature?.id) {
+      setSelectedCreatureId(creature.id);
+      setBasicTargetId(creature.id);
+
+      if (isMultiattackAction(selectedAction)) {
+        const nextStep = selectedAction.multiattack?.steps.find((step) => !multiattackTargets[step.id]);
+        setSelectedTargetId((current) => current ?? creature.id);
+        if (nextStep) {
+          setMultiattackTargets((current) => ({
+            ...current,
+            [nextStep.id]: creature.id
+          }));
+        }
+        setAreaOrigin(creature.position);
+        return;
+      }
+
+      if (selectedTargetId === creature.id) {
+        applySelectedAction();
+      } else if (selectedAction.shape?.type === 'single' || isMultiattackAction(selectedAction)) {
+        setSelectedTargetId(creature.id);
+        setAreaOrigin(creature.position);
+      }
+      return;
+    }
+
+    if (selectedAction?.type === 'savingThrowEffect') {
+      if (areaOrigin && samePosition(areaOrigin, gridCursor)) {
+        applySelectedAction();
+      } else {
+        setAreaOrigin(gridCursor);
+      }
+      return;
+    }
+
+    handleCellClick(gridCursor);
   }
 
   function handleCellClick(position: GridPosition) {
@@ -143,7 +318,7 @@ export function App() {
     }
 
     if (actionName === 'Cast a Spell') {
-      const spell = activeActions.find((action) => action.tags.includes('spell') || action.kind === 'spell');
+      const spell = activeSpellActions[0] ?? activeActions.find((action) => action.tags.includes('spell') || action.kind === 'spell');
       resetTargeting(spell?.id);
       return;
     }
@@ -206,6 +381,21 @@ export function App() {
 
   function applySelectedAction() {
     if (!activeCreature || !selectedAction) {
+      return;
+    }
+
+    if (selectedAction.spellId) {
+      const targets = getTargetsForAction(combat, activeCreature, selectedAction, selectedTargetId, areaOrigin, direction);
+      setCombat((current) =>
+        performSpellCast(current, {
+          spellId: selectedAction.spellId!,
+          targetId: selectedTargetId,
+          targetIds: targets.map((target) => target.id),
+          castAtLevel: selectedSpellCastLevel,
+          areaOrigin,
+          direction
+        })
+      );
       return;
     }
 
@@ -313,47 +503,89 @@ export function App() {
         </div>
       </header>
 
-      <section className="initiative-tracker">
-        {combat.initiative.length === 0 && <span>No initiative yet.</span>}
-        {combat.initiative.map((entry) => {
-          const creature = findCreature(combat, entry.creatureId);
-          return (
-            <button
-              className={[
-                'initiative-item',
-                creature.id === combat.activeCreatureId ? 'active-initiative' : '',
-                isDefeated(creature) ? 'defeated-initiative' : ''
-              ].join(' ')}
-              key={entry.creatureId}
-              onClick={() => setSelectedCreatureId(creature.id)}
-              title={getConditionLabels(creature)}
-            >
-              <strong>{creature.name}</strong>
-              <span>
-                HP {creature.hp}/{creature.maxHp}
-              </span>
-              <ConditionTags creature={creature} />
-            </button>
-          );
-        })}
-      </section>
+      <section className="cockpit-layout">
+        <aside className="panel left-rail" tabIndex={0} aria-label="Initiative and creature list">
+          <div className="round-card">
+            <strong>Round {combat.round || '-'}</strong>
+            <span>{activeCreature?.name ?? 'No initiative'}</span>
+          </div>
+          <h2>Initiative</h2>
+          <section className="initiative-tracker">
+            {combat.initiative.length === 0 && <span>No initiative yet.</span>}
+            {combat.initiative.map((entry) => {
+              const creature = findCreature(combat, entry.creatureId);
+              return (
+                <button
+                  className={[
+                    'initiative-item',
+                    creature.id === combat.activeCreatureId ? 'active-initiative' : '',
+                    isDefeated(creature) ? 'defeated-initiative' : ''
+                  ].join(' ')}
+                  key={entry.creatureId}
+                  onClick={() => setSelectedCreatureId(creature.id)}
+                  title={getConditionLabels(creature)}
+                >
+                  <strong>{creature.name}</strong>
+                  <HpBar creature={creature} compact />
+                  <span>
+                    HP {creature.hp}/{creature.maxHp}
+                  </span>
+                  <ConditionTags creature={creature} />
+                </button>
+              );
+            })}
+          </section>
 
-      {combat.pendingReactions.length > 0 && (
-        <section className="reaction-prompts">
-          <strong>Pending Reactions</strong>
-          {combat.pendingReactions.map((reaction) => (
-            <span className="reaction-prompt" key={reaction.id}>
-              {reaction.description}
-              <button onClick={() => setCombat((current) => resolvePendingReaction(current, reaction.id, true))}>Use reaction</button>
-              <button onClick={() => setCombat((current) => resolvePendingReaction(current, reaction.id, false))}>Skip</button>
-            </span>
-          ))}
-        </section>
-      )}
+          <h2>Creatures</h2>
+          <section className="creature-roster">
+            {combat.creatures.map((creature) => (
+              <button
+                className={[
+                  'roster-item',
+                  creature.id === selectedCreatureId ? 'selected-action' : '',
+                  creature.id === combat.activeCreatureId ? 'active-roster' : '',
+                  isDefeated(creature) ? 'defeated-initiative' : ''
+                ].join(' ')}
+                key={creature.id}
+                onClick={() => setSelectedCreatureId(creature.id)}
+                title={getConditionLabels(creature)}
+              >
+                <span className={`team-dot ${creature.team}`} />
+                <strong>{getCreatureShortLabel(creature)}</strong>
+                <span>{creature.name}</span>
+                <span>
+                  {creature.hp}/{creature.maxHp}
+                </span>
+                <ConditionTags creature={creature} compact />
+              </button>
+            ))}
+          </section>
 
-      <section className="layout">
-        <section className="panel board-panel">
-          <div className="grid-board" style={{ gridTemplateColumns: `repeat(${combat.grid.width}, 48px)` }}>
+          {combat.pendingReactions.length > 0 && (
+            <section className="reaction-prompts">
+              <strong>Pending Reactions</strong>
+              {combat.pendingReactions.map((reaction) => (
+                <span className="reaction-prompt" key={reaction.id}>
+                  {reaction.description}
+                  <button onClick={() => setCombat((current) => resolvePendingReaction(current, reaction.id, true))}>Use</button>
+                  <button onClick={() => setCombat((current) => resolvePendingReaction(current, reaction.id, false))}>Skip</button>
+                </span>
+              ))}
+            </section>
+          )}
+        </aside>
+
+        <section className="layout">
+        <section className="panel board-panel" aria-label="Battle grid panel">
+          <div
+            aria-label="Battle grid"
+            className="grid-board"
+            ref={gridRef}
+            role="grid"
+            tabIndex={0}
+            title="Grid focused. Use arrow keys to move the cursor and Enter to select."
+            style={{ gridTemplateColumns: `repeat(${combat.grid.width}, 48px)` }}
+          >
             {Array.from({ length: combat.grid.height }).flatMap((_, y) =>
               Array.from({ length: combat.grid.width }).map((_, x) => {
                 const position = { x, y };
@@ -363,16 +595,19 @@ export function App() {
                 const highlighted = highlightedKeys.has(positionKey(position));
                 const active = creature?.id === combat.activeCreatureId;
                 const selected = creature?.id === selectedCreatureId;
+                const cursor = samePosition(gridCursor, position);
 
                 return (
                   <button
+                    aria-label={`Grid ${x},${y}${creature ? ` ${creature.name}` : ''}${blocked ? ' blocked' : ''}`}
                     className={[
                       'grid-cell',
                       blocked ? 'blocked' : '',
                       highlighted ? 'highlighted' : '',
                       movement ? 'movement-cell' : '',
                       active ? 'active-cell' : '',
-                      selected ? 'selected-cell' : ''
+                      selected ? 'selected-cell' : '',
+                      cursor ? 'keyboard-cursor' : ''
                     ].join(' ')}
                     key={positionKey(position)}
                     onClick={() => handleCellClick(position)}
@@ -394,7 +629,7 @@ export function App() {
           </div>
         </section>
 
-        <aside className="panel side-panel">
+        <aside className="panel side-panel" tabIndex={0} aria-label="Active creature and actions">
           <h2>Active Creature</h2>
           {activeCreature ? (
             <>
@@ -411,6 +646,7 @@ export function App() {
                 </button>
                 <button onClick={cancelSelection}>Cancel Selection</button>
               </div>
+              <p className="keyboard-hint">{keyboardHint}</p>
 
               <h3>Basic Actions</h3>
               <div className="action-list">
@@ -425,92 +661,133 @@ export function App() {
                   </button>
                 ))}
               </div>
-              <div className="basic-options">
-                <label>
-                  Basic target
-                  <select value={basicTargetId ?? ''} onChange={(event) => setBasicTargetId(event.target.value || undefined)}>
-                    <option value="">None</option>
-                    {combat.creatures
-                      .filter((creature) => creature.id !== activeCreature.id && !isDefeated(creature))
-                      .map((creature) => (
-                        <option key={creature.id} value={creature.id}>
-                          {creature.name}
+              <details className="compact-details">
+                <summary>Basic action options</summary>
+                <div className="basic-options">
+                  <label>
+                    Basic target
+                    <select value={basicTargetId ?? ''} onChange={(event) => setBasicTargetId(event.target.value || undefined)}>
+                      <option value="">None</option>
+                      {combat.creatures
+                        .filter((creature) => creature.id !== activeCreature.id && !isDefeated(creature))
+                        .map((creature) => (
+                          <option key={creature.id} value={creature.id}>
+                            {creature.name}
+                          </option>
+                        ))}
+                    </select>
+                  </label>
+                  <label>
+                    Help mode
+                    <select value={helpMode} onChange={(event) => setHelpMode(event.target.value as HelpMode)}>
+                      <option value="ally">Help ally</option>
+                      <option value="enemy">Help against enemy</option>
+                    </select>
+                  </label>
+                  <label>
+                    Ready action
+                    <select value={readyActionId ?? activeActions[0]?.id ?? ''} onChange={(event) => setReadyActionId(event.target.value || undefined)}>
+                      {activeActions.map((action) => (
+                        <option key={action.id} value={action.id}>
+                          {action.name}
                         </option>
                       ))}
-                  </select>
-                </label>
-                <label>
-                  Help mode
-                  <select value={helpMode} onChange={(event) => setHelpMode(event.target.value as HelpMode)}>
-                    <option value="ally">Help ally</option>
-                    <option value="enemy">Help against enemy</option>
-                  </select>
-                </label>
-                <label>
-                  Ready action
-                  <select value={readyActionId ?? activeActions[0]?.id ?? ''} onChange={(event) => setReadyActionId(event.target.value || undefined)}>
-                    {activeActions.map((action) => (
-                      <option key={action.id} value={action.id}>
-                        {action.name}
-                      </option>
-                    ))}
-                  </select>
-                </label>
-                <label>
-                  Ready trigger
-                  <input value={readyTrigger} onChange={(event) => setReadyTrigger(event.target.value)} />
-                </label>
-                <label>
-                  Search
-                  <select value={searchMode} onChange={(event) => setSearchMode(event.target.value as SearchMode)}>
-                    <option value="perception">WIS / Perception</option>
-                    <option value="investigation">INT / Investigation</option>
-                  </select>
-                </label>
-                <label>
-                  Shove
-                  <select value={shoveOutcome} onChange={(event) => setShoveOutcome(event.target.value as ShoveOutcome)}>
-                    <option value="prone">Knock prone</option>
-                    <option value="push">Push 5 ft</option>
-                  </select>
-                </label>
-                <label>
-                  Improvised ability
-                  <select value={improvisedAbility} onChange={(event) => setImprovisedAbility(event.target.value as Ability | '')}>
-                    <option value="">No roll</option>
-                    <option value="str">STR</option>
-                    <option value="dex">DEX</option>
-                    <option value="con">CON</option>
-                    <option value="int">INT</option>
-                    <option value="wis">WIS</option>
-                    <option value="cha">CHA</option>
-                  </select>
-                </label>
-                <label>
-                  Note
-                  <input value={basicNote} onChange={(event) => setBasicNote(event.target.value)} />
-                </label>
-              </div>
+                    </select>
+                  </label>
+                  <label>
+                    Ready trigger
+                    <input value={readyTrigger} onChange={(event) => setReadyTrigger(event.target.value)} />
+                  </label>
+                  <label>
+                    Search
+                    <select value={searchMode} onChange={(event) => setSearchMode(event.target.value as SearchMode)}>
+                      <option value="perception">WIS / Perception</option>
+                      <option value="investigation">INT / Investigation</option>
+                    </select>
+                  </label>
+                  <label>
+                    Shove
+                    <select value={shoveOutcome} onChange={(event) => setShoveOutcome(event.target.value as ShoveOutcome)}>
+                      <option value="prone">Knock prone</option>
+                      <option value="push">Push 5 ft</option>
+                    </select>
+                  </label>
+                  <label>
+                    Improvised ability
+                    <select value={improvisedAbility} onChange={(event) => setImprovisedAbility(event.target.value as Ability | '')}>
+                      <option value="">No roll</option>
+                      <option value="str">STR</option>
+                      <option value="dex">DEX</option>
+                      <option value="con">CON</option>
+                      <option value="int">INT</option>
+                      <option value="wis">WIS</option>
+                      <option value="cha">CHA</option>
+                    </select>
+                  </label>
+                  <label>
+                    Note
+                    <input value={basicNote} onChange={(event) => setBasicNote(event.target.value)} />
+                  </label>
+                </div>
+              </details>
+
+              <SpellActionPanel
+                spells={activeSpells}
+                spellActions={activeSpellActions}
+                search={spellSearch}
+                selectedActionId={selectedActionId}
+                onSearchChange={setSpellSearch}
+                getDisabledReason={(action) => getActionDisabledReason(activeCreature, action, combat.turnState)}
+                onSelect={handleCreatureActionSelect}
+              />
 
               <CreatureActionGroups
                 activeCreature={activeCreature}
                 actions={activeActions}
                 selectedActionId={selectedActionId}
+                selectedTab={actionTab}
+                onSelectTab={setActionTab}
                 turnState={combat.turnState}
                 getDisabledReason={(action) => getActionDisabledReason(activeCreature, action, combat.turnState)}
-                onSelect={(action) => {
-                  if (isUtilityAction(action)) {
-                    setCombat((current) => performCreatureUtilityAction(current, action.id));
-                  } else {
-                    resetTargeting(action.id);
-                  }
-                }}
+                onSelect={handleCreatureActionSelect}
               />
               {selectedAction && (
-                <div className="target-panel">
+                <div className="target-panel" ref={targetPanelRef} tabIndex={0} aria-label="Target panel">
                   <p>{describeAction(selectedAction)}</p>
+                  {selectedSpell && selectedSpell.automationLevel !== 'full' && (
+                    <p className="manual-resolution">
+                      {selectedSpell.automationLevel}: {selectedSpell.manualResolution ?? 'Resolve remaining spell effects manually.'}
+                    </p>
+                  )}
+                  {selectedSpell && selectedSpell.level > 0 && (
+                    <label>
+                      Cast level
+                      <select
+                        value={selectedSpellCastLevel ?? selectedSpell.level}
+                        onChange={(event) =>
+                          setSpellCastLevels((current) => ({
+                            ...current,
+                            [selectedSpell.id]: Number(event.target.value)
+                          }))
+                        }
+                      >
+                        {getAvailableCastLevels(activeCreature, selectedSpell).map((level) => (
+                          <option key={level} value={level}>
+                            Level {level}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                  )}
                   {isAttackAction(selectedAction) && (
-                    <div className="attack-debug">
+                    <details
+                      className="attack-debug compact-details"
+                      open={debugOpen}
+                      ref={debugDetailsRef}
+                      tabIndex={0}
+                      onToggle={(event) => setDebugOpen(event.currentTarget.open)}
+                    >
+                      <summary>Attack debug</summary>
                       <span>Attack bonus: {formatBaseEffectiveBonus(selectedAction.attackBonus ?? 0, getEffectiveAttackBonus(selectedAction, activeCreature, combat))}</span>
                       <span>
                         Target AC:{' '}
@@ -537,38 +814,55 @@ export function App() {
                           {attackDebugStats.hitPercentage.toFixed(1)}%, expected {attackDebugStats.expectedHitPercentage.toFixed(1)}%
                         </span>
                       )}
-                    </div>
+                    </details>
                   )}
                   {isMultiattackAction(selectedAction) && (
                     <div className="multiattack-targets">
-                      <strong>Multiattack steps</strong>
+                      <strong>Multiattack target assignment</strong>
+                      <label>
+                        Same target for all
+                        <select
+                          value={selectedTargetId ?? ''}
+                          onChange={(event) => {
+                            const targetId = event.target.value || undefined;
+                            setSelectedTargetId(targetId);
+                            setMultiattackTargets(targetId ? assignAllMultiattackTargets(selectedAction, targetId) : {});
+                          }}
+                        >
+                          <option value="">None</option>
+                          {combat.creatures
+                            .filter((creature) => creature.id !== activeCreature.id && !isDefeated(creature))
+                            .map((creature) => (
+                              <option key={creature.id} value={creature.id}>
+                                {creature.name} AC {formatBaseEffectiveNumber(creature.ac, getEffectiveAC(creature, combat))}
+                              </option>
+                            ))}
+                        </select>
+                      </label>
                       {(selectedAction.multiattack?.steps ?? []).map((step) => (
                         <label key={step.id}>
                           {step.name}
-                          {selectedAction.multiattack?.targetMode === 'chooseEach' ? (
-                            <select
-                              value={multiattackTargets[step.id] ?? ''}
-                              onChange={(event) =>
-                                setMultiattackTargets((current) => ({
-                                  ...current,
-                                  [step.id]: event.target.value
-                                }))
-                              }
-                            >
-                              <option value="">None</option>
-                              {combat.creatures
-                                .filter((creature) => creature.id !== activeCreature.id && !isDefeated(creature))
-                                .map((creature) => (
-                                  <option key={creature.id} value={creature.id}>
-                                    {creature.name} AC {formatBaseEffectiveNumber(creature.ac, getEffectiveAC(creature, combat))}
-                                  </option>
-                                ))}
-                            </select>
-                          ) : (
-                            <span>{selectedTarget?.name ?? 'choose target below'}</span>
-                          )}
+                          <select
+                            value={getMultiattackStepTargetValue(selectedAction, step.id, multiattackTargets, selectedTargetId)}
+                            onChange={(event) =>
+                              setMultiattackTargets((current) => ({
+                                ...current,
+                                [step.id]: event.target.value
+                              }))
+                            }
+                          >
+                            <option value="">None</option>
+                            {combat.creatures
+                              .filter((creature) => creature.id !== activeCreature.id && !isDefeated(creature))
+                              .map((creature) => (
+                                <option key={creature.id} value={creature.id}>
+                                  {creature.name} AC {formatBaseEffectiveNumber(creature.ac, getEffectiveAC(creature, combat))}
+                                </option>
+                              ))}
+                          </select>
                         </label>
                       ))}
+                      <small>Keyboard: move the grid cursor onto a creature and press Enter to fill the next empty step. Enter again confirms once all steps have targets.</small>
                     </div>
                   )}
                   {(selectedAction.shape?.type === 'line' || selectedAction.shape?.type === 'cone') && (
@@ -584,23 +878,25 @@ export function App() {
                       ))}
                     </div>
                   )}
-                  {(!isMultiattackAction(selectedAction) || selectedAction.multiattack?.targetMode !== 'chooseEach') && (
+                  {!isMultiattackAction(selectedAction) && (
                     <label>
                       Target
                       <select value={selectedTargetId ?? ''} onChange={(event) => setSelectedTargetId(event.target.value || undefined)}>
-                        <option value="">None</option>
-                        {combat.creatures
-                          .filter((creature) => creature.id !== activeCreature.id && !isDefeated(creature))
-                          .map((creature) => (
+                          <option value="">None</option>
+                          {getTargetOptions(combat, activeCreature, selectedAction, selectedSpell).map((creature) => (
                             <option key={creature.id} value={creature.id}>
                               {creature.name} AC {formatBaseEffectiveNumber(creature.ac, getEffectiveAC(creature, combat))}
                             </option>
                           ))}
-                      </select>
-                    </label>
-                  )}
+                        </select>
+                      </label>
+                    )}
                   <p>Area targets: {targetsInArea.map((target) => target.name).join(', ') || 'none'}</p>
-                  <button disabled={Boolean(getActionDisabledReason(activeCreature, selectedAction, combat.turnState))} onClick={applySelectedAction}>
+                  <button
+                    disabled={Boolean(getTargetPanelDisabledReason(activeCreature, selectedAction, combat.turnState, multiattackTargets, selectedTargetId))}
+                    title={getTargetPanelDisabledReason(activeCreature, selectedAction, combat.turnState, multiattackTargets, selectedTargetId)}
+                    onClick={applySelectedAction}
+                  >
                     Apply Action
                   </button>
                 </div>
@@ -621,8 +917,8 @@ export function App() {
             </div>
           )}
           {selectedCreature && (
-            <div className="condition-dev-panel">
-              <h3>Dev / Test Tools</h3>
+            <details className="condition-dev-panel compact-details">
+              <summary>Dev / Test Tools</summary>
               <div className="hp-tools">
                 <label>
                   HP amount
@@ -672,13 +968,13 @@ export function App() {
                   </button>
                 ))}
               </div>
-            </div>
+            </details>
           )}
         </aside>
 
         <section className="panel log-panel">
           <h2>Combat Log</h2>
-          <ol className="combat-log">
+          <ol className="combat-log" ref={logRef} tabIndex={0} aria-label="Combat log">
             {combat.log.map((entry) => (
               <li key={entry.id}>
                 <strong>{entry.type}</strong> {entry.message}
@@ -688,20 +984,30 @@ export function App() {
         </section>
 
         <section className="panel json-panel">
-          <h2>Import / Export</h2>
-          <div className="json-actions">
-            <button onClick={exportCurrent}>Export Current</button>
-            <button onClick={loadJson}>Load JSON</button>
-            <button onClick={downloadJson}>Download JSON</button>
-            <label>
-              Upload JSON
-              <input accept="application/json,.json" type="file" onChange={(event) => void uploadJson(event.target.files?.[0])} />
-            </label>
-          </div>
-          {jsonError && <p className="error">{jsonError}</p>}
-          <textarea value={jsonText} onChange={(event) => setJsonText(event.target.value)} spellCheck={false} />
+          <details
+            className="compact-details"
+            open={toolsOpen}
+            ref={toolsDetailsRef}
+            tabIndex={0}
+            onToggle={(event) => setToolsOpen(event.currentTarget.open)}
+          >
+            <summary>Tools: import / export JSON</summary>
+            <div className="json-actions">
+              <button onClick={exportCurrent}>Export Current</button>
+              <button onClick={loadJson}>Load JSON</button>
+              <button onClick={downloadJson}>Download JSON</button>
+              <label>
+                Upload JSON
+                <input accept="application/json,.json" type="file" onChange={(event) => void uploadJson(event.target.files?.[0])} />
+              </label>
+            </div>
+            {jsonError && <p className="error">{jsonError}</p>}
+            <textarea value={jsonText} onChange={(event) => setJsonText(event.target.value)} spellCheck={false} />
+          </details>
+        </section>
         </section>
       </section>
+      {showHelp && <KeyboardHelpOverlay onClose={() => setShowHelp(false)} />}
     </main>
   );
 }
@@ -738,10 +1044,84 @@ function CreatureSummary({ creature, state }: { creature: Creature; state: Comba
 }
 
 
+function SpellActionPanel({
+  spells,
+  spellActions,
+  search,
+  selectedActionId,
+  onSearchChange,
+  getDisabledReason,
+  onSelect
+}: {
+  spells: SpellDefinition[];
+  spellActions: ActionDefinition[];
+  search: string;
+  selectedActionId?: string;
+  onSearchChange: (search: string) => void;
+  getDisabledReason: (action: ActionDefinition) => string | undefined;
+  onSelect: (action: ActionDefinition) => void;
+}) {
+  const spellById = new Map(spells.map((spell) => [spell.id, spell]));
+  const normalizedSearch = search.trim().toLowerCase();
+  const filteredActions = spellActions.filter((action) => {
+    const spell = action.spellId ? spellById.get(action.spellId) : undefined;
+    if (!spell || normalizedSearch.length === 0) {
+      return true;
+    }
+
+    return [spell.name, spell.school, spell.level === 0 ? 'cantrip' : `level ${spell.level}`, ...spell.tags, ...spell.classes]
+      .join(' ')
+      .toLowerCase()
+      .includes(normalizedSearch);
+  });
+
+  return (
+    <section className="spell-panel">
+      <div className="spell-panel-header">
+        <h3>Cast a Spell</h3>
+        <input
+          aria-label="Search spells"
+          placeholder="Search spells"
+          value={search}
+          onChange={(event) => onSearchChange(event.target.value)}
+        />
+      </div>
+      <div className="spell-list">
+        {filteredActions.length === 0 && <span className="empty-list">No spells match.</span>}
+        {filteredActions.map((action) => {
+          const spell = action.spellId ? spellById.get(action.spellId) : undefined;
+          const disabledReason = getDisabledReason(action);
+          const slot = spell ? getSpellSlotCost(spell) : undefined;
+          return (
+            <button
+              className={['spell-row', action.id === selectedActionId ? 'selected-action' : ''].join(' ')}
+              disabled={Boolean(disabledReason)}
+              key={action.id}
+              title={disabledReason ?? spell?.manualResolution ?? spell?.descriptionSummary ?? action.description}
+              onClick={() => onSelect(action)}
+            >
+              <strong>{action.name}</strong>
+              <span>{spell ? getSpellLevelLabel(spell) : 'Spell'}</span>
+              <span>{formatActionCost(action.actionCost)}</span>
+              <span>{spell?.range.text ?? `R ${action.range}`}</span>
+              {spell?.concentration && <span>Conc.</span>}
+              <span>{slot ? `Slot L${slot.level}` : 'At will'}</span>
+              {spell && spell.automationLevel !== 'full' && <small>{spell.automationLevel}: {spell.manualResolution}</small>}
+              {disabledReason && <small>{disabledReason}</small>}
+            </button>
+          );
+        })}
+      </div>
+    </section>
+  );
+}
+
 function CreatureActionGroups({
   activeCreature,
   actions,
   selectedActionId,
+  selectedTab,
+  onSelectTab,
   turnState,
   getDisabledReason,
   onSelect
@@ -749,6 +1129,8 @@ function CreatureActionGroups({
   activeCreature: Creature;
   actions: ActionDefinition[];
   selectedActionId?: string;
+  selectedTab: ActionDefinition['actionCost'];
+  onSelectTab: (tab: ActionDefinition['actionCost']) => void;
   turnState: TurnState;
   getDisabledReason: (action: ActionDefinition) => string | undefined;
   onSelect: (action: ActionDefinition) => void;
@@ -761,45 +1143,69 @@ function CreatureActionGroups({
   ];
 
   return (
-    <>
+    <section className="ability-panel">
       <h3>Creature Actions</h3>
-      {groups.map(([label, cost]) => {
-        const groupedActions = actions.filter((action) => action.actionCost === cost);
-        if (groupedActions.length === 0) {
-          return null;
-        }
+      <div className="action-tabs">
+        {groups.map(([label, cost]) => {
+          const count = actions.filter((action) => action.actionCost === cost).length;
+          if (count === 0) {
+            return null;
+          }
 
-        return (
-          <div className="action-group" key={cost}>
-            <strong>{label}</strong>
-            <div className="action-list">
-              {groupedActions.map((action) => {
-                const disabledReason = getDisabledReason(action);
-                return (
-                  <button
-                    className={action.id === selectedActionId ? 'selected-action' : ''}
-                    disabled={Boolean(disabledReason)}
-                    key={action.id}
-                    title={disabledReason ?? action.description ?? describeAction(action)}
-                    onClick={() => onSelect(action)}
-                  >
-                    {action.tags.includes('spell') || action.kind === 'spell' ? '[Spell] ' : ''}
-                    {action.kind === 'multiattack' ? '[Multi] ' : ''}
-                    {action.generatedByFeatureId ? '[Feature] ' : ''}
-                    {action.name}
-                    {isAttackAction(action) ? ` (+${action.attackBonus ?? 0})` : ''}
-                  </button>
-                );
-              })}
-            </div>
-          </div>
-        );
-      })}
-    </>
+          return (
+            <button className={selectedTab === cost ? 'selected-action' : ''} key={cost} onClick={() => onSelectTab(cost)}>
+              {label} <span>{count}</span>
+            </button>
+          );
+        })}
+      </div>
+      <div className="action-grid">
+        {actions
+          .filter((action) => action.actionCost === selectedTab)
+          .map((action, index) => {
+            const disabledReason = getDisabledReason(action);
+            const hotkey = index < 9 ? getActionHotkeyLabel(selectedTab, index) : undefined;
+            return (
+              <button
+                aria-label={`${hotkey ? `${hotkey}: ` : ''}${action.name}`}
+                className={['ability-card', action.id === selectedActionId ? 'selected-action' : ''].join(' ')}
+                disabled={Boolean(disabledReason)}
+                key={action.id}
+                title={`${hotkey ? `${hotkey}. ` : ''}${disabledReason ?? action.description ?? describeAction(action)}`}
+                onClick={() => onSelect(action)}
+              >
+                {hotkey && <span className="hotkey-chip">{hotkey}</span>}
+                <strong>{action.name}</strong>
+                <span className="badge-row">
+                  {action.tags.includes('spell') || action.kind === 'spell' ? <span>Spell</span> : null}
+                  {action.kind === 'multiattack' ? <span>Multi</span> : null}
+                  {action.generatedByFeatureId ? <span>Feature</span> : null}
+                  {action.tags.includes('melee') ? <span>Melee</span> : null}
+                  {action.tags.includes('ranged') ? <span>Ranged</span> : null}
+                </span>
+                <span className="ability-meta">{getActionMeta(action)}</span>
+                {disabledReason && <small>{disabledReason}</small>}
+              </button>
+            );
+          })}
+      </div>
+    </section>
   );
 }
 
 function describeAction(action: ActionDefinition): string {
+  const spell = action.spellId ? getSpellDefinition(action.spellId) : undefined;
+  if (spell) {
+    const parts = [
+      getSpellLevelLabel(spell),
+      formatActionCost(action.actionCost),
+      spell.range.text,
+      spell.concentration ? 'concentration' : undefined,
+      spell.automationLevel !== 'full' ? `${spell.automationLevel} automation` : undefined
+    ].filter(Boolean);
+    return `${parts.join(' - ')}. ${spell.descriptionSummary}`;
+  }
+
   const rulesKind = action.type ?? action.kind;
   if (rulesKind === 'savingThrowEffect') {
     const save = action.save ?? action.effects.find((effect) => effect.save)?.save;
@@ -812,6 +1218,162 @@ function describeAction(action: ActionDefinition): string {
   }
 
   return `${rulesKind} - +${action.attackBonus ?? 0} to hit - ${action.damage?.dice ?? 'no damage'} - range ${action.range}`;
+}
+
+function getActionMeta(action: ActionDefinition): string {
+  const spell = action.spellId ? getSpellDefinition(action.spellId) : undefined;
+  if (spell) {
+    const slot = getSpellSlotCost(spell);
+    return [
+      getSpellLevelLabel(spell),
+      spell.range.text,
+      spell.damage?.dice,
+      spell.healing?.dice ? `Heal ${spell.healing.dice}` : undefined,
+      spell.saveAbility ? `${spell.saveAbility.toUpperCase()} save` : undefined,
+      slot ? `slot L${slot.level}` : undefined
+    ]
+      .filter(Boolean)
+      .join(' | ');
+  }
+
+  const bits: string[] = [];
+  const rulesKind = action.type ?? action.kind;
+
+  if (isAttackAction(action)) {
+    bits.push(formatBaseEffectiveBonus(action.attackBonus ?? 0, action.attackBonus ?? 0));
+  }
+
+  if (action.damage?.dice) {
+    bits.push(action.damage.dice);
+  }
+
+  if (rulesKind === 'savingThrowEffect') {
+    const save = action.save ?? action.effects.find((effect) => effect.save)?.save;
+    bits.push(`${save?.ability.toUpperCase() ?? '?'} DC ${save?.dc ?? '?'}`);
+  }
+
+  if (action.kind === 'multiattack') {
+    bits.push(`${action.multiattack?.steps.length ?? 0} steps`);
+  }
+
+  if (action.range > 0) {
+    bits.push(`R ${action.range}`);
+  }
+
+  if ((action.resourceCosts ?? []).length > 0) {
+    bits.push((action.resourceCosts ?? []).map((cost) => `${cost.amount} ${cost.resourceId}`).join(', '));
+  }
+
+  return bits.join(' | ') || action.description || 'Utility';
+}
+
+function getSpellLevelLabel(spell: SpellDefinition): string {
+  return spell.level === 0 ? 'Cantrip' : `Level ${spell.level}`;
+}
+
+function formatActionCost(actionCost: ActionDefinition['actionCost']): string {
+  if (actionCost === 'bonusAction') {
+    return 'Bonus';
+  }
+
+  return actionCost[0].toUpperCase() + actionCost.slice(1);
+}
+
+function assignAllMultiattackTargets(action: ActionDefinition, targetId: string): Record<string, string> {
+  return Object.fromEntries((action.multiattack?.steps ?? []).map((step) => [step.id, targetId]));
+}
+
+function getMultiattackStepTargetValue(
+  action: ActionDefinition,
+  stepId: string,
+  stepTargets: Record<string, string>,
+  sharedTargetId: string | undefined
+): string {
+  return stepTargets[stepId] ?? (action.multiattack?.targetMode === 'fixed' ? '' : sharedTargetId ?? '');
+}
+
+function areMultiattackTargetsComplete(
+  action: ActionDefinition,
+  stepTargets: Record<string, string>,
+  sharedTargetId: string | undefined
+): boolean {
+  const steps = action.multiattack?.steps ?? [];
+  return steps.length > 0 && steps.every((step) => Boolean(getMultiattackStepTargetValue(action, step.id, stepTargets, sharedTargetId)));
+}
+
+function getVisibleActionHotkeys(actions: ActionDefinition[], actionCost: ActionDefinition['actionCost']): ActionDefinition[] {
+  return getActionsForHotkeyCost(actions, actionCost);
+}
+
+function getActionHotkeyLabel(actionCost: ActionDefinition['actionCost'], index: number): string {
+  const number = index + 1;
+  if (actionCost === 'bonusAction') {
+    return `Shift+${number}`;
+  }
+
+  if (actionCost === 'reaction' || actionCost === 'free') {
+    return `Ctrl+${number}`;
+  }
+
+  return `${number}`;
+}
+
+function getKeyboardHint(
+  selectionMode: SelectionMode,
+  selectedAction: ActionDefinition | undefined,
+  gridCursor: GridPosition,
+  combat: CombatState
+): string {
+  if (selectedAction) {
+    return `${selectedAction.name} selected. Use arrows to move the grid cursor (${gridCursor.x},${gridCursor.y}), Enter to choose/confirm, Escape to cancel.`;
+  }
+
+  if (selectionMode === 'move') {
+    return `Move mode. Use arrows to move the grid cursor (${gridCursor.x},${gridCursor.y}); Enter attempts movement or selects a creature.`;
+  }
+
+  return `Keyboard ready. Round ${combat.round || '-'}; press ? for shortcuts.`;
+}
+
+function KeyboardHelpOverlay({ onClose }: { onClose: () => void }) {
+  return (
+    <div className="help-backdrop" role="presentation" onClick={onClose}>
+      <section className="help-modal" role="dialog" aria-modal="true" aria-label="Keyboard shortcuts" onClick={(event) => event.stopPropagation()}>
+        <header>
+          <h2>Keyboard Shortcuts</h2>
+          <button onClick={onClose} aria-label="Close keyboard shortcuts">
+            Close
+          </button>
+        </header>
+        <div className="shortcut-grid">
+          <span>Space</span>
+          <p>End turn / next turn</p>
+          <span>R</span>
+          <p>Roll initiative</p>
+          <span>M</span>
+          <p>Move mode</p>
+          <span>Esc</span>
+          <p>Cancel targeting or close this help</p>
+          <span>Arrows</span>
+          <p>Move the grid cursor</p>
+          <span>Enter</span>
+          <p>Select cursor cell, choose target, or confirm selected target</p>
+          <span>1-9</span>
+          <p>Use visible Action hotbar buttons</p>
+          <span>Shift+1-9</span>
+          <p>Use visible Bonus Action buttons</p>
+          <span>Ctrl/Cmd+1-9</span>
+          <p>Use visible Reaction/Free buttons</p>
+          <span>G / T / L</span>
+          <p>Focus grid, target panel, or combat log</p>
+          <span>D / I</span>
+          <p>Toggle debug or import/export tools</p>
+          <span>? / H</span>
+          <p>Open this help</p>
+        </div>
+      </section>
+    </div>
+  );
 }
 
 function isAttackAction(action: ActionDefinition): boolean {
@@ -852,6 +1414,34 @@ function getActionDisabledReason(creature: Creature, action: ActionDefinition, t
   return getUnavailableActionReason(creature, action);
 }
 
+function getTargetPanelDisabledReason(
+  creature: Creature,
+  action: ActionDefinition,
+  turnState: TurnState,
+  multiattackTargets: Record<string, string>,
+  selectedTargetId: string | undefined
+): string | undefined {
+  const actionReason = getActionDisabledReason(creature, action, turnState);
+  if (actionReason) {
+    return actionReason;
+  }
+
+  if (isMultiattackAction(action) && !areMultiattackTargetsComplete(action, multiattackTargets, selectedTargetId)) {
+    return 'Choose a target for each multiattack step.';
+  }
+
+  const spell = action.spellId ? getSpellDefinition(action.spellId) : undefined;
+  if (spell?.automationLevel === 'manual' || spell?.targetType === 'self' || spell?.targetType === 'manual') {
+    return undefined;
+  }
+
+  if (action.spellId && spell?.targetType === 'creature' && !selectedTargetId) {
+    return 'Choose a spell target.';
+  }
+
+  return undefined;
+}
+
 function getShapeOrigin(
   action: ActionDefinition,
   activePosition: GridPosition,
@@ -873,15 +1463,52 @@ function getTargetsForAction(
   direction?: CardinalDirection
 ): Creature[] {
   if (action.shape?.type === 'single') {
-    return selectedTargetId ? [findCreature(combat, selectedTargetId)].filter((target) => target.id !== activeCreature.id) : [];
+    return selectedTargetId ? [findCreature(combat, selectedTargetId)] : [];
   }
 
   if ((action.type ?? action.kind) === 'savingThrowEffect') {
     const origin = getShapeOrigin(action, activeCreature.position, areaOrigin);
-    return getTargetsInShape(combat, action.id, origin, direction);
+    const squares = getActionShapeSquares(combat, action, origin, direction);
+    return combat.creatures.filter(
+      (creature) =>
+        creature.id !== activeCreature.id &&
+        !isDefeated(creature) &&
+        squares.some((square) => samePosition(square, creature.position))
+    );
   }
 
   return [];
+}
+
+function getTargetOptions(
+  combat: CombatState,
+  activeCreature: Creature,
+  action: ActionDefinition,
+  spell?: SpellDefinition
+): Creature[] {
+  if (spell?.targetType === 'self') {
+    return [activeCreature];
+  }
+
+  return combat.creatures.filter((creature) => {
+    if (isDefeated(creature)) {
+      return false;
+    }
+
+    return Boolean(action.spellId && spell?.targetType === 'creature') || creature.id !== activeCreature.id;
+  });
+}
+
+function getAvailableCastLevels(creature: Creature, spell: SpellDefinition): number[] {
+  const slotLevels = (creature.resources ?? [])
+    .map((resource) => {
+      const match = /^spell-slot-(\d+)$/.exec(resource.id);
+      return match && resource.current > 0 ? Number(match[1]) : undefined;
+    })
+    .filter((level): level is number => level !== undefined && level >= spell.level);
+
+  const levels = new Set([spell.level, ...slotLevels]);
+  return [...levels].sort((left, right) => left - right);
 }
 
 function HpBar({ creature, compact = false }: { creature: Creature; compact?: boolean }) {

@@ -22,6 +22,18 @@ export type ActionKind = 'meleeAttack' | 'rangedAttack' | 'savingThrowEffect' | 
 
 export type ActionCost = 'action' | 'bonusAction' | 'reaction' | 'free';
 
+export type SpellActionCost = 'action' | 'bonus' | 'reaction' | 'free';
+
+export type SpellSchool =
+  | 'abjuration'
+  | 'conjuration'
+  | 'divination'
+  | 'enchantment'
+  | 'evocation'
+  | 'illusion'
+  | 'necromancy'
+  | 'transmutation';
+
 export type ResourceReset = 'turnStart' | 'shortRest' | 'longRest' | 'dawn' | 'manual' | 'never';
 
 export type ResourceDisplay = 'pips' | 'number' | 'bar';
@@ -264,11 +276,95 @@ export interface ActionDefinition {
   description?: string;
   resourceCosts?: ResourceCost[];
   generatedByFeatureId?: string;
+  spellId?: string;
   baseActionName?: string;
   multiattack?: {
     steps: MultiattackStep[];
     targetMode?: 'sameTarget' | 'chooseEach' | 'fixed';
   };
+}
+
+export interface SpellRangeDefinition {
+  type: 'self' | 'touch' | 'feet' | 'sight' | 'unlimited' | 'special';
+  feet?: number;
+  text: string;
+}
+
+export interface SpellAreaDefinition {
+  shape: 'radius' | 'cone' | 'line' | 'cube' | 'sphere';
+  size: number;
+}
+
+export interface SpellScalingDefinition {
+  mode: 'cantripCharacterLevel' | 'perSlotLevelAboveBase' | 'manual';
+  dicePerStep?: string;
+  description?: string;
+}
+
+export interface SpellDamageDefinition extends DamageDefinition {
+  scaling?: SpellScalingDefinition;
+}
+
+export interface SpellHealingDefinition {
+  dice: string;
+  scaling?: SpellScalingDefinition;
+  addSpellcastingModifier?: boolean;
+}
+
+export type SpellTargetType = 'self' | 'creature' | 'point' | 'area' | 'manual';
+
+export type SpellAttackType =
+  | 'meleeSpellAttack'
+  | 'rangedSpellAttack'
+  | 'save'
+  | 'automatic'
+  | 'manual';
+
+export type SpellAutomationLevel = 'full' | 'partial' | 'manual';
+
+export type SpellTag =
+  | 'damage'
+  | 'healing'
+  | 'control'
+  | 'summon'
+  | 'utility'
+  | 'reaction'
+  | 'concentration'
+  | 'attack'
+  | 'save'
+  | 'area'
+  | 'buff';
+
+export interface SpellComponents {
+  verbal?: boolean;
+  somatic?: boolean;
+  material?: string | boolean;
+}
+
+export interface SpellDefinition {
+  id: string;
+  name: string;
+  level: number;
+  school: SpellSchool;
+  castingTime: string;
+  actionCost: SpellActionCost;
+  range: SpellRangeDefinition;
+  targetType: SpellTargetType;
+  area?: SpellAreaDefinition;
+  duration: string;
+  concentration: boolean;
+  ritual: boolean;
+  components: SpellComponents;
+  classes: string[];
+  attackType?: SpellAttackType;
+  saveAbility?: Ability;
+  damage?: SpellDamageDefinition;
+  healing?: SpellHealingDefinition;
+  conditionsApplied?: ConditionId[];
+  tags: SpellTag[];
+  descriptionSummary: string;
+  automationLevel: SpellAutomationLevel;
+  manualResolution?: string;
 }
 
 export interface ReadiedAction {
@@ -293,6 +389,13 @@ export interface Creature {
   resources?: Resource[];
   features?: FeatureDefinition[];
   skillBonuses?: Partial<Record<Skill, number>>;
+  spellcasting?: {
+    ability: Ability;
+    saveDc?: number;
+    attackBonus?: number;
+    knownSpells?: string[];
+    preparedSpells?: string[];
+  };
   readiedAction?: ReadiedAction;
 }
 

@@ -31,7 +31,7 @@ export const CORE_CONDITION_IDS = [
 
 export type CoreConditionId = (typeof CORE_CONDITION_IDS)[number];
 
-export const UTILITY_CONDITION_IDS = ['hidden', 'disengaged', 'helped', 'helpedTarget', 'defeated'] as const;
+export const UTILITY_CONDITION_IDS = ['hidden', 'disengaged', 'helped', 'helpedTarget', 'defeated', 'concentrating'] as const;
 
 export type UtilityConditionId = (typeof UTILITY_CONDITION_IDS)[number];
 
@@ -289,6 +289,15 @@ conditionRegistry.defeated = {
     canTakeAction: () => false,
     canTakeReaction: () => false
   }
+};
+
+conditionRegistry.concentrating = {
+  id: 'concentrating',
+  name: 'Concentrating',
+  description: 'Tracks the spell a creature is concentrating on. Concentration checks are not automated yet.',
+  defaultDurationType: 'permanentUntilRemoved',
+  defaultStackBehavior: 'refresh',
+  hooks: {}
 };
 
 export function registerCondition(definition: ConditionDefinition): void {

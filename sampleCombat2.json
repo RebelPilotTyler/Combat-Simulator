@@ -130,6 +130,22 @@
         "cha": 12
       },
       "proficiencyBonus": 2,
+      "spellcasting": {
+        "ability": "int",
+        "saveDc": 13,
+        "attackBonus": 5,
+        "knownSpells": [
+          "fire-bolt",
+          "magic-missile",
+          "shield",
+          "burning-hands",
+          "sleep"
+        ],
+        "preparedSpells": [
+          "cure-wounds",
+          "healing-word"
+        ]
+      },
       "speed": 30,
       "position": {
         "x": 1,
@@ -215,6 +231,17 @@
           "name": "Spell Slots L1",
           "current": 3,
           "max": 3,
+          "resetOn": "longRest",
+          "display": {
+            "showOnCreaturePanel": true,
+            "mode": "pips"
+          }
+        },
+        {
+          "id": "spell-slot-2",
+          "name": "Spell Slots L2",
+          "current": 1,
+          "max": 1,
           "resetOn": "longRest",
           "display": {
             "showOnCreaturePanel": true,
@@ -485,6 +512,31 @@
           "description": "A limited-use heavy swing."
         },
         {
+          "id": "rotcap-multiattack",
+          "name": "Rotcap Multiattack",
+          "kind": "multiattack",
+          "actionCost": "action",
+          "tags": ["attack", "melee"],
+          "range": 1,
+          "effects": [],
+          "description": "Make two Moldy Maul attacks against the same target.",
+          "multiattack": {
+            "targetMode": "sameTarget",
+            "steps": [
+              {
+                "id": "maul-1",
+                "name": "Moldy Maul 1",
+                "actionId": "moldy-maul"
+              },
+              {
+                "id": "maul-2",
+                "name": "Moldy Maul 2",
+                "actionId": "moldy-maul"
+              }
+            ]
+          }
+        },
+        {
           "id": "maul-reaction",
           "name": "Maul Reaction",
           "kind": "meleeAttack",
@@ -660,6 +712,20 @@
         "cha": 10
       },
       "proficiencyBonus": 2,
+      "spellcasting": {
+        "ability": "wis",
+        "saveDc": 13,
+        "attackBonus": 4,
+        "knownSpells": [
+          "sacred-flame",
+          "guiding-bolt",
+          "bless",
+          "thunderwave"
+        ],
+        "preparedSpells": [
+          "cure-wounds"
+        ]
+      },
       "speed": 30,
       "position": {
         "x": 8,
@@ -727,7 +793,7 @@
           ],
           "resourceCosts": [
             {
-              "resourceId": "hexer-spell-slot-1",
+              "resourceId": "spell-slot-1",
               "amount": 1,
               "consumeOn": "use"
             }
@@ -737,10 +803,21 @@
       ],
       "resources": [
         {
-          "id": "hexer-spell-slot-1",
+          "id": "spell-slot-1",
           "name": "Spell Slots L1",
           "current": 2,
           "max": 2,
+          "resetOn": "longRest",
+          "display": {
+            "showOnCreaturePanel": true,
+            "mode": "pips"
+          }
+        },
+        {
+          "id": "spell-slot-2",
+          "name": "Spell Slots L2",
+          "current": 1,
+          "max": 1,
           "resetOn": "longRest",
           "display": {
             "showOnCreaturePanel": true,
