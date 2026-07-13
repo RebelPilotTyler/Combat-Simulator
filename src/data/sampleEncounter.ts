@@ -114,6 +114,7 @@ const heavyClub: ActionDefinition = {
   damage: { dice: '1d10+2', type: 'bludgeoning' },
   shape: { type: 'single' },
   effects: [],
+  resourceCosts: [{ resourceId: 'maul-routine', amount: 1, consumeOn: 'use', spendActionWhenDepleted: true }],
   description: 'A heavy melee attack.'
 };
 
@@ -200,19 +201,26 @@ export const sampleCreatures: Creature[] = [
     speed: 30,
     position: { x: 2, y: 6 },
     conditions: [],
-    actions: [quickStep],
+    actions: [
+      quickStep,
+      sparkBolt,
+      {
+        ...cracklingPulse,
+        resourceCosts: [{ resourceId: 'arcane-pulse', amount: 1, consumeOn: 'use' }]
+      }
+    ],
     resources: [
       {
-        id: 'spell-slot-1',
-        name: 'Spell Slots L1',
+        id: 'arcane-pulse',
+        name: 'Arcane Pulse',
         current: 2,
         max: 2,
         resetOn: 'longRest',
         display: { showOnCreaturePanel: true, mode: 'pips' }
       },
       {
-        id: 'spell-slot-2',
-        name: 'Spell Slots L2',
+        id: 'shield-surge',
+        name: 'Shield Surge',
         current: 1,
         max: 1,
         resetOn: 'longRest',
@@ -247,13 +255,7 @@ export const sampleCreatures: Creature[] = [
         ]
       }
     ],
-    skillBonuses: { stealth: 4, investigation: 4 },
-    spellcasting: {
-      ability: 'int',
-      saveDc: 13,
-      attackBonus: 5,
-      knownSpells: ['fire-bolt', 'magic-missile', 'shield', 'burning-hands', 'sleep']
-    }
+    skillBonuses: { stealth: 4, investigation: 4 }
   },
   {
     id: 'training-brute',
@@ -289,6 +291,14 @@ export const sampleCreatures: Creature[] = [
       }
     ],
     resources: [
+      {
+        id: 'maul-routine',
+        name: 'Maul Routine',
+        current: 2,
+        max: 2,
+        resetOn: 'turnStart',
+        display: { showOnCreaturePanel: true, mode: 'pips' }
+      },
       {
         id: 'crushing-slam',
         name: 'Crushing Slam',

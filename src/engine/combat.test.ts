@@ -116,6 +116,14 @@ function creature(overrides: Partial<Creature>): Creature {
   };
 }
 
+function findCreatureForTest(state: { creatures: Creature[] }, creatureId: string): Creature {
+  const found = state.creatures.find((candidate) => candidate.id === creatureId);
+  if (!found) {
+    throw new Error(`Missing test creature: ${creatureId}`);
+  }
+  return found;
+}
+
 describe('combat engine', () => {
   it('rolls initiative and tracks the active creature', () => {
     const state = createCombatState([
@@ -996,6 +1004,43 @@ describe('combat engine', () => {
     expect(result.creatures.find((candidate) => candidate.id === 'c')?.hp).toBe(7);
   });
 
+  it('normalizes template-created multiattacks that still have stale attack type metadata', () => {
+    const multiattack: ActionDefinition = {
+      id: 'templated-routine',
+      name: 'Templated Routine',
+      kind: 'multiattack',
+      type: 'meleeAttack',
+      actionCost: 'action',
+      tags: ['attack'],
+      range: 1,
+      effects: [],
+      multiattack: {
+        steps: [
+          { id: 'left', name: 'Left Strike', actionId: 'strike' },
+          { id: 'right', name: 'Right Strike', actionId: 'strike' }
+        ]
+      }
+    };
+    const state = rollInitiative(
+      createCombatState([
+        creature({ id: 'a', name: 'Alpha', actions: [...baseCreature.actions, multiattack] }),
+        creature({ id: 'b', name: 'Bravo', hp: 10, position: { x: 1, y: 0 } }),
+        creature({ id: 'c', name: 'Charlie', team: 'enemies', hp: 10, position: { x: 0, y: 1 } })
+      ]),
+      sequence([0.9, 0.1, 0.2])
+    );
+
+    const result = performMultiattackAction(
+      state,
+      'templated-routine',
+      { stepTargets: { left: 'b', right: 'c' } },
+      sequence([0.5, 0, 0.5, 0])
+    );
+
+    expect(result.creatures.find((candidate) => candidate.id === 'b')?.hp).toBe(7);
+    expect(result.creatures.find((candidate) => candidate.id === 'c')?.hp).toBe(7);
+  });
+
   it('effective AC is used for each multiattack step', () => {
     const multiattack: ActionDefinition = {
       id: 'double-strike',
@@ -1280,13 +1325,265 @@ describe('combat engine', () => {
     expect(getUnavailableActionReason(result.creatures[0], costlyStrike)).toBe('Needs 1 Power.');
   });
 
+  it('can defer spending the action until a turn-start attack resource is depleted', () => {
+    const routineStrike: ActionDefinition = {
+      ...baseCreature.actions[0],
+      id: 'routine-strike',
+      name: 'Routine Strike',
+      resourceCosts: [{ resourceId: 'routine', amount: 1, consumeOn: 'use', spendActionWhenDepleted: true }]
+    };
+    const state = rollInitiative(
+      createCombatState([
+        creature({
+          id: 'a',
+          name: 'Alpha',
+          actions: [routineStrike],
+          resources: [{ id: 'routine', name: 'Routine', current: 2, max: 2, resetOn: 'turnStart' }]
+        }),
+        creature({ id: 'b', name: 'Bravo', hp: 20, position: { x: 1, y: 0 } })
+      ]),
+      sequence([0.9, 0.1])
+    );
+
+    const first = performAttackAction(state, 'routine-strike', 'b', sequence([0.5, 0]));
+    expect(first.turnState.actionUsed).toBe(false);
+    expect(first.creatures[0].resources?.find((resource) => resource.id === 'routine')?.current).toBe(1);
+
+    const second = performAttackAction(first, 'routine-strike', 'b', sequence([0.5, 0]));
+    expect(second.turnState.actionUsed).toBe(true);
+    expect(second.creatures[0].resources?.find((resource) => resource.id === 'routine')?.current).toBe(0);
+    expect(second.creatures.find((candidate) => candidate.id === 'b')?.hp).toBe(14);
+
+    const nextRound = endTurn(endTurn(second));
+    expect(nextRound.activeCreatureId).toBe('a');
+    expect(nextRound.creatures[0].resources?.find((resource) => resource.id === 'routine')?.current).toBe(2);
+  });
+
+  it('runs Sneak Attack-style bonus damage once per turn', () => {
+    const routineStrike: ActionDefinition = {
+      ...baseCreature.actions[0],
+      id: 'routine-strike',
+      name: 'Routine Strike',
+      resourceCosts: [{ resourceId: 'routine', amount: 1, consumeOn: 'use', spendActionWhenDepleted: true }]
+    };
+    const state = rollInitiative(
+      createCombatState([
+        creature({
+          id: 'a',
+          name: 'Alpha',
+          actions: [routineStrike],
+          resources: [{ id: 'routine', name: 'Routine Attacks', current: 2, max: 2, resetOn: 'turnStart' }],
+          features: [
+            {
+              id: 'sneak-attack',
+              name: 'Sneak Attack',
+              description: 'Once per turn bonus damage.',
+              enabled: true,
+              source: 'test',
+              rules: [
+                {
+                  id: 'sneak-damage',
+                  trigger: 'beforeDamage',
+                  selectors: [{ type: 'self' }],
+                  filters: [{ type: 'actionHasTag', tag: 'attack' }, { type: 'oncePerTurn' }],
+                  effects: [{ type: 'addDamageDice', dice: '1d6' }]
+                }
+              ]
+            }
+          ]
+        }),
+        creature({ id: 'b', name: 'Bravo', team: 'enemies', hp: 20, maxHp: 20, position: { x: 1, y: 0 } })
+      ]),
+      sequence([0.9, 0.1])
+    );
+
+    const first = performAttackAction(state, 'routine-strike', 'b', sequence([0.5, 0, 0]));
+    const second = performAttackAction(first, 'routine-strike', 'b', sequence([0.5, 0]));
+
+    expect(findCreatureForTest(first, 'b').hp).toBe(16);
+    expect(findCreatureForTest(second, 'b').hp).toBe(13);
+  });
+
+  it('runs Rage-style damage reduction before HP changes', () => {
+    const state = rollInitiative(
+      createCombatState([
+        creature({ id: 'a', name: 'Alpha' }),
+        creature({
+          id: 'b',
+          name: 'Bravo',
+          team: 'enemies',
+          position: { x: 1, y: 0 },
+          conditions: [
+            {
+              id: 'raging',
+              durationType: 'permanentUntilRemoved',
+              stackBehavior: 'refresh',
+              stackCount: 1,
+              intensity: 1,
+              rules: [
+                {
+                  id: 'rage-reduction',
+                  trigger: 'beforeDamage',
+                  selectors: [{ type: 'self' }],
+                  effects: [{ type: 'reduceDamage', amount: 2 }]
+                }
+              ]
+            }
+          ]
+        })
+      ]),
+      sequence([0.9, 0.1])
+    );
+
+    const result = performAttackAction(state, 'strike', 'b', sequence([0.5, 0]));
+
+    expect(findCreatureForTest(result, 'b').hp).toBe(9);
+    expect(result.log[0].message).toContain('takes 1 damage');
+  });
+
+  it('runs Aura-style flat modifiers for nearby allies', () => {
+    const state = rollInitiative(
+      createCombatState([
+        creature({ id: 'a', name: 'Alpha', position: { x: 1, y: 0 } }),
+        creature({
+          id: 'c',
+          name: 'Charlie',
+          position: { x: 0, y: 0 },
+          features: [
+            {
+              id: 'aura',
+              name: 'Aura of Accuracy',
+              description: 'Nearby allies gain a roll modifier.',
+              enabled: true,
+              source: 'test',
+              rules: [
+                {
+                  id: 'aura-attack',
+                  trigger: 'beforeAttackRoll',
+                  selectors: [{ type: 'alliesWithinRange', range: 10 }],
+                  effects: [{ type: 'addFlatModifier', amount: 2 }]
+                }
+              ]
+            }
+          ]
+        }),
+        creature({ id: 'b', name: 'Bravo', team: 'enemies', ac: 16, hp: 10, maxHp: 10, position: { x: 2, y: 0 } })
+      ]),
+      sequence([0.9, 0.1, 0.2])
+    );
+
+    const result = performAttackAction(state, 'strike', 'b', sequence([0.45, 0]));
+
+    expect(findCreatureForTest(result, 'b').hp).toBe(7);
+    expect(result.log.some((entry) => entry.message.includes('+ 4 + 2 = 16 vs AC 16. Hit.'))).toBe(true);
+  });
+
+  it('can apply a condition from an on-hit damage rule', () => {
+    const trippingStrike: ActionDefinition = {
+      ...baseCreature.actions[0],
+      id: 'trip-strike',
+      name: 'Tripping Strike',
+      rules: [
+        {
+          id: 'trip-on-hit',
+          trigger: 'afterDamage',
+          selectors: [{ type: 'actionTarget' }],
+          effects: [{ type: 'applyCondition', conditionId: 'prone' }]
+        }
+      ]
+    };
+    const state = rollInitiative(
+      createCombatState([
+        creature({ id: 'a', name: 'Alpha', actions: [trippingStrike] }),
+        creature({ id: 'b', name: 'Bravo', team: 'enemies', position: { x: 1, y: 0 } })
+      ]),
+      sequence([0.9, 0.1])
+    );
+
+    const result = performAttackAction(state, 'trip-strike', 'b', sequence([0.5, 0]));
+
+    expect(hasCondition(findCreatureForTest(result, 'b'), 'prone')).toBe(true);
+  });
+
+  it('lets resource-spending rule effects prevent repeated use', () => {
+    const focusStrike: ActionDefinition = {
+      ...baseCreature.actions[0],
+      id: 'focus-strike',
+      name: 'Focus Strike',
+      actionCost: 'free',
+      resourceCosts: [{ resourceId: 'focus', amount: 1, consumeOn: 'use' }],
+      rules: [
+        {
+          id: 'extra-focus-cost',
+          trigger: 'onActionUsed',
+          selectors: [{ type: 'self' }],
+          effects: [{ type: 'spendResource', resourceId: 'focus', amount: 1 }]
+        }
+      ]
+    };
+    const state = rollInitiative(
+      createCombatState([
+        creature({
+          id: 'a',
+          name: 'Alpha',
+          actions: [focusStrike],
+          resources: [{ id: 'focus', name: 'Focus', current: 2, max: 2, resetOn: 'manual' }]
+        }),
+        creature({ id: 'b', name: 'Bravo', team: 'enemies', hp: 20, maxHp: 20, position: { x: 1, y: 0 } })
+      ]),
+      sequence([0.9, 0.1])
+    );
+
+    const first = performAttackAction(state, 'focus-strike', 'b', sequence([0.5, 0]));
+    const second = performAttackAction(first, 'focus-strike', 'b', sequence([0.5, 0]));
+
+    expect(findCreatureForTest(second, 'a').resources?.find((resource) => resource.id === 'focus')?.current).toBe(0);
+    expect(findCreatureForTest(second, 'b').hp).toBe(17);
+    expect(second.log.some((entry) => entry.message.includes('Needs 1 Focus'))).toBe(true);
+  });
+
+  it('spell-like creature actions use normal resource costs and attack resolution', () => {
+    const spark: ActionDefinition = {
+      id: 'spark',
+      name: 'Spark',
+      kind: 'spell',
+      type: 'rangedAttack',
+      actionCost: 'action',
+      tags: ['spell', 'attack', 'ranged'],
+      range: 6,
+      attackBonus: 5,
+      damage: { dice: '1d6', type: 'lightning' },
+      shape: { type: 'single' },
+      effects: [],
+      resourceCosts: [{ resourceId: 'charge', amount: 1, consumeOn: 'use' }]
+    };
+    const state = rollInitiative(
+      createCombatState([
+        creature({
+          id: 'a',
+          name: 'Alpha',
+          actions: [spark],
+          resources: [{ id: 'charge', name: 'Charge', current: 1, max: 1, resetOn: 'longRest' }]
+        }),
+        creature({ id: 'b', name: 'Bravo', hp: 10, position: { x: 2, y: 0 } })
+      ]),
+      sequence([0.9, 0.1])
+    );
+
+    const result = performAttackAction(state, 'spark', 'b', sequence([0.5, 0]));
+
+    expect(result.creatures[0].resources?.[0].current).toBe(0);
+    expect(result.creatures.find((candidate) => candidate.id === 'b')?.hp).toBe(9);
+    expect(result.log.some((entry) => entry.message.includes('Alpha casts Spark on Bravo'))).toBe(true);
+  });
+
   it('resource reset behavior restores matching resources', () => {
     const state = createCombatState([
       creature({
         id: 'a',
         name: 'Alpha',
         resources: [
-          { id: 'spell', name: 'Spell Slots', current: 0, max: 2, resetOn: 'longRest' },
+          { id: 'arcane', name: 'Arcane Charges', current: 0, max: 2, resetOn: 'longRest' },
           { id: 'ki', name: 'Ki', current: 0, max: 3, resetOn: 'shortRest' }
         ]
       })
@@ -1294,10 +1591,10 @@ describe('combat engine', () => {
 
     const shortRest = resetAllResources(state, 'shortRest');
     expect(shortRest.creatures[0].resources?.find((resource) => resource.id === 'ki')?.current).toBe(3);
-    expect(shortRest.creatures[0].resources?.find((resource) => resource.id === 'spell')?.current).toBe(0);
+    expect(shortRest.creatures[0].resources?.find((resource) => resource.id === 'arcane')?.current).toBe(0);
 
     const longRest = resetAllResources(shortRest, 'longRest');
-    expect(longRest.creatures[0].resources?.find((resource) => resource.id === 'spell')?.current).toBe(2);
+    expect(longRest.creatures[0].resources?.find((resource) => resource.id === 'arcane')?.current).toBe(2);
   });
 
   it('Cunning Action adds bonus Dash, Disengage, and Hide without removing original basic actions', () => {

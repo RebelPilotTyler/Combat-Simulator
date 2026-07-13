@@ -22,36 +22,109 @@ export type ActionKind = 'meleeAttack' | 'rangedAttack' | 'savingThrowEffect' | 
 
 export type ActionCost = 'action' | 'bonusAction' | 'reaction' | 'free';
 
-export type SpellActionCost = 'action' | 'bonus' | 'reaction' | 'free';
-
-export type SpellSchool =
-  | 'abjuration'
-  | 'conjuration'
-  | 'divination'
-  | 'enchantment'
-  | 'evocation'
-  | 'illusion'
-  | 'necromancy'
-  | 'transmutation';
-
 export type ResourceReset = 'turnStart' | 'shortRest' | 'longRest' | 'dawn' | 'manual' | 'never';
 
 export type ResourceDisplay = 'pips' | 'number' | 'bar';
 
 export type ResourceConsumeOn = 'use' | 'hit' | 'failedSave' | 'manual';
 
-export type ActionTag =
-  | 'attack'
-  | 'spell'
-  | 'melee'
-  | 'ranged'
-  | 'area'
-  | 'condition'
-  | 'movement'
-  | 'opportunity'
-  | 'bonus'
-  | 'reaction'
-  | 'placeholder';
+export type ActionTag = string;
+
+export type RuleTriggerPoint =
+  | 'beforeAttackRoll'
+  | 'afterAttackRoll'
+  | 'beforeDamage'
+  | 'afterDamage'
+  | 'beforeSavingThrow'
+  | 'afterSavingThrow'
+  | 'onTurnStart'
+  | 'onTurnEnd'
+  | 'onActionUsed'
+  | 'onConditionApplied';
+
+export type EffectOperationType =
+  | 'addFlatModifier'
+  | 'grantAdvantage'
+  | 'grantDisadvantage'
+  | 'addDamageDice'
+  | 'multiplyDamage'
+  | 'reduceDamage'
+  | 'setDamageMinimum'
+  | 'applyCondition'
+  | 'removeCondition'
+  | 'spendResource'
+  | 'restoreResource'
+  | 'addTag'
+  | 'removeTag'
+  | 'logMessage';
+
+export type TargetSelectorType =
+  | 'self'
+  | 'actionTarget'
+  | 'source'
+  | 'creaturesInArea'
+  | 'alliesWithinRange'
+  | 'enemiesWithinRange';
+
+export type RuleFilterType =
+  | 'actionHasTag'
+  | 'targetHasCondition'
+  | 'sourceHasCondition'
+  | 'hpBelowHalf'
+  | 'resourceAvailable'
+  | 'oncePerTurn'
+  | 'oncePerRound';
+
+export interface RuleTargetSelector {
+  type: TargetSelectorType;
+  range?: number;
+}
+
+export type RuleCreatureReference = 'self' | 'source' | 'actionTarget';
+
+export type RuleFilter =
+  | { type: 'actionHasTag'; tag: ActionTag }
+  | { type: 'targetHasCondition'; conditionId: ConditionId }
+  | { type: 'sourceHasCondition'; conditionId: ConditionId }
+  | { type: 'hpBelowHalf'; target?: RuleCreatureReference }
+  | { type: 'resourceAvailable'; resourceId: string; amount?: number; target?: RuleCreatureReference }
+  | { type: 'oncePerTurn'; key?: string }
+  | { type: 'oncePerRound'; key?: string };
+
+export type RuleEffectOperation =
+  | { type: 'addFlatModifier'; amount: number; note?: string }
+  | { type: 'grantAdvantage'; note?: string }
+  | { type: 'grantDisadvantage'; note?: string }
+  | { type: 'addDamageDice'; dice: string; damageType?: string; note?: string }
+  | { type: 'multiplyDamage'; factor: number; note?: string }
+  | { type: 'reduceDamage'; amount: number; note?: string }
+  | { type: 'setDamageMinimum'; amount: number; note?: string }
+  | {
+      type: 'applyCondition';
+      conditionId: ConditionId;
+      durationType?: ConditionDurationType;
+      remainingRounds?: number;
+      stackBehavior?: StackBehavior;
+      stackCount?: number;
+      intensity?: number;
+      note?: string;
+    }
+  | { type: 'removeCondition'; conditionId: ConditionId; note?: string }
+  | { type: 'spendResource'; resourceId: string; amount: number; note?: string }
+  | { type: 'restoreResource'; resourceId: string; amount: number; note?: string }
+  | { type: 'addTag'; tag: ActionTag; note?: string }
+  | { type: 'removeTag'; tag: ActionTag; note?: string }
+  | { type: 'logMessage'; message: string };
+
+export interface RuleDefinition {
+  id: string;
+  name?: string;
+  enabled?: boolean;
+  trigger: RuleTriggerPoint;
+  selectors?: RuleTargetSelector[];
+  filters?: RuleFilter[];
+  effects: RuleEffectOperation[];
+}
 
 export interface RollModifier {
   advantage?: boolean;
@@ -71,6 +144,7 @@ export interface AppliedCondition {
   stackCount: number;
   intensity: number;
   metadata?: Record<string, string | number | boolean | undefined>;
+  rules?: RuleDefinition[];
 }
 
 export interface ConditionLifecycleContext {
@@ -140,6 +214,7 @@ export interface ConditionDefinition {
   defaultDurationType: ConditionDurationType;
   defaultStackBehavior: StackBehavior;
   hooks: ConditionEffectHooks;
+  rules?: RuleDefinition[];
 }
 
 export interface AbilityScores {
@@ -209,6 +284,7 @@ export interface ResourceCost {
   resourceId: string;
   amount: number;
   consumeOn: ResourceConsumeOn;
+  spendActionWhenDepleted?: boolean;
 }
 
 export interface StatModifiers {
@@ -239,6 +315,7 @@ export interface FeatureDefinition {
   source: string;
   modifiers?: StatModifiers;
   alternateActions?: FeatureAlternateAction[];
+  rules?: RuleDefinition[];
   resourceCostModifiers?: Array<{
     actionTag?: ActionTag;
     resourceId: string;
@@ -275,96 +352,13 @@ export interface ActionDefinition {
   effects: EffectDefinition[];
   description?: string;
   resourceCosts?: ResourceCost[];
+  rules?: RuleDefinition[];
   generatedByFeatureId?: string;
-  spellId?: string;
   baseActionName?: string;
   multiattack?: {
     steps: MultiattackStep[];
     targetMode?: 'sameTarget' | 'chooseEach' | 'fixed';
   };
-}
-
-export interface SpellRangeDefinition {
-  type: 'self' | 'touch' | 'feet' | 'sight' | 'unlimited' | 'special';
-  feet?: number;
-  text: string;
-}
-
-export interface SpellAreaDefinition {
-  shape: 'radius' | 'cone' | 'line' | 'cube' | 'sphere';
-  size: number;
-}
-
-export interface SpellScalingDefinition {
-  mode: 'cantripCharacterLevel' | 'perSlotLevelAboveBase' | 'manual';
-  dicePerStep?: string;
-  description?: string;
-}
-
-export interface SpellDamageDefinition extends DamageDefinition {
-  scaling?: SpellScalingDefinition;
-}
-
-export interface SpellHealingDefinition {
-  dice: string;
-  scaling?: SpellScalingDefinition;
-  addSpellcastingModifier?: boolean;
-}
-
-export type SpellTargetType = 'self' | 'creature' | 'point' | 'area' | 'manual';
-
-export type SpellAttackType =
-  | 'meleeSpellAttack'
-  | 'rangedSpellAttack'
-  | 'save'
-  | 'automatic'
-  | 'manual';
-
-export type SpellAutomationLevel = 'full' | 'partial' | 'manual';
-
-export type SpellTag =
-  | 'damage'
-  | 'healing'
-  | 'control'
-  | 'summon'
-  | 'utility'
-  | 'reaction'
-  | 'concentration'
-  | 'attack'
-  | 'save'
-  | 'area'
-  | 'buff';
-
-export interface SpellComponents {
-  verbal?: boolean;
-  somatic?: boolean;
-  material?: string | boolean;
-}
-
-export interface SpellDefinition {
-  id: string;
-  name: string;
-  level: number;
-  school: SpellSchool;
-  castingTime: string;
-  actionCost: SpellActionCost;
-  range: SpellRangeDefinition;
-  targetType: SpellTargetType;
-  area?: SpellAreaDefinition;
-  duration: string;
-  concentration: boolean;
-  ritual: boolean;
-  components: SpellComponents;
-  classes: string[];
-  attackType?: SpellAttackType;
-  saveAbility?: Ability;
-  damage?: SpellDamageDefinition;
-  healing?: SpellHealingDefinition;
-  conditionsApplied?: ConditionId[];
-  tags: SpellTag[];
-  descriptionSummary: string;
-  automationLevel: SpellAutomationLevel;
-  manualResolution?: string;
 }
 
 export interface ReadiedAction {
@@ -389,13 +383,6 @@ export interface Creature {
   resources?: Resource[];
   features?: FeatureDefinition[];
   skillBonuses?: Partial<Record<Skill, number>>;
-  spellcasting?: {
-    ability: Ability;
-    saveDc?: number;
-    attackBonus?: number;
-    knownSpells?: string[];
-    preparedSpells?: string[];
-  };
   readiedAction?: ReadiedAction;
 }
 
@@ -458,6 +445,7 @@ export interface CombatState {
   turnState: TurnState;
   turnResources: Record<string, TurnResourceState>;
   pendingReactions: PendingReaction[];
+  ruleMemory?: Record<string, { turnKey?: string; round?: number }>;
   log: CombatLogEntry[];
 }
 

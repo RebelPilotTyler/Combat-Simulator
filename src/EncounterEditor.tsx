@@ -1,0 +1,2440 @@
+import { useEffect, useMemo, useState, type ReactNode } from 'react';
+import { sampleCreatures } from './data/sampleEncounter';
+import { createCombatState } from './engine/combat';
+import { parseCombatStateJson } from './engine/serialization';
+import { positionKey, samePosition } from './engine/shapes';
+import type {
+  Ability,
+  ActionCost,
+  ActionDefinition,
+  ActionKind,
+  ActionTag,
+  CombatState,
+  ConditionDurationType,
+  Creature,
+  FeatureDefinition,
+  GridDefinition,
+  GridPosition,
+  Resource,
+  ResourceConsumeOn,
+  ResourceReset,
+  RuleDefinition,
+  RuleEffectOperation,
+  RuleFilter,
+  RuleTargetSelector,
+  RuleTriggerPoint,
+  EffectOperationType,
+  TargetSelectorType,
+  RuleFilterType,
+  ShapeType,
+  StatModifiers,
+  StackBehavior,
+  Team
+} from './engine/types';
+
+const CREATURE_LIBRARY_KEY = 'dnd5e-combat.creatureLibrary.v1';
+const ENCOUNTER_LIBRARY_KEY = 'dnd5e-combat.encounterLibrary.v1';
+const ACTION_LIBRARY_KEY = 'dnd5e-combat.actionLibrary.v1';
+const FEATURE_LIBRARY_KEY = 'dnd5e-combat.featureLibrary.v1';
+const RESOURCE_LIBRARY_KEY = 'dnd5e-combat.resourceLibrary.v1';
+
+const abilities: Ability[] = ['str', 'dex', 'con', 'int', 'wis', 'cha'];
+const teams: Team[] = ['players', 'enemies', 'neutral'];
+const actionKinds: ActionKind[] = ['meleeAttack', 'rangedAttack', 'savingThrowEffect', 'basicAction', 'spell', 'multiattack', 'custom'];
+const actionCosts: ActionCost[] = ['action', 'bonusAction', 'reaction', 'free'];
+const actionTags: ActionTag[] = ['attack', 'spell', 'melee', 'ranged', 'area', 'condition', 'movement', 'opportunity', 'bonus', 'reaction', 'placeholder'];
+const shapeTypes: ShapeType[] = ['single', 'line', 'radius', 'cone'];
+const resetOptions: ResourceReset[] = ['turnStart', 'shortRest', 'longRest', 'dawn', 'manual', 'never'];
+const consumeOptions: ResourceConsumeOn[] = ['use', 'hit', 'failedSave', 'manual'];
+const ruleTriggers: RuleTriggerPoint[] = [
+  'beforeAttackRoll',
+  'afterAttackRoll',
+  'beforeDamage',
+  'afterDamage',
+  'beforeSavingThrow',
+  'afterSavingThrow',
+  'onTurnStart',
+  'onTurnEnd',
+  'onActionUsed',
+  'onConditionApplied'
+];
+const selectorTypes: TargetSelectorType[] = ['self', 'actionTarget', 'source', 'creaturesInArea', 'alliesWithinRange', 'enemiesWithinRange'];
+const filterTypes: RuleFilterType[] = ['actionHasTag', 'targetHasCondition', 'sourceHasCondition', 'hpBelowHalf', 'resourceAvailable', 'oncePerTurn', 'oncePerRound'];
+const effectTypes: EffectOperationType[] = [
+  'addFlatModifier',
+  'grantAdvantage',
+  'grantDisadvantage',
+  'addDamageDice',
+  'multiplyDamage',
+  'reduceDamage',
+  'setDamageMinimum',
+  'applyCondition',
+  'removeCondition',
+  'spendResource',
+  'restoreResource',
+  'addTag',
+  'removeTag',
+  'logMessage'
+];
+const stackBehaviors: StackBehavior[] = ['none', 'refresh', 'stackCount', 'stackIntensity'];
+
+export interface SavedEncounter {
+  id: string;
+  name: string;
+  grid: GridDefinition;
+  creatures: Creature[];
+  updatedAt: string;
+}
+
+export function EncounterEditor({
+  currentCombat,
+  onLoadEncounter
+}: {
+  currentCombat: CombatState;
+  onLoadEncounter: (state: CombatState) => void;
+}) {
+  const [creatureLibrary, setCreatureLibrary] = useState<Creature[]>(loadCreatureLibrary);
+  const [encounters, setEncounters] = useState<SavedEncounter[]>(loadEncounterLibrary);
+  const [actionLibrary, setActionLibrary] = useState<ActionDefinition[]>(loadActionLibrary);
+  const [featureLibrary, setFeatureLibrary] = useState<FeatureDefinition[]>(loadFeatureLibrary);
+  const [resourceLibrary, setResourceLibrary] = useState<Resource[]>(loadResourceLibrary);
+  const [selectedCreatureId, setSelectedCreatureId] = useState<string>(() => creatureLibrary[0]?.id ?? '');
+  const [creatureDraft, setCreatureDraft] = useState<Creature>(() => cloneCreature(creatureLibrary[0] ?? createBlankCreature()));
+  const [selectedActionId, setSelectedActionId] = useState<string>(() => creatureDraft.actions[0]?.id ?? '');
+  const [selectedResourceId, setSelectedResourceId] = useState<string>(() => creatureDraft.resources?.[0]?.id ?? '');
+  const [selectedFeatureId, setSelectedFeatureId] = useState<string>(() => creatureDraft.features?.[0]?.id ?? '');
+  const [selectedLibraryActionId, setSelectedLibraryActionId] = useState<string>(() => actionLibrary[0]?.id ?? '');
+  const [selectedLibraryFeatureId, setSelectedLibraryFeatureId] = useState<string>(() => featureLibrary[0]?.id ?? '');
+  const [selectedLibraryResourceId, setSelectedLibraryResourceId] = useState<string>(() => resourceLibrary[0]?.id ?? '');
+  const [partLibraryMessage, setPartLibraryMessage] = useState<string | undefined>();
+  const [creatureJson, setCreatureJson] = useState('');
+  const [creatureJsonMessage, setCreatureJsonMessage] = useState<string | undefined>();
+  const [encounterJson, setEncounterJson] = useState('');
+  const [encounterJsonMessage, setEncounterJsonMessage] = useState<string | undefined>();
+
+  const [builderName, setBuilderName] = useState('New Encounter');
+  const [builderGrid, setBuilderGrid] = useState<GridDefinition>({ width: 10, height: 10, blocked: [] });
+  const [builderCreatures, setBuilderCreatures] = useState<Creature[]>([]);
+  const [selectedTemplateId, setSelectedTemplateId] = useState<string>(() => creatureLibrary[0]?.id ?? '');
+  const [selectedInstanceId, setSelectedInstanceId] = useState<string | undefined>();
+  const [selectedEncounterId, setSelectedEncounterId] = useState<string | undefined>();
+  const [builderTool, setBuilderTool] = useState<'place' | 'move' | 'block'>('place');
+
+  const selectedAction = creatureDraft.actions.find((action) => action.id === selectedActionId) ?? creatureDraft.actions[0];
+  const selectedResource = (creatureDraft.resources ?? []).find((resource) => resource.id === selectedResourceId) ?? creatureDraft.resources?.[0];
+  const selectedFeature = (creatureDraft.features ?? []).find((feature) => feature.id === selectedFeatureId) ?? creatureDraft.features?.[0];
+  const selectedLibraryAction = actionLibrary.find((action) => action.id === selectedLibraryActionId) ?? actionLibrary[0];
+  const selectedLibraryFeature = featureLibrary.find((feature) => feature.id === selectedLibraryFeatureId) ?? featureLibrary[0];
+  const selectedLibraryResource = resourceLibrary.find((resource) => resource.id === selectedLibraryResourceId) ?? resourceLibrary[0];
+  const selectedInstance = builderCreatures.find((creature) => creature.id === selectedInstanceId);
+  const selectedTemplate = creatureLibrary.find((creature) => creature.id === selectedTemplateId) ?? creatureLibrary[0];
+
+  useEffect(() => {
+    saveJson(CREATURE_LIBRARY_KEY, creatureLibrary);
+  }, [creatureLibrary]);
+
+  useEffect(() => {
+    saveJson(ENCOUNTER_LIBRARY_KEY, encounters);
+  }, [encounters]);
+
+  useEffect(() => {
+    saveJson(ACTION_LIBRARY_KEY, actionLibrary);
+  }, [actionLibrary]);
+
+  useEffect(() => {
+    saveJson(FEATURE_LIBRARY_KEY, featureLibrary);
+  }, [featureLibrary]);
+
+  useEffect(() => {
+    saveJson(RESOURCE_LIBRARY_KEY, resourceLibrary);
+  }, [resourceLibrary]);
+
+  useEffect(() => {
+    const selected = creatureLibrary.find((creature) => creature.id === selectedCreatureId);
+    if (!selected) {
+      return;
+    }
+
+    const nextDraft = cloneCreature(selected);
+    setCreatureDraft(nextDraft);
+    setSelectedActionId(nextDraft.actions[0]?.id ?? '');
+    setSelectedResourceId(nextDraft.resources?.[0]?.id ?? '');
+    setSelectedFeatureId(nextDraft.features?.[0]?.id ?? '');
+  }, [creatureLibrary, selectedCreatureId]);
+
+  useEffect(() => {
+    if (!creatureLibrary.some((creature) => creature.id === selectedTemplateId)) {
+      setSelectedTemplateId(creatureLibrary[0]?.id ?? '');
+    }
+  }, [creatureLibrary, selectedTemplateId]);
+
+  useEffect(() => {
+    if (!actionLibrary.some((action) => action.id === selectedLibraryActionId)) {
+      setSelectedLibraryActionId(actionLibrary[0]?.id ?? '');
+    }
+  }, [actionLibrary, selectedLibraryActionId]);
+
+  useEffect(() => {
+    if (!featureLibrary.some((feature) => feature.id === selectedLibraryFeatureId)) {
+      setSelectedLibraryFeatureId(featureLibrary[0]?.id ?? '');
+    }
+  }, [featureLibrary, selectedLibraryFeatureId]);
+
+  useEffect(() => {
+    if (!resourceLibrary.some((resource) => resource.id === selectedLibraryResourceId)) {
+      setSelectedLibraryResourceId(resourceLibrary[0]?.id ?? '');
+    }
+  }, [resourceLibrary, selectedLibraryResourceId]);
+
+  const occupiedKeys = useMemo(() => new Set(builderCreatures.map((creature) => positionKey(creature.position))), [builderCreatures]);
+  const blockedKeys = useMemo(() => new Set(builderGrid.blocked.map(positionKey)), [builderGrid.blocked]);
+
+  function createFromBlank() {
+    const blank = createBlankCreature();
+    setCreatureLibrary((current) => [blank, ...current]);
+    setSelectedCreatureId(blank.id);
+    setCreatureJsonMessage('Blank creature added to the library.');
+  }
+
+  function duplicateSelectedCreature() {
+    const source = creatureLibrary.find((creature) => creature.id === selectedCreatureId) ?? sampleCreatures[0];
+    const duplicate = {
+      ...cloneCreature(source),
+      id: createId(source.name, 'creature'),
+      name: `${source.name} Copy`,
+      conditions: [],
+      readiedAction: undefined
+    };
+    setCreatureLibrary((current) => [duplicate, ...current]);
+    setSelectedCreatureId(duplicate.id);
+    setCreatureJsonMessage(`${source.name} duplicated.`);
+  }
+
+  function saveCreatureDraft() {
+    const normalized = normalizeCreatureDraft(creatureDraft);
+    setCreatureDraft(normalized);
+    setCreatureLibrary((current) => upsertById(current, normalized));
+    setSelectedCreatureId(normalized.id);
+    setCreatureJsonMessage(`${normalized.name} saved to localStorage.`);
+  }
+
+  function deleteCreature() {
+    if (creatureLibrary.length <= 1) {
+      setCreatureJsonMessage('Keep at least one creature in the library.');
+      return;
+    }
+
+    const next = creatureLibrary.filter((creature) => creature.id !== selectedCreatureId);
+    setCreatureLibrary(next);
+    setSelectedCreatureId(next[0]?.id ?? '');
+    setCreatureJsonMessage('Creature deleted from the library.');
+  }
+
+  function exportSelectedCreature() {
+    setCreatureJson(JSON.stringify(creatureDraft, null, 2));
+    setCreatureJsonMessage('Selected creature exported below.');
+  }
+
+  function exportCreatureLibrary() {
+    setCreatureJson(JSON.stringify(creatureLibrary, null, 2));
+    setCreatureJsonMessage('Creature library exported below.');
+  }
+
+  function importCreatureJson() {
+    const imported = parseCreatureImport(creatureJson);
+    if (!imported.ok) {
+      setCreatureJsonMessage(imported.error);
+      return;
+    }
+
+    const creatures = imported.creatures.map(normalizeCreatureDraft);
+    setCreatureLibrary((current) => mergeCreatures(current, creatures));
+    setSelectedCreatureId(creatures[0]?.id ?? selectedCreatureId);
+    setCreatureJsonMessage(`${creatures.length} creature${creatures.length === 1 ? '' : 's'} imported.`);
+  }
+
+  function updateDraftCreature(update: Partial<Creature>) {
+    setCreatureDraft((current) => ({ ...current, ...update }));
+  }
+
+  function updateAbility(ability: Ability, score: number) {
+    setCreatureDraft((current) => ({
+      ...current,
+      abilityScores: {
+        ...current.abilityScores,
+        [ability]: score
+      }
+    }));
+  }
+
+  function updateSkill(skill: 'athletics' | 'acrobatics' | 'stealth' | 'perception' | 'investigation', value: string) {
+    setCreatureDraft((current) => {
+      const next = { ...(current.skillBonuses ?? {}) };
+      if (value.trim() === '') {
+        delete next[skill];
+      } else {
+        next[skill] = Number(value);
+      }
+      return { ...current, skillBonuses: next };
+    });
+  }
+
+  function addAction() {
+    const action = createBlankAction();
+    setCreatureDraft((current) => ({ ...current, actions: [...current.actions, action] }));
+    setSelectedActionId(action.id);
+  }
+
+  function duplicateAction() {
+    if (!selectedAction) {
+      return;
+    }
+
+    const action = { ...cloneAction(selectedAction), id: createId(selectedAction.name, 'action'), name: `${selectedAction.name} Copy` };
+    setCreatureDraft((current) => ({ ...current, actions: [...current.actions, action] }));
+    setSelectedActionId(action.id);
+  }
+
+  function deleteAction() {
+    if (!selectedAction || creatureDraft.actions.length <= 1) {
+      return;
+    }
+
+    const nextActions = creatureDraft.actions.filter((action) => action.id !== selectedAction.id);
+    setCreatureDraft((current) => ({ ...current, actions: nextActions }));
+    setSelectedActionId(nextActions[0]?.id ?? '');
+  }
+
+  function updateAction(update: Partial<ActionDefinition>) {
+    if (!selectedAction) {
+      return;
+    }
+
+    if (update.id) {
+      setSelectedActionId(update.id);
+    }
+
+    setCreatureDraft((current) => ({
+      ...current,
+      actions: current.actions.map((action) => (action.id === selectedAction.id ? normalizeAction({ ...action, ...update }) : action))
+    }));
+  }
+
+  function saveSelectedActionToLibrary() {
+    if (!selectedAction) {
+      return;
+    }
+
+    const action = normalizeAction(cloneAction(selectedAction));
+    setActionLibrary((current) => upsertById(current, action));
+    setSelectedLibraryActionId(action.id);
+    setPartLibraryMessage(`${action.name} saved to the action library.`);
+  }
+
+  function applyLibraryAction() {
+    if (!selectedLibraryAction) {
+      return;
+    }
+
+    const action = normalizeAction(cloneAction(selectedLibraryAction));
+    setCreatureDraft((current) => ({ ...current, actions: upsertById(current.actions, action) }));
+    setSelectedActionId(action.id);
+    setPartLibraryMessage(`${action.name} applied to ${creatureDraft.name}.`);
+  }
+
+  function deleteLibraryAction() {
+    if (!selectedLibraryAction) {
+      return;
+    }
+
+    setActionLibrary((current) => current.filter((action) => action.id !== selectedLibraryAction.id));
+    setPartLibraryMessage(`${selectedLibraryAction.name} removed from the action library.`);
+  }
+
+  function addResource() {
+    const resource: Resource = {
+      id: createId('resource', 'resource'),
+      name: 'New Resource',
+      current: 1,
+      max: 1,
+      resetOn: 'longRest',
+      display: { showOnCreaturePanel: true, mode: 'pips' }
+    };
+    setCreatureDraft((current) => ({ ...current, resources: [...(current.resources ?? []), resource] }));
+    setSelectedResourceId(resource.id);
+  }
+
+  function deleteResource() {
+    if (!selectedResource) {
+      return;
+    }
+
+    const nextResources = (creatureDraft.resources ?? []).filter((resource) => resource.id !== selectedResource.id);
+    setCreatureDraft((current) => ({ ...current, resources: nextResources }));
+    setSelectedResourceId(nextResources[0]?.id ?? '');
+  }
+
+  function updateResource(update: Partial<Resource>) {
+    if (!selectedResource) {
+      return;
+    }
+
+    if (update.id) {
+      setSelectedResourceId(update.id);
+    }
+
+    setCreatureDraft((current) => ({
+      ...current,
+      resources: (current.resources ?? []).map((resource) => (resource.id === selectedResource.id ? { ...resource, ...update } : resource))
+    }));
+  }
+
+  function saveSelectedResourceToLibrary() {
+    if (!selectedResource) {
+      return;
+    }
+
+    const resource = normalizeResource(cloneJson(selectedResource));
+    setResourceLibrary((current) => upsertById(current, resource));
+    setSelectedLibraryResourceId(resource.id);
+    setPartLibraryMessage(`${resource.name} saved to the resource library.`);
+  }
+
+  function applyLibraryResource() {
+    if (!selectedLibraryResource) {
+      return;
+    }
+
+    const resource = normalizeResource(cloneJson(selectedLibraryResource));
+    setCreatureDraft((current) => ({ ...current, resources: upsertById(current.resources ?? [], resource) }));
+    setSelectedResourceId(resource.id);
+    setPartLibraryMessage(`${resource.name} applied to ${creatureDraft.name}.`);
+  }
+
+  function deleteLibraryResource() {
+    if (!selectedLibraryResource) {
+      return;
+    }
+
+    setResourceLibrary((current) => current.filter((resource) => resource.id !== selectedLibraryResource.id));
+    setPartLibraryMessage(`${selectedLibraryResource.name} removed from the resource library.`);
+  }
+
+  function addFeature() {
+    const feature = createBlankFeature();
+    setCreatureDraft((current) => ({ ...current, features: [...(current.features ?? []), feature] }));
+    setSelectedFeatureId(feature.id);
+  }
+
+  function duplicateFeature() {
+    if (!selectedFeature) {
+      return;
+    }
+
+    const feature = {
+      ...cloneJson(selectedFeature),
+      id: createId(selectedFeature.name, 'feature'),
+      name: `${selectedFeature.name} Copy`
+    };
+    setCreatureDraft((current) => ({ ...current, features: [...(current.features ?? []), normalizeFeature(feature)] }));
+    setSelectedFeatureId(feature.id);
+  }
+
+  function deleteFeature() {
+    if (!selectedFeature) {
+      return;
+    }
+
+    const nextFeatures = (creatureDraft.features ?? []).filter((feature) => feature.id !== selectedFeature.id);
+    setCreatureDraft((current) => ({ ...current, features: nextFeatures }));
+    setSelectedFeatureId(nextFeatures[0]?.id ?? '');
+  }
+
+  function updateFeature(update: Partial<FeatureDefinition>) {
+    if (!selectedFeature) {
+      return;
+    }
+
+    if (update.id) {
+      setSelectedFeatureId(update.id);
+    }
+
+    setCreatureDraft((current) => ({
+      ...current,
+      features: (current.features ?? []).map((feature) => (feature.id === selectedFeature.id ? normalizeFeature({ ...feature, ...update }) : feature))
+    }));
+  }
+
+  function saveSelectedFeatureToLibrary() {
+    if (!selectedFeature) {
+      return;
+    }
+
+    const feature = normalizeFeature(cloneJson(selectedFeature));
+    setFeatureLibrary((current) => upsertById(current, feature));
+    setSelectedLibraryFeatureId(feature.id);
+    setPartLibraryMessage(`${feature.name} saved to the feature library.`);
+  }
+
+  function applyLibraryFeature() {
+    if (!selectedLibraryFeature) {
+      return;
+    }
+
+    const feature = normalizeFeature(cloneJson(selectedLibraryFeature));
+    setCreatureDraft((current) => ({ ...current, features: upsertById(current.features ?? [], feature) }));
+    setSelectedFeatureId(feature.id);
+    setPartLibraryMessage(`${feature.name} applied to ${creatureDraft.name}.`);
+  }
+
+  function deleteLibraryFeature() {
+    if (!selectedLibraryFeature) {
+      return;
+    }
+
+    setFeatureLibrary((current) => current.filter((feature) => feature.id !== selectedLibraryFeature.id));
+    setPartLibraryMessage(`${selectedLibraryFeature.name} removed from the feature library.`);
+  }
+
+  function clearBuilder() {
+    setBuilderName('New Encounter');
+    setBuilderGrid({ width: 10, height: 10, blocked: [] });
+    setBuilderCreatures([]);
+    setSelectedInstanceId(undefined);
+    setSelectedEncounterId(undefined);
+    setEncounterJsonMessage('Builder cleared.');
+  }
+
+  function seedBuilderFromCombat() {
+    setBuilderName(`Combat Snapshot ${new Date().toLocaleDateString()}`);
+    setBuilderGrid(cloneJson(currentCombat.grid));
+    setBuilderCreatures(currentCombat.creatures.map(cloneCreature));
+    setSelectedInstanceId(currentCombat.creatures[0]?.id);
+    setSelectedEncounterId(undefined);
+    setEncounterJsonMessage('Active combat copied into the builder.');
+  }
+
+  function loadSavedEncounter(encounter: SavedEncounter) {
+    setBuilderName(encounter.name);
+    setBuilderGrid(cloneJson(encounter.grid));
+    setBuilderCreatures(encounter.creatures.map(cloneCreature));
+    setSelectedInstanceId(encounter.creatures[0]?.id);
+    setSelectedEncounterId(encounter.id);
+    setEncounterJsonMessage(`${encounter.name} loaded into the builder.`);
+  }
+
+  function saveBuilderEncounter() {
+    const encounter: SavedEncounter = {
+      id: selectedEncounterId ?? createId(builderName, 'encounter'),
+      name: builderName.trim() || 'Untitled Encounter',
+      grid: normalizeGrid(builderGrid),
+      creatures: builderCreatures.map(normalizeCreatureDraft),
+      updatedAt: new Date().toISOString()
+    };
+
+    setBuilderGrid(encounter.grid);
+    setBuilderCreatures(encounter.creatures);
+    setSelectedEncounterId(encounter.id);
+    setEncounters((current) => upsertById(current, encounter));
+    setEncounterJsonMessage(`${encounter.name} saved to localStorage.`);
+  }
+
+  function deleteSavedEncounter() {
+    if (!selectedEncounterId) {
+      return;
+    }
+
+    setEncounters((current) => current.filter((encounter) => encounter.id !== selectedEncounterId));
+    setSelectedEncounterId(undefined);
+    setEncounterJsonMessage('Saved encounter deleted.');
+  }
+
+  function loadBuilderIntoCombat() {
+    const grid = normalizeGrid(builderGrid);
+    const state = createCombatState(builderCreatures.map(normalizeCreatureDraft), grid.width, grid.height, grid.blocked);
+    onLoadEncounter(state);
+  }
+
+  function exportBuilderEncounter() {
+    const encounter: SavedEncounter = {
+      id: selectedEncounterId ?? createId(builderName, 'encounter'),
+      name: builderName.trim() || 'Untitled Encounter',
+      grid: normalizeGrid(builderGrid),
+      creatures: builderCreatures.map(normalizeCreatureDraft),
+      updatedAt: new Date().toISOString()
+    };
+    setEncounterJson(JSON.stringify(encounter, null, 2));
+    setEncounterJsonMessage('Builder encounter exported below.');
+  }
+
+  function importEncounterJson() {
+    const imported = parseEncounterImport(encounterJson);
+    if (!imported.ok) {
+      setEncounterJsonMessage(imported.error);
+      return;
+    }
+
+    const encounter = imported.encounter;
+    setEncounters((current) => upsertById(current, encounter));
+    loadSavedEncounter(encounter);
+    setEncounterJsonMessage(`${encounter.name} imported.`);
+  }
+
+  function handleBuilderCellClick(position: GridPosition) {
+    const existing = builderCreatures.find((creature) => samePosition(creature.position, position));
+
+    if (builderTool === 'block') {
+      if (existing) {
+        setSelectedInstanceId(existing.id);
+        return;
+      }
+
+      setBuilderGrid((current) => ({
+        ...current,
+        blocked: current.blocked.some((cell) => samePosition(cell, position))
+          ? current.blocked.filter((cell) => !samePosition(cell, position))
+          : [...current.blocked, position]
+      }));
+      return;
+    }
+
+    if (existing) {
+      setSelectedInstanceId(existing.id);
+      return;
+    }
+
+    if (blockedKeys.has(positionKey(position))) {
+      return;
+    }
+
+    if (builderTool === 'move' && selectedInstanceId) {
+      setBuilderCreatures((current) =>
+        current.map((creature) => (creature.id === selectedInstanceId ? { ...creature, position } : creature))
+      );
+      return;
+    }
+
+    if (builderTool === 'place' && selectedTemplate) {
+      const instance = createCreatureInstance(selectedTemplate, position);
+      setBuilderCreatures((current) => [...current, instance]);
+      setSelectedInstanceId(instance.id);
+    }
+  }
+
+  function updateSelectedInstance(update: Partial<Creature>) {
+    if (!selectedInstanceId) {
+      return;
+    }
+
+    setBuilderCreatures((current) =>
+      current.map((creature) => (creature.id === selectedInstanceId ? normalizeCreatureDraft({ ...creature, ...update }) : creature))
+    );
+  }
+
+  function removeSelectedInstance() {
+    if (!selectedInstanceId) {
+      return;
+    }
+
+    const next = builderCreatures.filter((creature) => creature.id !== selectedInstanceId);
+    setBuilderCreatures(next);
+    setSelectedInstanceId(next[0]?.id);
+  }
+
+  return (
+    <section className="editor-shell">
+      <section className="panel editor-library-panel">
+        <header className="editor-panel-header">
+          <h2>Creature Library</h2>
+          <div className="editor-button-row">
+            <button onClick={createFromBlank}>New Blank</button>
+            <button onClick={duplicateSelectedCreature}>Duplicate</button>
+            <button onClick={saveCreatureDraft}>Save Creature</button>
+            <button onClick={deleteCreature}>Delete</button>
+          </div>
+        </header>
+
+        <div className="editor-list-form">
+          <div className="library-list">
+            {creatureLibrary.map((creature) => (
+              <button
+                className={creature.id === selectedCreatureId ? 'selected-action' : ''}
+                key={creature.id}
+                onClick={() => setSelectedCreatureId(creature.id)}
+              >
+                <strong>{creature.name}</strong>
+                <span>
+                  {creature.team} HP {creature.maxHp} AC {creature.ac}
+                </span>
+                <small>{creature.actions.length} action(s)</small>
+              </button>
+            ))}
+          </div>
+
+          <div className="creature-editor">
+            {partLibraryMessage && <p className="editor-message">{partLibraryMessage}</p>}
+
+            <section className="editor-section">
+              <h3>Basic Stats</h3>
+              <div className="form-grid">
+                <label>
+                  Name
+                  <input value={creatureDraft.name} onChange={(event) => updateDraftCreature({ name: event.target.value })} />
+                </label>
+                <label>
+                  Team
+                  <select value={creatureDraft.team} onChange={(event) => updateDraftCreature({ team: event.target.value as Team })}>
+                    {teams.map((team) => (
+                      <option key={team} value={team}>
+                        {team}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <NumberInput label="HP" value={creatureDraft.hp} onChange={(value) => updateDraftCreature({ hp: value })} />
+                <NumberInput label="Max HP" value={creatureDraft.maxHp} onChange={(value) => updateDraftCreature({ maxHp: value })} />
+                <NumberInput label="AC" value={creatureDraft.ac} onChange={(value) => updateDraftCreature({ ac: value })} />
+                <NumberInput label="Speed" value={creatureDraft.speed} onChange={(value) => updateDraftCreature({ speed: value })} />
+                <NumberInput label="Proficiency" value={creatureDraft.proficiencyBonus} onChange={(value) => updateDraftCreature({ proficiencyBonus: value })} />
+                <NumberInput label="Start X" value={creatureDraft.position.x} onChange={(value) => updateDraftCreature({ position: { ...creatureDraft.position, x: value } })} />
+                <NumberInput label="Start Y" value={creatureDraft.position.y} onChange={(value) => updateDraftCreature({ position: { ...creatureDraft.position, y: value } })} />
+              </div>
+              <div className="ability-score-grid">
+                {abilities.map((ability) => (
+                  <NumberInput
+                    key={ability}
+                    label={ability.toUpperCase()}
+                    value={creatureDraft.abilityScores[ability]}
+                    onChange={(value) => updateAbility(ability, value)}
+                  />
+                ))}
+              </div>
+            </section>
+
+            <section className="editor-section">
+              <h3>Actions</h3>
+              <div className="editor-button-row">
+                <button onClick={addAction}>Add Action</button>
+                <button onClick={duplicateAction}>Duplicate Action</button>
+                <button onClick={deleteAction} disabled={creatureDraft.actions.length <= 1}>
+                  Delete Action
+                </button>
+              </div>
+              <PartLibraryControls
+                title="Action Library"
+                items={actionLibrary}
+                selectedId={selectedLibraryAction?.id ?? ''}
+                onSelect={setSelectedLibraryActionId}
+                onSave={saveSelectedActionToLibrary}
+                onApply={applyLibraryAction}
+                onDelete={deleteLibraryAction}
+                saveDisabled={!selectedAction}
+                applyDisabled={!selectedLibraryAction}
+                deleteDisabled={!selectedLibraryAction}
+                getSummary={(action) => `${formatEditorActionCost(action.actionCost)} - ${action.kind} - ${action.rules?.length ?? 0} hook(s)`}
+              />
+              <div className="action-editor-layout">
+                <div className="library-list compact-list">
+                  {creatureDraft.actions.map((action) => (
+                    <button
+                      className={action.id === selectedAction?.id ? 'selected-action' : ''}
+                      key={action.id}
+                      onClick={() => setSelectedActionId(action.id)}
+                    >
+                      <strong>{action.name}</strong>
+                      <span>
+                        {formatEditorActionCost(action.actionCost)} - {action.kind}
+                      </span>
+                      <small>
+                        {action.tags.join(', ') || 'no tags'}
+                        {(action.rules?.length ?? 0) > 0 ? ` - ${action.rules?.length} hook(s)` : ''}
+                      </small>
+                    </button>
+                  ))}
+                </div>
+                {selectedAction && (
+                  <ActionEditor
+                    action={selectedAction}
+                    resources={creatureDraft.resources ?? []}
+                    onChange={updateAction}
+                  />
+                )}
+              </div>
+            </section>
+
+            <section className="editor-section">
+              <h3>Features</h3>
+              <div className="editor-button-row">
+                <button onClick={addFeature}>Add Feature</button>
+                <button onClick={duplicateFeature} disabled={!selectedFeature}>
+                  Duplicate Feature
+                </button>
+                <button onClick={deleteFeature} disabled={!selectedFeature}>
+                  Delete Feature
+                </button>
+              </div>
+              <PartLibraryControls
+                title="Feature Library"
+                items={featureLibrary}
+                selectedId={selectedLibraryFeature?.id ?? ''}
+                onSelect={setSelectedLibraryFeatureId}
+                onSave={saveSelectedFeatureToLibrary}
+                onApply={applyLibraryFeature}
+                onDelete={deleteLibraryFeature}
+                saveDisabled={!selectedFeature}
+                applyDisabled={!selectedLibraryFeature}
+                deleteDisabled={!selectedLibraryFeature}
+                getSummary={(feature) => `${feature.enabled ? 'enabled' : 'disabled'} - ${feature.source || 'custom'} - ${feature.rules?.length ?? 0} hook(s)`}
+              />
+              <div className="feature-editor-layout">
+                <div className="library-list compact-list">
+                  {(creatureDraft.features ?? []).map((feature) => (
+                    <button
+                      className={feature.id === selectedFeature?.id ? 'selected-action' : ''}
+                      key={feature.id}
+                      onClick={() => setSelectedFeatureId(feature.id)}
+                    >
+                      <strong>{feature.name}</strong>
+                      <span>{feature.enabled ? 'enabled' : 'disabled'} - {feature.source || 'feature'}</span>
+                      <small>{feature.rules?.length ?? 0} hook(s)</small>
+                    </button>
+                  ))}
+                  {(creatureDraft.features ?? []).length === 0 && <span className="empty-list">No features yet.</span>}
+                </div>
+                {selectedFeature && (
+                  <FeatureEditor
+                    feature={selectedFeature}
+                    resources={creatureDraft.resources ?? []}
+                    onChange={updateFeature}
+                  />
+                )}
+              </div>
+            </section>
+
+            <section className="editor-section">
+              <h3>Resources and Skills</h3>
+              <div className="editor-button-row">
+                <button onClick={addResource}>Add Resource</button>
+                <button onClick={deleteResource} disabled={!selectedResource}>
+                  Delete Resource
+                </button>
+              </div>
+              <PartLibraryControls
+                title="Resource Library"
+                items={resourceLibrary}
+                selectedId={selectedLibraryResource?.id ?? ''}
+                onSelect={setSelectedLibraryResourceId}
+                onSave={saveSelectedResourceToLibrary}
+                onApply={applyLibraryResource}
+                onDelete={deleteLibraryResource}
+                saveDisabled={!selectedResource}
+                applyDisabled={!selectedLibraryResource}
+                deleteDisabled={!selectedLibraryResource}
+                getSummary={(resource) => `${resource.current}/${resource.max} - resets ${resource.resetOn}`}
+              />
+              <div className="resource-editor-layout">
+                <div className="library-list compact-list">
+                  {(creatureDraft.resources ?? []).map((resource) => (
+                    <button
+                      className={resource.id === selectedResource?.id ? 'selected-action' : ''}
+                      key={resource.id}
+                      onClick={() => setSelectedResourceId(resource.id)}
+                    >
+                      <strong>{resource.name}</strong>
+                      <span>
+                        {resource.current}/{resource.max}
+                      </span>
+                    </button>
+                  ))}
+                  {(creatureDraft.resources ?? []).length === 0 && <span className="empty-list">No resources.</span>}
+                </div>
+                {selectedResource && (
+                  <div className="form-grid">
+                    <label>
+                      Name
+                      <input value={selectedResource.name} onChange={(event) => updateResource({ name: event.target.value })} />
+                    </label>
+                    <label>
+                      ID
+                      <input value={selectedResource.id} onChange={(event) => updateResource({ id: toId(event.target.value) })} />
+                    </label>
+                    <NumberInput label="Current" value={selectedResource.current} onChange={(value) => updateResource({ current: value })} />
+                    <NumberInput label="Max" value={selectedResource.max} onChange={(value) => updateResource({ max: value })} />
+                    <label>
+                      Reset
+                      <select value={selectedResource.resetOn} onChange={(event) => updateResource({ resetOn: event.target.value as ResourceReset })}>
+                        {resetOptions.map((option) => (
+                          <option key={option} value={option}>
+                            {option}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                  </div>
+                )}
+              </div>
+              <div className="ability-score-grid">
+                {(['athletics', 'acrobatics', 'stealth', 'perception', 'investigation'] as const).map((skill) => (
+                  <label key={skill}>
+                    {skill}
+                    <input
+                      type="number"
+                      value={creatureDraft.skillBonuses?.[skill] ?? ''}
+                      onChange={(event) => updateSkill(skill, event.target.value)}
+                    />
+                  </label>
+                ))}
+              </div>
+            </section>
+
+            <section className="editor-section">
+              <h3>Creature JSON</h3>
+              <div className="editor-button-row">
+                <button onClick={exportSelectedCreature}>Export Selected</button>
+                <button onClick={exportCreatureLibrary}>Export Library</button>
+                <button onClick={importCreatureJson}>Import JSON</button>
+              </div>
+              {creatureJsonMessage && <p className="editor-message">{creatureJsonMessage}</p>}
+              <textarea value={creatureJson} onChange={(event) => setCreatureJson(event.target.value)} spellCheck={false} />
+            </section>
+          </div>
+        </div>
+      </section>
+
+      <section className="panel encounter-builder-panel">
+        <header className="editor-panel-header">
+          <h2>Encounter Builder</h2>
+          <div className="editor-button-row">
+            <button onClick={clearBuilder}>New</button>
+            <button onClick={seedBuilderFromCombat}>From Active Combat</button>
+            <button onClick={saveBuilderEncounter}>Save Encounter</button>
+            <button onClick={loadBuilderIntoCombat} disabled={builderCreatures.length === 0}>
+              Load Into Combat
+            </button>
+          </div>
+        </header>
+
+        <div className="encounter-layout">
+          <aside className="encounter-side">
+            <section className="editor-section">
+              <h3>Saved Encounters</h3>
+              <div className="library-list encounter-list">
+                {encounters.map((encounter) => (
+                  <button
+                    className={encounter.id === selectedEncounterId ? 'selected-action' : ''}
+                    key={encounter.id}
+                    onClick={() => loadSavedEncounter(encounter)}
+                  >
+                    <strong>{encounter.name}</strong>
+                    <span>{encounter.creatures.length} creature(s)</span>
+                    <small>{new Date(encounter.updatedAt).toLocaleString()}</small>
+                  </button>
+                ))}
+                {encounters.length === 0 && <span className="empty-list">No saved encounters.</span>}
+              </div>
+              <button onClick={deleteSavedEncounter} disabled={!selectedEncounterId}>
+                Delete Saved Encounter
+              </button>
+            </section>
+
+            <section className="editor-section">
+              <h3>Setup</h3>
+              <div className="form-grid">
+                <label className="wide-field">
+                  Name
+                  <input value={builderName} onChange={(event) => setBuilderName(event.target.value)} />
+                </label>
+                <NumberInput label="Width" value={builderGrid.width} min={1} onChange={(value) => setBuilderGrid((current) => normalizeGrid({ ...current, width: value }))} />
+                <NumberInput label="Height" value={builderGrid.height} min={1} onChange={(value) => setBuilderGrid((current) => normalizeGrid({ ...current, height: value }))} />
+              </div>
+              <div className="action-tabs">
+                <button className={builderTool === 'place' ? 'selected-action' : ''} onClick={() => setBuilderTool('place')}>
+                  Place
+                </button>
+                <button className={builderTool === 'move' ? 'selected-action' : ''} onClick={() => setBuilderTool('move')}>
+                  Move
+                </button>
+                <button className={builderTool === 'block' ? 'selected-action' : ''} onClick={() => setBuilderTool('block')}>
+                  Block
+                </button>
+              </div>
+              <label>
+                Creature to place
+                <select value={selectedTemplateId} onChange={(event) => setSelectedTemplateId(event.target.value)}>
+                  {creatureLibrary.map((creature) => (
+                    <option key={creature.id} value={creature.id}>
+                      {creature.name}
+                    </option>
+                  ))}
+                </select>
+              </label>
+            </section>
+
+            <section className="editor-section">
+              <h3>Placed Creatures</h3>
+              <div className="library-list encounter-list">
+                {builderCreatures.map((creature) => (
+                  <button
+                    className={creature.id === selectedInstanceId ? 'selected-action' : ''}
+                    key={creature.id}
+                    onClick={() => setSelectedInstanceId(creature.id)}
+                  >
+                    <strong>{creature.name}</strong>
+                    <span>
+                      {creature.team} {creature.position.x},{creature.position.y}
+                    </span>
+                  </button>
+                ))}
+                {builderCreatures.length === 0 && <span className="empty-list">Place a creature on the grid.</span>}
+              </div>
+              {selectedInstance && (
+                <div className="form-grid">
+                  <label className="wide-field">
+                    Instance Name
+                    <input value={selectedInstance.name} onChange={(event) => updateSelectedInstance({ name: event.target.value })} />
+                  </label>
+                  <label>
+                    Team
+                    <select value={selectedInstance.team} onChange={(event) => updateSelectedInstance({ team: event.target.value as Team })}>
+                      {teams.map((team) => (
+                        <option key={team} value={team}>
+                          {team}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                  <NumberInput label="X" value={selectedInstance.position.x} onChange={(value) => updateSelectedInstance({ position: { ...selectedInstance.position, x: value } })} />
+                  <NumberInput label="Y" value={selectedInstance.position.y} onChange={(value) => updateSelectedInstance({ position: { ...selectedInstance.position, y: value } })} />
+                  <NumberInput label="HP" value={selectedInstance.hp} onChange={(value) => updateSelectedInstance({ hp: value })} />
+                  <button onClick={removeSelectedInstance}>Remove From Encounter</button>
+                </div>
+              )}
+            </section>
+          </aside>
+
+          <section className="builder-board-section">
+            <div
+              className="builder-grid-board"
+              role="grid"
+              style={{ gridTemplateColumns: `repeat(${builderGrid.width}, 40px)` }}
+            >
+              {Array.from({ length: builderGrid.height }).flatMap((_, y) =>
+                Array.from({ length: builderGrid.width }).map((_, x) => {
+                  const position = { x, y };
+                  const key = positionKey(position);
+                  const creature = builderCreatures.find((candidate) => samePosition(candidate.position, position));
+                  const blocked = blockedKeys.has(key);
+                  return (
+                    <button
+                      aria-label={`Builder grid ${x},${y}${creature ? ` ${creature.name}` : ''}${blocked ? ' blocked' : ''}`}
+                      className={[
+                        'grid-cell',
+                        'builder-cell',
+                        blocked ? 'blocked' : '',
+                        creature?.id === selectedInstanceId ? 'selected-cell' : '',
+                        occupiedKeys.has(key) ? 'occupied-builder-cell' : ''
+                      ].join(' ')}
+                      key={key}
+                      onClick={() => handleBuilderCellClick(position)}
+                    >
+                      <span className="coord">{x},{y}</span>
+                      {creature && <span className={`token ${creature.team}`}>{getCreatureShortLabel(creature)}</span>}
+                    </button>
+                  );
+                })
+              )}
+            </div>
+          </section>
+        </div>
+
+        <section className="editor-section">
+          <h3>Encounter JSON</h3>
+          <div className="editor-button-row">
+            <button onClick={exportBuilderEncounter}>Export Builder</button>
+            <button onClick={importEncounterJson}>Import JSON</button>
+          </div>
+          {encounterJsonMessage && <p className="editor-message">{encounterJsonMessage}</p>}
+          <textarea value={encounterJson} onChange={(event) => setEncounterJson(event.target.value)} spellCheck={false} />
+        </section>
+      </section>
+    </section>
+  );
+}
+
+function PartLibraryControls<T extends { id: string; name: string }>({
+  title,
+  items,
+  selectedId,
+  onSelect,
+  onSave,
+  onApply,
+  onDelete,
+  saveDisabled,
+  applyDisabled,
+  deleteDisabled,
+  getSummary
+}: {
+  title: string;
+  items: T[];
+  selectedId: string;
+  onSelect: (id: string) => void;
+  onSave: () => void;
+  onApply: () => void;
+  onDelete: () => void;
+  saveDisabled?: boolean;
+  applyDisabled?: boolean;
+  deleteDisabled?: boolean;
+  getSummary: (item: T) => string;
+}) {
+  const selected = items.find((item) => item.id === selectedId) ?? items[0];
+
+  return (
+    <details className="part-library-tools">
+      <summary>{title}</summary>
+      <div className="part-library-grid">
+        <label>
+          Saved Entry
+          <select value={selected?.id ?? ''} onChange={(event) => onSelect(event.target.value)}>
+            <option value="">No saved entries</option>
+            {items.map((item) => (
+              <option key={item.id} value={item.id}>
+                {item.name}
+              </option>
+            ))}
+          </select>
+        </label>
+        <div className="editor-button-row">
+          <button onClick={onSave} disabled={saveDisabled}>
+            Save Selected
+          </button>
+          <button onClick={onApply} disabled={applyDisabled || !selected}>
+            Apply Saved
+          </button>
+          <button onClick={onDelete} disabled={deleteDisabled || !selected}>
+            Delete Saved
+          </button>
+        </div>
+        <span className="part-library-summary">{selected ? getSummary(selected) : 'Nothing saved yet.'}</span>
+      </div>
+    </details>
+  );
+}
+
+function ActionEditor({
+  action,
+  resources,
+  onChange
+}: {
+  action: ActionDefinition;
+  resources: Resource[];
+  onChange: (update: Partial<ActionDefinition>) => void;
+}) {
+  const cost = action.resourceCosts?.[0];
+
+  function setKind(kind: ActionKind) {
+    onChange({
+      kind,
+      type: kind === 'meleeAttack' || kind === 'rangedAttack' || kind === 'savingThrowEffect' ? kind : kind === 'spell' ? action.type : undefined,
+      tags: inferTags(kind, action.tags)
+    });
+  }
+
+  function setResourceCost(resourceId: string) {
+    onChange({
+              resourceCosts: resourceId
+        ? [
+            {
+              resourceId,
+              amount: cost?.amount ?? 1,
+              consumeOn: cost?.consumeOn ?? 'use',
+              spendActionWhenDepleted: cost?.spendActionWhenDepleted ?? false
+            }
+          ]
+        : []
+    });
+  }
+
+  return (
+    <div className="action-form">
+      <details className="editor-subsection" open>
+        <summary>Identity</summary>
+        <div className="form-grid">
+          <label>
+            Name
+            <input value={action.name} onChange={(event) => onChange({ name: event.target.value })} />
+          </label>
+          <label>
+            ID
+            <input value={action.id} onChange={(event) => onChange({ id: toId(event.target.value) })} />
+          </label>
+          <label>
+            Kind
+            <select value={action.kind} onChange={(event) => setKind(event.target.value as ActionKind)}>
+              {actionKinds.map((kind) => (
+                <option key={kind} value={kind}>
+                  {kind}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label>
+            Rules Type
+            <select value={action.type ?? ''} onChange={(event) => onChange({ type: (event.target.value || undefined) as ActionDefinition['type'] })}>
+              <option value="">Utility / manual</option>
+              <option value="meleeAttack">Melee attack</option>
+              <option value="rangedAttack">Ranged attack</option>
+              <option value="savingThrowEffect">Saving throw effect</option>
+            </select>
+          </label>
+          <label>
+            Cost
+            <select value={action.actionCost} onChange={(event) => onChange({ actionCost: event.target.value as ActionCost })}>
+              {actionCosts.map((costOption) => (
+                <option key={costOption} value={costOption}>
+                  {formatEditorActionCost(costOption)}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label className="wide-field">
+            Tags
+            <input value={action.tags.join(', ')} onChange={(event) => onChange({ tags: parseTags(event.target.value) })} />
+          </label>
+          <label className="wide-field">
+            Description
+            <textarea value={action.description ?? ''} onChange={(event) => onChange({ description: event.target.value })} />
+          </label>
+        </div>
+      </details>
+
+      <details className="editor-subsection" open>
+        <summary>Attack and Damage</summary>
+        <div className="form-grid">
+          <NumberInput label="Range Cells" value={action.range} min={0} onChange={(value) => onChange({ range: value })} />
+          <NumberInput label="Reach Feet" value={action.reach ?? 5} min={0} onChange={(value) => onChange({ reach: value })} />
+          <NumberInput label="Normal Range" value={action.normalRange ?? 0} min={0} onChange={(value) => onChange({ normalRange: value })} />
+          <NumberInput label="Long Range" value={action.longRange ?? 0} min={0} onChange={(value) => onChange({ longRange: value })} />
+          <NumberInput label="Attack Bonus" value={action.attackBonus ?? 0} onChange={(value) => onChange({ attackBonus: value })} />
+          <label>
+            Damage Dice
+            <input value={action.damage?.dice ?? ''} onChange={(event) => onChange({ damage: { dice: event.target.value, type: action.damage?.type } })} />
+          </label>
+          <label>
+            Damage Type
+            <input value={action.damage?.type ?? ''} onChange={(event) => onChange({ damage: { dice: action.damage?.dice ?? '', type: event.target.value } })} />
+          </label>
+        </div>
+      </details>
+
+      <details className="editor-subsection">
+        <summary>Saving Throw and Area</summary>
+        <div className="form-grid">
+          <label>
+            Save Ability
+            <select
+              value={action.save?.ability ?? ''}
+              onChange={(event) =>
+                onChange({
+                  save: event.target.value
+                    ? { ability: event.target.value as Ability, dc: action.save?.dc ?? 10, halfDamageOnSuccess: action.save?.halfDamageOnSuccess ?? true }
+                    : undefined
+                })
+              }
+            >
+              <option value="">None</option>
+              {abilities.map((ability) => (
+                <option key={ability} value={ability}>
+                  {ability.toUpperCase()}
+                </option>
+              ))}
+            </select>
+          </label>
+          <NumberInput
+            label="Save DC"
+            value={action.save?.dc ?? 10}
+            min={0}
+            onChange={(value) => action.save && onChange({ save: { ...action.save, dc: value } })}
+          />
+          <label className="checkbox-field">
+            <input
+              checked={Boolean(action.save?.halfDamageOnSuccess)}
+              disabled={!action.save}
+              type="checkbox"
+              onChange={(event) => action.save && onChange({ save: { ...action.save, halfDamageOnSuccess: event.target.checked } })}
+            />
+            Half damage on success
+          </label>
+          <label>
+            Shape
+            <select value={action.shape?.type ?? 'single'} onChange={(event) => onChange({ shape: { ...action.shape, type: event.target.value as ShapeType } })}>
+              {shapeTypes.map((shape) => (
+                <option key={shape} value={shape}>
+                  {shape}
+                </option>
+              ))}
+            </select>
+          </label>
+          <NumberInput
+            label="Radius"
+            value={action.shape?.radius ?? 0}
+            min={0}
+            onChange={(value) => onChange({ shape: { type: action.shape?.type ?? 'radius', ...action.shape, radius: value } })}
+          />
+          <NumberInput
+            label="Length"
+            value={action.shape?.length ?? 0}
+            min={0}
+            onChange={(value) => onChange({ shape: { type: action.shape?.type ?? 'line', ...action.shape, length: value } })}
+          />
+        </div>
+      </details>
+
+      <details className="editor-subsection" open>
+        <summary>Resource Cost</summary>
+        <div className="form-grid">
+          <label>
+            Resource
+            <select value={cost?.resourceId ?? ''} onChange={(event) => setResourceCost(event.target.value)}>
+              <option value="">None</option>
+              {resources.map((resource) => (
+                <option key={resource.id} value={resource.id}>
+                  {resource.name}
+                </option>
+              ))}
+            </select>
+          </label>
+          <NumberInput
+            label="Amount"
+            value={cost?.amount ?? 1}
+            min={1}
+            onChange={(value) => cost && onChange({ resourceCosts: [{ ...cost, amount: value }] })}
+          />
+          <label>
+            Consume On
+            <select value={cost?.consumeOn ?? 'use'} onChange={(event) => cost && onChange({ resourceCosts: [{ ...cost, consumeOn: event.target.value as ResourceConsumeOn }] })}>
+              {consumeOptions.map((option) => (
+                <option key={option} value={option}>
+                  {option}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label className="checkbox-field">
+            <input
+              checked={Boolean(cost?.spendActionWhenDepleted)}
+              disabled={!cost}
+              type="checkbox"
+              onChange={(event) => cost && onChange({ resourceCosts: [{ ...cost, spendActionWhenDepleted: event.target.checked }] })}
+            />
+            Spend action when depleted
+          </label>
+        </div>
+      </details>
+
+      <details className="editor-subsection">
+        <summary>Multiattack</summary>
+        <div className="form-grid">
+          <label className="wide-field">
+            Step Action IDs
+            <input
+              value={(action.multiattack?.steps ?? []).map((step) => step.actionId ?? step.name).join(', ')}
+              onChange={(event) =>
+                onChange({
+                  multiattack: {
+                    targetMode: action.multiattack?.targetMode ?? 'sameTarget',
+                    steps: parseCsv(event.target.value).map((actionId, index) => ({
+                      id: `step-${index + 1}`,
+                      name: actionId,
+                      actionId,
+                      required: true
+                    }))
+                  }
+                })
+              }
+            />
+          </label>
+          <label>
+            Targets
+            <select
+              value={action.multiattack?.targetMode ?? 'sameTarget'}
+              onChange={(event) =>
+                onChange({
+                  multiattack: {
+                    steps: action.multiattack?.steps ?? [],
+                    targetMode: event.target.value as 'sameTarget' | 'chooseEach' | 'fixed'
+                  }
+                })
+              }
+            >
+              <option value="sameTarget">sameTarget</option>
+              <option value="chooseEach">chooseEach</option>
+              <option value="fixed">fixed</option>
+            </select>
+          </label>
+        </div>
+      </details>
+
+      <RuleListEditor
+        title="Action Hooks"
+        rules={action.rules ?? []}
+        resources={resources}
+        onChange={(rules) => onChange({ rules })}
+      />
+    </div>
+  );
+}
+
+function FeatureEditor({
+  feature,
+  resources,
+  onChange
+}: {
+  feature: FeatureDefinition;
+  resources: Resource[];
+  onChange: (update: Partial<FeatureDefinition>) => void;
+}) {
+  return (
+    <div className="feature-form">
+      <details className="editor-subsection" open>
+        <summary>Feature Details</summary>
+        <div className="form-grid">
+          <label>
+            Name
+            <input value={feature.name} onChange={(event) => onChange({ name: event.target.value })} />
+          </label>
+          <label>
+            ID
+            <input value={feature.id} onChange={(event) => onChange({ id: toId(event.target.value) })} />
+          </label>
+          <label>
+            Source
+            <input value={feature.source} onChange={(event) => onChange({ source: event.target.value })} />
+          </label>
+          <label className="checkbox-field">
+            <input type="checkbox" checked={feature.enabled} onChange={(event) => onChange({ enabled: event.target.checked })} />
+            Enabled
+          </label>
+          <label className="wide-field">
+            Description
+            <textarea value={feature.description} onChange={(event) => onChange({ description: event.target.value })} />
+          </label>
+        </div>
+      </details>
+
+      <details className="editor-subsection">
+        <summary>Passive Stat Modifiers</summary>
+        <div className="form-grid">
+          <NumberInput label="AC" value={feature.modifiers?.ac ?? 0} onChange={(value) => onChange({ modifiers: cleanStatModifiers({ ...feature.modifiers, ac: value }) })} />
+          <NumberInput label="Speed" value={feature.modifiers?.speed ?? 0} onChange={(value) => onChange({ modifiers: cleanStatModifiers({ ...feature.modifiers, speed: value }) })} />
+          <NumberInput label="Attack Bonus" value={feature.modifiers?.attackBonus ?? 0} onChange={(value) => onChange({ modifiers: cleanStatModifiers({ ...feature.modifiers, attackBonus: value }) })} />
+          <NumberInput label="Max HP" value={feature.modifiers?.maxHp ?? 0} onChange={(value) => onChange({ modifiers: cleanStatModifiers({ ...feature.modifiers, maxHp: value }) })} />
+        </div>
+      </details>
+
+      <RuleListEditor
+        title="Feature Hooks"
+        rules={feature.rules ?? []}
+        resources={resources}
+        onChange={(rules) => onChange({ rules })}
+      />
+    </div>
+  );
+}
+
+function RuleListEditor({
+  title,
+  rules,
+  resources,
+  onChange
+}: {
+  title: string;
+  rules: RuleDefinition[];
+  resources: Resource[];
+  onChange: (rules: RuleDefinition[]) => void;
+}) {
+  function addRule() {
+    onChange([...rules, createBlankRule()]);
+  }
+
+  function updateRule(index: number, update: RuleDefinition) {
+    onChange(rules.map((rule, ruleIndex) => (ruleIndex === index ? normalizeRule(update) : rule)));
+  }
+
+  function deleteRule(index: number) {
+    onChange(rules.filter((_, ruleIndex) => ruleIndex !== index));
+  }
+
+  return (
+    <details className="editor-subsection rule-section" open>
+      <summary>{title}</summary>
+      <div className="editor-button-row">
+        <button onClick={addRule}>Add Hook</button>
+      </div>
+      <div className="rule-list">
+        {rules.map((rule, index) => (
+          <RuleEditor
+            key={`${rule.id}-${index}`}
+            rule={rule}
+            resources={resources}
+            onChange={(nextRule) => updateRule(index, nextRule)}
+            onDelete={() => deleteRule(index)}
+          />
+        ))}
+        {rules.length === 0 && <span className="empty-list">No hooks configured.</span>}
+      </div>
+    </details>
+  );
+}
+
+function RuleEditor({
+  rule,
+  resources,
+  onChange,
+  onDelete
+}: {
+  rule: RuleDefinition;
+  resources: Resource[];
+  onChange: (rule: RuleDefinition) => void;
+  onDelete: () => void;
+}) {
+  const selectors = rule.selectors ?? [];
+  const filters = rule.filters ?? [];
+
+  return (
+    <article className="rule-card">
+      <div className="rule-card-header">
+        <strong>{rule.name || rule.id}</strong>
+        <button onClick={onDelete}>Delete</button>
+      </div>
+      <div className="form-grid">
+        <label>
+          Name
+          <input value={rule.name ?? ''} onChange={(event) => onChange({ ...rule, name: event.target.value })} />
+        </label>
+        <label>
+          ID
+          <input value={rule.id} onChange={(event) => onChange({ ...rule, id: toId(event.target.value) })} />
+        </label>
+        <label>
+          Trigger
+          <select value={rule.trigger} onChange={(event) => onChange({ ...rule, trigger: event.target.value as RuleTriggerPoint })}>
+            {ruleTriggers.map((trigger) => (
+              <option key={trigger} value={trigger}>
+                {trigger}
+              </option>
+            ))}
+          </select>
+        </label>
+        <label className="checkbox-field">
+          <input type="checkbox" checked={rule.enabled !== false} onChange={(event) => onChange({ ...rule, enabled: event.target.checked })} />
+          Enabled
+        </label>
+      </div>
+
+      <RulePartList
+        title="Targets"
+        addLabel="Add Target"
+        emptyText="Defaults to source or action target based on trigger."
+        onAdd={() => onChange({ ...rule, selectors: [...selectors, createBlankSelector()] })}
+      >
+        {selectors.map((selector, index) => (
+          <SelectorEditor
+            key={index}
+            selector={selector}
+            onChange={(nextSelector) => onChange({ ...rule, selectors: updateArray(selectors, index, nextSelector) })}
+            onDelete={() => onChange({ ...rule, selectors: removeArrayItem(selectors, index) })}
+          />
+        ))}
+      </RulePartList>
+
+      <RulePartList
+        title="Filters"
+        addLabel="Add Filter"
+        emptyText="No filters. Hook can run whenever the trigger fires."
+        onAdd={() => onChange({ ...rule, filters: [...filters, createBlankFilter()] })}
+      >
+        {filters.map((filter, index) => (
+          <FilterEditor
+            key={index}
+            filter={filter}
+            resources={resources}
+            onChange={(nextFilter) => onChange({ ...rule, filters: updateArray(filters, index, nextFilter) })}
+            onDelete={() => onChange({ ...rule, filters: removeArrayItem(filters, index) })}
+          />
+        ))}
+      </RulePartList>
+
+      <RulePartList
+        title="Effects"
+        addLabel="Add Effect"
+        emptyText="Add at least one effect."
+        onAdd={() => onChange({ ...rule, effects: [...rule.effects, createBlankEffect()] })}
+      >
+        {rule.effects.map((effect, index) => (
+          <EffectEditor
+            key={index}
+            effect={effect}
+            resources={resources}
+            onChange={(nextEffect) => onChange({ ...rule, effects: updateArray(rule.effects, index, nextEffect) })}
+            onDelete={() => onChange({ ...rule, effects: removeArrayItem(rule.effects, index) })}
+          />
+        ))}
+      </RulePartList>
+    </article>
+  );
+}
+
+function RulePartList({
+  title,
+  addLabel,
+  emptyText,
+  onAdd,
+  children
+}: {
+  title: string;
+  addLabel: string;
+  emptyText: string;
+  onAdd: () => void;
+  children: ReactNode;
+}) {
+  const hasChildren = Array.isArray(children) ? children.length > 0 : Boolean(children);
+  return (
+    <div className="rule-part-list">
+      <div className="rule-part-header">
+        <strong>{title}</strong>
+        <button onClick={onAdd}>{addLabel}</button>
+      </div>
+      {hasChildren ? children : <span className="empty-list">{emptyText}</span>}
+    </div>
+  );
+}
+
+function SelectorEditor({
+  selector,
+  onChange,
+  onDelete
+}: {
+  selector: RuleTargetSelector;
+  onChange: (selector: RuleTargetSelector) => void;
+  onDelete: () => void;
+}) {
+  return (
+    <div className="rule-row">
+      <label>
+        Selector
+        <select value={selector.type} onChange={(event) => onChange(createBlankSelector(event.target.value as TargetSelectorType))}>
+          {selectorTypes.map((type) => (
+            <option key={type} value={type}>
+              {type}
+            </option>
+          ))}
+        </select>
+      </label>
+      {(selector.type === 'alliesWithinRange' || selector.type === 'enemiesWithinRange') && (
+        <NumberInput label="Range Feet" value={selector.range ?? 10} min={0} onChange={(value) => onChange({ ...selector, range: value })} />
+      )}
+      <button onClick={onDelete}>Remove</button>
+    </div>
+  );
+}
+
+function FilterEditor({
+  filter,
+  resources,
+  onChange,
+  onDelete
+}: {
+  filter: RuleFilter;
+  resources: Resource[];
+  onChange: (filter: RuleFilter) => void;
+  onDelete: () => void;
+}) {
+  return (
+    <div className="rule-row">
+      <label>
+        Filter
+        <select value={filter.type} onChange={(event) => onChange(createBlankFilter(event.target.value as RuleFilterType))}>
+          {filterTypes.map((type) => (
+            <option key={type} value={type}>
+              {type}
+            </option>
+          ))}
+        </select>
+      </label>
+      {filter.type === 'actionHasTag' && (
+        <label>
+          Tag
+          <input value={filter.tag} onChange={(event) => onChange({ ...filter, tag: event.target.value })} />
+        </label>
+      )}
+      {(filter.type === 'targetHasCondition' || filter.type === 'sourceHasCondition') && (
+        <label>
+          Condition ID
+          <input value={filter.conditionId} onChange={(event) => onChange({ ...filter, conditionId: toId(event.target.value) })} />
+        </label>
+      )}
+      {filter.type === 'hpBelowHalf' && (
+        <CreatureReferenceSelect value={filter.target ?? 'actionTarget'} onChange={(target) => onChange({ ...filter, target })} />
+      )}
+      {filter.type === 'resourceAvailable' && (
+        <>
+          <ResourceSelect label="Resource" value={filter.resourceId} resources={resources} onChange={(resourceId) => onChange({ ...filter, resourceId })} />
+          <NumberInput label="Amount" value={filter.amount ?? 1} min={1} onChange={(amount) => onChange({ ...filter, amount })} />
+          <CreatureReferenceSelect value={filter.target ?? 'source'} onChange={(target) => onChange({ ...filter, target })} />
+        </>
+      )}
+      {(filter.type === 'oncePerTurn' || filter.type === 'oncePerRound') && (
+        <label>
+          Key
+          <input value={filter.key ?? ''} onChange={(event) => onChange({ ...filter, key: event.target.value || undefined })} />
+        </label>
+      )}
+      <button onClick={onDelete}>Remove</button>
+    </div>
+  );
+}
+
+function EffectEditor({
+  effect,
+  resources,
+  onChange,
+  onDelete
+}: {
+  effect: RuleEffectOperation;
+  resources: Resource[];
+  onChange: (effect: RuleEffectOperation) => void;
+  onDelete: () => void;
+}) {
+  return (
+    <div className="rule-row effect-row">
+      <label>
+        Effect
+        <select value={effect.type} onChange={(event) => onChange(createBlankEffect(event.target.value as EffectOperationType))}>
+          {effectTypes.map((type) => (
+            <option key={type} value={type}>
+              {type}
+            </option>
+          ))}
+        </select>
+      </label>
+      {renderEffectFields(effect, resources, onChange)}
+      <button onClick={onDelete}>Remove</button>
+    </div>
+  );
+}
+
+function renderEffectFields(effect: RuleEffectOperation, resources: Resource[], onChange: (effect: RuleEffectOperation) => void) {
+  if (effect.type === 'addFlatModifier' || effect.type === 'reduceDamage' || effect.type === 'setDamageMinimum') {
+    return <NumberInput label="Amount" value={effect.amount} onChange={(amount) => onChange({ ...effect, amount })} />;
+  }
+  if (effect.type === 'multiplyDamage') {
+    return <NumberInput label="Factor" value={effect.factor} min={0} onChange={(factor) => onChange({ ...effect, factor })} />;
+  }
+  if (effect.type === 'addDamageDice') {
+    return (
+      <>
+        <label>
+          Dice
+          <input value={effect.dice} onChange={(event) => onChange({ ...effect, dice: event.target.value })} />
+        </label>
+        <label>
+          Type
+          <input value={effect.damageType ?? ''} onChange={(event) => onChange({ ...effect, damageType: event.target.value || undefined })} />
+        </label>
+      </>
+    );
+  }
+  if (effect.type === 'applyCondition') {
+    return (
+      <>
+        <label>
+          Condition ID
+          <input value={effect.conditionId} onChange={(event) => onChange({ ...effect, conditionId: toId(event.target.value) })} />
+        </label>
+        <label>
+          Duration
+          <select value={effect.durationType ?? ''} onChange={(event) => onChange({ ...effect, durationType: (event.target.value || undefined) as ConditionDurationType | undefined })}>
+            <option value="">Default</option>
+            <option value="untilStartOfSourceTurn">untilStartOfSourceTurn</option>
+            <option value="untilEndOfSourceTurn">untilEndOfSourceTurn</option>
+            <option value="untilStartOfTargetTurn">untilStartOfTargetTurn</option>
+            <option value="untilEndOfTargetTurn">untilEndOfTargetTurn</option>
+            <option value="rounds">rounds</option>
+            <option value="permanentUntilRemoved">permanentUntilRemoved</option>
+          </select>
+        </label>
+        <NumberInput label="Rounds" value={effect.remainingRounds ?? 1} min={1} onChange={(remainingRounds) => onChange({ ...effect, remainingRounds })} />
+        <label>
+          Stack
+          <select value={effect.stackBehavior ?? ''} onChange={(event) => onChange({ ...effect, stackBehavior: (event.target.value || undefined) as StackBehavior | undefined })}>
+            <option value="">Default</option>
+            {stackBehaviors.map((behavior) => (
+              <option key={behavior} value={behavior}>
+                {behavior}
+              </option>
+            ))}
+          </select>
+        </label>
+      </>
+    );
+  }
+  if (effect.type === 'removeCondition') {
+    return (
+      <label>
+        Condition ID
+        <input value={effect.conditionId} onChange={(event) => onChange({ ...effect, conditionId: toId(event.target.value) })} />
+      </label>
+    );
+  }
+  if (effect.type === 'spendResource' || effect.type === 'restoreResource') {
+    return (
+      <>
+        <ResourceSelect label="Resource" value={effect.resourceId} resources={resources} onChange={(resourceId) => onChange({ ...effect, resourceId })} />
+        <NumberInput label="Amount" value={effect.amount} min={1} onChange={(amount) => onChange({ ...effect, amount })} />
+      </>
+    );
+  }
+  if (effect.type === 'addTag' || effect.type === 'removeTag') {
+    return (
+      <label>
+        Tag
+        <input value={effect.tag} onChange={(event) => onChange({ ...effect, tag: event.target.value })} />
+      </label>
+    );
+  }
+  if (effect.type === 'logMessage') {
+    return (
+      <label className="wide-field">
+        Message
+        <input value={effect.message} onChange={(event) => onChange({ ...effect, message: event.target.value })} />
+      </label>
+    );
+  }
+
+  return null;
+}
+
+function CreatureReferenceSelect({
+  value,
+  onChange
+}: {
+  value: 'self' | 'source' | 'actionTarget';
+  onChange: (value: 'self' | 'source' | 'actionTarget') => void;
+}) {
+  return (
+    <label>
+      Target
+      <select value={value} onChange={(event) => onChange(event.target.value as 'self' | 'source' | 'actionTarget')}>
+        <option value="self">self</option>
+        <option value="source">source</option>
+        <option value="actionTarget">actionTarget</option>
+      </select>
+    </label>
+  );
+}
+
+function ResourceSelect({
+  label,
+  value,
+  resources,
+  onChange
+}: {
+  label: string;
+  value: string;
+  resources: Resource[];
+  onChange: (value: string) => void;
+}) {
+  return (
+    <label>
+      {label}
+      <select value={value} onChange={(event) => onChange(event.target.value)}>
+        <option value="">Select resource</option>
+        {resources.map((resource) => (
+          <option key={resource.id} value={resource.id}>
+            {resource.name}
+          </option>
+        ))}
+      </select>
+    </label>
+  );
+}
+
+function NumberInput({
+  label,
+  value,
+  min,
+  onChange
+}: {
+  label: string;
+  value: number;
+  min?: number;
+  onChange: (value: number) => void;
+}) {
+  return (
+    <label>
+      {label}
+      <input min={min} type="number" value={Number.isFinite(value) ? value : 0} onChange={(event) => onChange(Number(event.target.value))} />
+    </label>
+  );
+}
+
+function loadCreatureLibrary(): Creature[] {
+  const stored = readJson<unknown>(CREATURE_LIBRARY_KEY);
+  const imported = Array.isArray(stored) ? stored.map(coerceCreature).filter(isDefined) : [];
+  return imported.length > 0 ? imported : sampleCreatures.map((creature) => normalizeCreatureDraft(cloneCreature(creature)));
+}
+
+function loadActionLibrary(): ActionDefinition[] {
+  const stored = readJson<unknown>(ACTION_LIBRARY_KEY);
+  return Array.isArray(stored) ? stored.map(coerceAction).filter(isDefined) : [];
+}
+
+function loadFeatureLibrary(): FeatureDefinition[] {
+  const stored = readJson<unknown>(FEATURE_LIBRARY_KEY);
+  return Array.isArray(stored) ? stored.map(coerceFeature).filter(isDefined) : [];
+}
+
+function loadResourceLibrary(): Resource[] {
+  const stored = readJson<unknown>(RESOURCE_LIBRARY_KEY);
+  return Array.isArray(stored) ? stored.map(coerceResource).filter(isDefined) : [];
+}
+
+function loadEncounterLibrary(): SavedEncounter[] {
+  const stored = readJson<unknown>(ENCOUNTER_LIBRARY_KEY);
+  if (!Array.isArray(stored)) {
+    return [];
+  }
+
+  return stored.map(coerceEncounter).filter(isDefined);
+}
+
+function parseCreatureImport(text: string): { ok: true; creatures: Creature[] } | { ok: false; error: string } {
+  try {
+    const parsed = JSON.parse(text) as unknown;
+    const source = isRecord(parsed) && Array.isArray(parsed.creatures) ? parsed.creatures : parsed;
+    const values = Array.isArray(source) ? source : [source];
+    const creatures = values.map(coerceCreature).filter(isDefined);
+    if (creatures.length === 0) {
+      return { ok: false, error: 'No valid creatures found in that JSON.' };
+    }
+    return { ok: true, creatures };
+  } catch {
+    return { ok: false, error: 'Invalid creature JSON.' };
+  }
+}
+
+function parseEncounterImport(text: string): { ok: true; encounter: SavedEncounter } | { ok: false; error: string } {
+  const combatResult = parseCombatStateJson(text);
+  if (combatResult.ok && combatResult.state) {
+    return {
+      ok: true,
+      encounter: {
+        id: createId('imported-combat', 'encounter'),
+        name: 'Imported Combat',
+        grid: combatResult.state.grid,
+        creatures: combatResult.state.creatures.map(cloneCreature),
+        updatedAt: new Date().toISOString()
+      }
+    };
+  }
+
+  try {
+    const parsed = JSON.parse(text) as unknown;
+    const encounter = coerceEncounter(parsed);
+    if (!encounter) {
+      return { ok: false, error: 'No valid encounter found in that JSON.' };
+    }
+    return { ok: true, encounter: { ...encounter, id: encounter.id || createId(encounter.name, 'encounter') } };
+  } catch {
+    return { ok: false, error: 'Invalid encounter JSON.' };
+  }
+}
+
+function coerceEncounter(value: unknown): SavedEncounter | undefined {
+  if (!isRecord(value) || !Array.isArray(value.creatures)) {
+    return undefined;
+  }
+
+  const creatures = value.creatures.map(coerceCreature).filter(isDefined);
+  if (creatures.length === 0) {
+    return undefined;
+  }
+
+  return {
+    id: typeof value.id === 'string' ? value.id : createId(String(value.name ?? 'encounter'), 'encounter'),
+    name: typeof value.name === 'string' ? value.name : 'Imported Encounter',
+    grid: normalizeGrid(isRecord(value.grid) ? (value.grid as Partial<GridDefinition>) : { width: 10, height: 10, blocked: [] }),
+    creatures,
+    updatedAt: typeof value.updatedAt === 'string' ? value.updatedAt : new Date().toISOString()
+  };
+}
+
+function coerceCreature(value: unknown): Creature | undefined {
+  if (!isRecord(value) || typeof value.name !== 'string') {
+    return undefined;
+  }
+
+  const blank = createBlankCreature();
+  const abilityScores = isRecord(value.abilityScores) ? value.abilityScores : {};
+  const position = isRecord(value.position) ? value.position : {};
+  const actions = Array.isArray(value.actions) ? value.actions.map(coerceAction).filter(isDefined) : blank.actions;
+  const resources = Array.isArray(value.resources) ? value.resources.map(coerceResource).filter(isDefined) : undefined;
+
+  return normalizeCreatureDraft({
+    ...blank,
+    id: typeof value.id === 'string' ? value.id : createId(value.name, 'creature'),
+    name: value.name,
+    team: isTeam(value.team) ? value.team : blank.team,
+    hp: numberOr(value.hp, blank.hp),
+    maxHp: numberOr(value.maxHp, numberOr(value.hp, blank.maxHp)),
+    ac: numberOr(value.ac, blank.ac),
+    abilityScores: coerceAbilityScores(abilityScores, blank.abilityScores),
+    proficiencyBonus: numberOr(value.proficiencyBonus, blank.proficiencyBonus),
+    speed: numberOr(value.speed, blank.speed),
+    position: {
+      x: numberOr(position.x, blank.position.x),
+      y: numberOr(position.y, blank.position.y)
+    },
+    conditions: [],
+    actions: actions.length ? actions : blank.actions,
+    resources,
+    features: Array.isArray(value.features) ? cloneJson(value.features) : undefined,
+    skillBonuses: isRecord(value.skillBonuses) ? cloneJson(value.skillBonuses) : {}
+  });
+}
+
+function coerceAction(value: unknown): ActionDefinition | undefined {
+  if (!isRecord(value) || typeof value.name !== 'string') {
+    return undefined;
+  }
+
+  return normalizeAction({
+    ...createBlankAction(),
+    ...cloneJson(value),
+    id: typeof value.id === 'string' ? value.id : createId(value.name, 'action'),
+    name: value.name
+  });
+}
+
+function coerceResource(value: unknown): Resource | undefined {
+  if (!isRecord(value) || typeof value.name !== 'string') {
+    return undefined;
+  }
+
+  return normalizeResource({
+    id: typeof value.id === 'string' ? value.id : createId(value.name, 'resource'),
+    name: value.name,
+    current: numberOr(value.current, 1),
+    max: numberOr(value.max, 1),
+    resetOn: resetOptions.includes(value.resetOn as ResourceReset) ? (value.resetOn as ResourceReset) : 'longRest',
+    display: { showOnCreaturePanel: true, mode: 'pips' }
+  });
+}
+
+function coerceFeature(value: unknown): FeatureDefinition | undefined {
+  if (!isRecord(value) || typeof value.name !== 'string') {
+    return undefined;
+  }
+
+  return normalizeFeature({
+    ...createBlankFeature(),
+    ...cloneJson(value),
+    id: typeof value.id === 'string' ? value.id : createId(value.name, 'feature'),
+    name: value.name
+  });
+}
+
+function coerceAbilityScores(source: Partial<Record<Ability, unknown>> | undefined, fallback: Creature['abilityScores']): Creature['abilityScores'] {
+  return {
+    str: numberOr(source?.str, fallback.str),
+    dex: numberOr(source?.dex, fallback.dex),
+    con: numberOr(source?.con, fallback.con),
+    int: numberOr(source?.int, fallback.int),
+    wis: numberOr(source?.wis, fallback.wis),
+    cha: numberOr(source?.cha, fallback.cha)
+  };
+}
+
+function createBlankFeature(): FeatureDefinition {
+  return {
+    id: createId('new-feature', 'feature'),
+    name: 'New Feature',
+    description: '',
+    enabled: true,
+    source: 'custom',
+    rules: []
+  };
+}
+
+function createBlankCreature(): Creature {
+  return {
+    id: createId('new-creature', 'creature'),
+    name: 'New Creature',
+    team: 'enemies',
+    hp: 10,
+    maxHp: 10,
+    ac: 12,
+    abilityScores: { str: 10, dex: 10, con: 10, int: 10, wis: 10, cha: 10 },
+    proficiencyBonus: 2,
+    speed: 30,
+    position: { x: 0, y: 0 },
+    conditions: [],
+    actions: [createBlankAction()],
+    resources: [],
+    features: [],
+    skillBonuses: {}
+  };
+}
+
+function createBlankAction(): ActionDefinition {
+  return {
+    id: createId('strike', 'action'),
+    name: 'Strike',
+    kind: 'meleeAttack',
+    type: 'meleeAttack',
+    actionCost: 'action',
+    tags: ['attack', 'melee'],
+    range: 1,
+    reach: 5,
+    attackBonus: 4,
+    damage: { dice: '1d6+2', type: 'bludgeoning' },
+    shape: { type: 'single' },
+    effects: [],
+    description: ''
+  };
+}
+
+function createCreatureInstance(template: Creature, position: GridPosition): Creature {
+  return normalizeCreatureDraft({
+    ...cloneCreature(template),
+    id: createId(template.name, 'encounter-creature'),
+    hp: template.maxHp,
+    conditions: [],
+    position
+  });
+}
+
+function normalizeCreatureDraft(creature: Creature): Creature {
+  const maxHp = Math.max(1, numberOr(creature.maxHp, 1));
+  return {
+    ...creature,
+    id: toId(creature.id || creature.name || 'creature'),
+    name: creature.name.trim() || 'Unnamed Creature',
+    hp: clamp(numberOr(creature.hp, maxHp), 0, maxHp),
+    maxHp,
+    ac: Math.max(0, numberOr(creature.ac, 10)),
+    proficiencyBonus: numberOr(creature.proficiencyBonus, 2),
+    speed: Math.max(0, numberOr(creature.speed, 30)),
+    position: {
+      x: Math.max(0, numberOr(creature.position?.x, 0)),
+      y: Math.max(0, numberOr(creature.position?.y, 0))
+    },
+    abilityScores: coerceAbilityScores(creature.abilityScores, createBlankCreature().abilityScores),
+    conditions: [],
+    actions: creature.actions.length ? creature.actions.map(normalizeAction) : [createBlankAction()],
+    resources: (creature.resources ?? []).map(normalizeResource),
+    features: (creature.features ?? []).map(normalizeFeature),
+    skillBonuses: creature.skillBonuses ?? {}
+  };
+}
+
+function normalizeAction(action: ActionDefinition): ActionDefinition {
+  const kind = action.kind ?? action.type ?? 'custom';
+  const type = kind === 'multiattack' || kind === 'basicAction'
+    ? undefined
+    : action.type ?? (kind === 'meleeAttack' || kind === 'rangedAttack' || kind === 'savingThrowEffect' ? kind : undefined);
+  return {
+    ...action,
+    id: toId(action.id || action.name || 'action'),
+    name: action.name.trim() || 'Unnamed Action',
+    kind,
+    type,
+    actionCost: action.actionCost ?? 'action',
+    tags: action.tags ?? inferTags(kind, []),
+    range: Math.max(0, numberOr(action.range, 1)),
+    effects: action.effects ?? [],
+    shape: action.shape ?? { type: 'single' },
+    rules: (action.rules ?? []).map(normalizeRule)
+  };
+}
+
+function normalizeFeature(feature: FeatureDefinition): FeatureDefinition {
+  return {
+    ...feature,
+    id: toId(feature.id || feature.name || 'feature'),
+    name: feature.name?.trim() || 'Unnamed Feature',
+    description: feature.description ?? '',
+    enabled: feature.enabled !== false,
+    source: feature.source ?? 'custom',
+    rules: (feature.rules ?? []).map(normalizeRule)
+  };
+}
+
+function normalizeResource(resource: Resource): Resource {
+  const max = Math.max(0, numberOr(resource.max, 1));
+  return {
+    ...resource,
+    id: toId(resource.id || resource.name || 'resource'),
+    name: resource.name?.trim() || 'Unnamed Resource',
+    max,
+    current: clamp(numberOr(resource.current, max), 0, max),
+    resetOn: resetOptions.includes(resource.resetOn) ? resource.resetOn : 'longRest',
+    display: resource.display ?? { showOnCreaturePanel: true, mode: 'pips' }
+  };
+}
+
+function normalizeRule(rule: RuleDefinition): RuleDefinition {
+  return {
+    ...rule,
+    id: toId(rule.id || rule.name || 'rule'),
+    name: rule.name?.trim() || undefined,
+    enabled: rule.enabled !== false,
+    trigger: rule.trigger ?? 'beforeAttackRoll',
+    selectors: (rule.selectors ?? []).map((selector) => createBlankSelector(selector.type, selector)),
+    filters: (rule.filters ?? []).map(normalizeFilter),
+    effects: (rule.effects ?? []).map(normalizeEffect)
+  };
+}
+
+function normalizeFilter(filter: RuleFilter): RuleFilter {
+  return createBlankFilter(filter.type, filter);
+}
+
+function normalizeEffect(effect: RuleEffectOperation): RuleEffectOperation {
+  return createBlankEffect(effect.type, effect);
+}
+
+function normalizeGrid(grid: Partial<GridDefinition>): GridDefinition {
+  const width = clamp(Math.round(numberOr(grid.width, 10)), 1, 30);
+  const height = clamp(Math.round(numberOr(grid.height, 10)), 1, 30);
+  return {
+    width,
+    height,
+    blocked: (grid.blocked ?? [])
+      .filter((cell) => cell.x >= 0 && cell.x < width && cell.y >= 0 && cell.y < height)
+      .map((cell) => ({ x: Math.round(cell.x), y: Math.round(cell.y) }))
+  };
+}
+
+function inferTags(kind: ActionKind, existing: ActionTag[]): ActionTag[] {
+  const tags = new Set(existing);
+  if (kind === 'meleeAttack') {
+    tags.add('attack');
+    tags.add('melee');
+  } else if (kind === 'rangedAttack') {
+    tags.add('attack');
+    tags.add('ranged');
+  } else if (kind === 'spell') {
+    tags.add('spell');
+  } else if (kind === 'savingThrowEffect') {
+    tags.add('area');
+  }
+  return [...tags];
+}
+
+function parseTags(value: string): ActionTag[] {
+  return parseCsv(value);
+}
+
+function parseCsv(value: string): string[] {
+  return value
+    .split(',')
+    .map((part) => part.trim())
+    .filter(Boolean);
+}
+
+function createBlankRule(update: Partial<RuleDefinition> = {}): RuleDefinition {
+  return normalizeRule({
+    id: createId('rule', 'rule'),
+    name: 'New Hook',
+    enabled: true,
+    trigger: 'beforeAttackRoll',
+    selectors: [{ type: 'source' }],
+    filters: [],
+    effects: [createBlankEffect()],
+    ...update
+  });
+}
+
+function createBlankSelector(type: TargetSelectorType = 'source', update: Partial<RuleTargetSelector> = {}): RuleTargetSelector {
+  return {
+    type,
+    ...(type === 'alliesWithinRange' || type === 'enemiesWithinRange' ? { range: 10 } : {}),
+    ...update
+  };
+}
+
+function createBlankFilter(type: RuleFilterType = 'actionHasTag', update: Partial<RuleFilter> = {}): RuleFilter {
+  if (type === 'actionHasTag') {
+    return { tag: 'attack', ...update, type } as RuleFilter;
+  }
+  if (type === 'targetHasCondition' || type === 'sourceHasCondition') {
+    return { conditionId: 'prone', ...update, type } as RuleFilter;
+  }
+  if (type === 'hpBelowHalf') {
+    return { target: 'actionTarget', ...update, type } as RuleFilter;
+  }
+  if (type === 'resourceAvailable') {
+    return { resourceId: '', amount: 1, target: 'source', ...update, type } as RuleFilter;
+  }
+  if (type === 'oncePerTurn' || type === 'oncePerRound') {
+    return { ...update, type } as RuleFilter;
+  }
+  return { type: 'actionHasTag', tag: 'attack' };
+}
+
+function createBlankEffect(type: EffectOperationType = 'addFlatModifier', update: Partial<RuleEffectOperation> = {}): RuleEffectOperation {
+  if (type === 'addFlatModifier') {
+    return { amount: 1, ...update, type } as RuleEffectOperation;
+  }
+  if (type === 'grantAdvantage' || type === 'grantDisadvantage') {
+    return { ...update, type } as RuleEffectOperation;
+  }
+  if (type === 'addDamageDice') {
+    return { dice: '1d6', ...update, type } as RuleEffectOperation;
+  }
+  if (type === 'multiplyDamage') {
+    return { factor: 2, ...update, type } as RuleEffectOperation;
+  }
+  if (type === 'reduceDamage' || type === 'setDamageMinimum') {
+    return { amount: 1, ...update, type } as RuleEffectOperation;
+  }
+  if (type === 'applyCondition') {
+    return { conditionId: 'prone', ...update, type } as RuleEffectOperation;
+  }
+  if (type === 'removeCondition') {
+    return { conditionId: 'prone', ...update, type } as RuleEffectOperation;
+  }
+  if (type === 'spendResource' || type === 'restoreResource') {
+    return { resourceId: '', amount: 1, ...update, type } as RuleEffectOperation;
+  }
+  if (type === 'addTag' || type === 'removeTag') {
+    return { tag: 'attack', ...update, type } as RuleEffectOperation;
+  }
+  if (type === 'logMessage') {
+    return { message: '{source} uses {action}.', ...update, type } as RuleEffectOperation;
+  }
+  return { type: 'addFlatModifier', amount: 1 };
+}
+
+function cleanStatModifiers(modifiers: StatModifiers): StatModifiers | undefined {
+  const cleaned: StatModifiers = {};
+  if (modifiers.ac) {
+    cleaned.ac = modifiers.ac;
+  }
+  if (modifiers.speed) {
+    cleaned.speed = modifiers.speed;
+  }
+  if (modifiers.attackBonus) {
+    cleaned.attackBonus = modifiers.attackBonus;
+  }
+  if (modifiers.maxHp) {
+    cleaned.maxHp = modifiers.maxHp;
+  }
+  return Object.keys(cleaned).length > 0 ? cleaned : undefined;
+}
+
+function updateArray<T>(items: T[], index: number, value: T): T[] {
+  return items.map((item, itemIndex) => (itemIndex === index ? value : item));
+}
+
+function removeArrayItem<T>(items: T[], index: number): T[] {
+  return items.filter((_, itemIndex) => itemIndex !== index);
+}
+
+function formatEditorActionCost(actionCost: ActionCost): string {
+  if (actionCost === 'bonusAction') {
+    return 'Bonus Action';
+  }
+  return actionCost.charAt(0).toUpperCase() + actionCost.slice(1);
+}
+
+function mergeCreatures(current: Creature[], imported: Creature[]): Creature[] {
+  return imported.reduce((next, creature) => upsertById(next, creature), current);
+}
+
+function upsertById<T extends { id: string }>(items: T[], item: T): T[] {
+  return items.some((candidate) => candidate.id === item.id)
+    ? items.map((candidate) => (candidate.id === item.id ? item : candidate))
+    : [item, ...items];
+}
+
+function cloneCreature(creature: Creature): Creature {
+  return cloneJson(creature);
+}
+
+function cloneAction(action: ActionDefinition): ActionDefinition {
+  return cloneJson(action);
+}
+
+function cloneJson<T>(value: T): T {
+  return JSON.parse(JSON.stringify(value)) as T;
+}
+
+function readJson<T>(key: string): T | undefined {
+  if (typeof window === 'undefined') {
+    return undefined;
+  }
+
+  const raw = window.localStorage.getItem(key);
+  if (!raw) {
+    return undefined;
+  }
+
+  try {
+    return JSON.parse(raw) as T;
+  } catch {
+    return undefined;
+  }
+}
+
+function saveJson(key: string, value: unknown): void {
+  if (typeof window === 'undefined') {
+    return;
+  }
+
+  window.localStorage.setItem(key, JSON.stringify(value));
+}
+
+function createId(name: string, prefix: string): string {
+  return `${prefix}-${toId(name)}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
+function toId(value: string): string {
+  return (
+    value
+      .trim()
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, '-')
+      .replace(/^-|-$/g, '') || 'item'
+  );
+}
+
+function getCreatureShortLabel(creature: Creature): string {
+  const words = creature.name.split(/\s+/).filter(Boolean);
+  if (words.length >= 2) {
+    return `${words[0][0]}${words[1][0]}`.toUpperCase();
+  }
+
+  return creature.name.slice(0, 2).toUpperCase();
+}
+
+function numberOr(value: unknown, fallback: number): number {
+  return typeof value === 'number' && Number.isFinite(value) ? value : fallback;
+}
+
+function clamp(value: number, min: number, max: number): number {
+  return Math.min(max, Math.max(min, value));
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null;
+}
+
+function isTeam(value: unknown): value is Team {
+  return teams.includes(value as Team);
+}
+
+function isDefined<T>(value: T | undefined): value is T {
+  return value !== undefined;
+}

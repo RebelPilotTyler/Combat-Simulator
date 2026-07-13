@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
+import { EncounterEditor } from './EncounterEditor';
 import { createSampleEncounter } from './data/sampleEncounter';
-import { SPELLS } from './data/spells';
 import {
   BASIC_ACTIONS,
   applyHpChange,
@@ -24,7 +24,6 @@ import {
   performSearchAction,
   performShoveAction,
   performSavingThrowAction,
-  performSpellCast,
   performUseObjectAction,
   removeCondition,
   resolvePendingReaction,
@@ -39,22 +38,18 @@ import { getAvailableActions, getEffectiveAC, getEffectiveAttackBonus, getEffect
 import { getReachableMovementSquares } from './engine/movement';
 import { formatBaseEffectiveBonus, formatBaseEffectiveNumber, getConditionTags, getHpPercent } from './engine/presentation';
 import { parseCombatStateJson, serializeCombatState } from './engine/serialization';
-import { positionKey, samePosition } from './engine/shapes';
-import {
-  canCreatureCastSpell,
-  getAvailableSpellActions,
-  getAvailableSpells,
-  getSpellDefinition,
-  getSpellSlotCost,
-  spellToActionDefinition
-} from './engine/spells';
-import type { Ability, ActionDefinition, CardinalDirection, CombatState, Creature, GridPosition, SpellDefinition, TurnState } from './engine/types';
-import { getActionForNumberHotkey, getActionsForHotkeyCost, getNumberHotkeyIndex, isTypingShortcutTarget, moveGridCursor } from './ui/keyboard';
+import { getShapeSquares, isInBounds, positionKey, samePosition } from './engine/shapes';
+import { getDistanceFeet, getLineSquares, hasLineOfSight } from './engine/targeting';
+import type { Ability, ActionDefinition, CardinalDirection, CombatState, Creature, GridPosition, ShapeDefinition, TurnState } from './engine/types';
+import { getActionForNumberHotkey, getNumberHotkeyIndex, isTypingShortcutTarget, moveGridCursor } from './ui/keyboard';
 
 const directions: CardinalDirection[] = ['north', 'east', 'south', 'west'];
 type SelectionMode = 'move' | 'target';
+type AppView = 'combat' | 'editor';
+type MapTool = 'select' | 'distance' | 'lineOfSight' | 'radius' | 'line' | 'cone';
 
 export function App() {
+  const [activeView, setActiveView] = useState<AppView>('combat');
   const [combat, setCombat] = useState<CombatState>(() => createSampleEncounter());
   const [selectedCreatureId, setSelectedCreatureId] = useState<string | undefined>(combat.creatures[0]?.id);
   const [selectedActionId, setSelectedActionId] = useState<string | undefined>();
@@ -73,13 +68,17 @@ export function App() {
   const [hpAmount, setHpAmount] = useState(5);
   const [attackDebugStats, setAttackDebugStats] = useState<ReturnType<typeof getAttackDebugStats> | undefined>();
   const [direction, setDirection] = useState<CardinalDirection>('east');
+  const [mapTool, setMapTool] = useState<MapTool>('select');
+  const [mapToolStart, setMapToolStart] = useState<GridPosition | undefined>();
+  const [mapToolEnd, setMapToolEnd] = useState<GridPosition | undefined>();
+  const [mapToolDirection, setMapToolDirection] = useState<CardinalDirection>('east');
+  const [mapToolRadiusFeet, setMapToolRadiusFeet] = useState(10);
+  const [mapToolLengthFeet, setMapToolLengthFeet] = useState(30);
+  const [gridCellSize, setGridCellSize] = useState(40);
   const [jsonText, setJsonText] = useState(() => serializeCombatState(createSampleEncounter()));
   const [jsonError, setJsonError] = useState<string | undefined>();
   const [multiattackTargets, setMultiattackTargets] = useState<Record<string, string>>({});
   const [actionTab, setActionTab] = useState<ActionDefinition['actionCost']>('action');
-  const [spellSearch, setSpellSearch] = useState('');
-  const [showAllSpells, setShowAllSpells] = useState(false);
-  const [spellCastLevels, setSpellCastLevels] = useState<Record<string, number>>({});
   const [gridCursor, setGridCursor] = useState<GridPosition>(combat.creatures[0]?.position ?? { x: 0, y: 0 });
   const [debugOpen, setDebugOpen] = useState(false);
   const [toolsOpen, setToolsOpen] = useState(false);
@@ -93,17 +92,8 @@ export function App() {
   const activeCreature = combat.activeCreatureId ? findCreature(combat, combat.activeCreatureId) : undefined;
   const selectedCreature = selectedCreatureId ? findCreature(combat, selectedCreatureId) : undefined;
   const activeCreatureActions = activeCreature ? getAvailableActions(activeCreature, combat) : [];
-  const activeSpellActions = activeCreature ? getAvailableSpellActions(activeCreature) : [];
-  const visibleSpellActions = activeCreature && showAllSpells ? SPELLS.map((spell) => spellToActionDefinition(spell, activeCreature)) : activeSpellActions;
-  const activeSpells = activeCreature ? getAvailableSpells(activeCreature) : [];
-  const visibleSpells = activeCreature && showAllSpells ? SPELLS : activeSpells;
-  const activeActions = useMemo(
-    () => [...activeCreatureActions, ...activeSpellActions],
-    [activeCreatureActions, activeSpellActions]
-  );
+  const activeActions = useMemo(() => activeCreatureActions, [activeCreatureActions]);
   const selectedAction = activeActions.find((action) => action.id === selectedActionId);
-  const selectedSpell = selectedAction?.spellId ? getSpellDefinition(selectedAction.spellId) : undefined;
-  const selectedSpellCastLevel = selectedSpell ? spellCastLevels[selectedSpell.id] ?? selectedSpell.level : undefined;
   const movementOptions = useMemo(
     () => (activeCreature ? getReachableMovementSquares(combat, activeCreature.id) : []),
     [activeCreature, combat]
@@ -119,6 +109,11 @@ export function App() {
   }, [activeCreature, areaOrigin, combat, direction, movementOptions, selectedAction, selectionMode]);
 
   const highlightedKeys = new Set(highlightedSquares.map(positionKey));
+  const mapToolSquares = useMemo(
+    () => getMapToolSquares(combat, mapTool, mapToolStart, mapToolEnd, mapToolDirection, mapToolRadiusFeet, mapToolLengthFeet),
+    [combat, mapTool, mapToolDirection, mapToolEnd, mapToolLengthFeet, mapToolRadiusFeet, mapToolStart]
+  );
+  const mapToolKeys = new Set(mapToolSquares.map(positionKey));
   const movementKeys = new Set(movementOptions.map((option) => positionKey(option.position)));
   const targetsInArea =
     activeCreature && selectedAction
@@ -130,6 +125,7 @@ export function App() {
       ? getAttackDebugStats(combat, selectedAction.id, selectedTarget.id, 0)
       : undefined;
   const keyboardHint = getKeyboardHint(selectionMode, selectedAction, gridCursor, combat);
+  const mapToolResult = getMapToolResult(combat, mapTool, mapToolStart, mapToolEnd, mapToolSquares);
 
   useEffect(() => {
     if (activeCreature) {
@@ -138,6 +134,10 @@ export function App() {
   }, [activeCreature?.id]);
 
   useEffect(() => {
+    if (activeView !== 'combat') {
+      return;
+    }
+
     function handleKeyDown(event: KeyboardEvent) {
       if (showHelp && event.key === 'Escape') {
         event.preventDefault();
@@ -205,6 +205,7 @@ export function App() {
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, [
     actionTab,
+    activeView,
     activeActions,
     activeCreature,
     combat,
@@ -225,16 +226,14 @@ export function App() {
   }
 
   function cancelSelection() {
+    if (mapTool !== 'select') {
+      clearMapToolMeasurement();
+      return;
+    }
     resetTargeting();
   }
 
   function handleCreatureActionSelect(action: ActionDefinition) {
-    if (action.spellId) {
-      resetTargeting(action.id);
-      targetPanelRef.current?.focus();
-      return;
-    }
-
     if (isUtilityAction(action)) {
       setCombat((current) => performCreatureUtilityAction(current, action.id));
     } else {
@@ -244,12 +243,12 @@ export function App() {
   }
 
   function handleGridConfirm() {
-    const creature = combat.creatures.find((candidate) => samePosition(candidate.position, gridCursor));
-
-    if (selectedAction && isMultiattackAction(selectedAction) && areMultiattackTargetsComplete(selectedAction, multiattackTargets, selectedTargetId)) {
-      applySelectedAction();
+    if (mapTool !== 'select') {
+      handleMapToolCell(gridCursor);
       return;
     }
+
+    const creature = combat.creatures.find((candidate) => samePosition(candidate.position, gridCursor));
 
     if (selectionMode === 'move' && activeCreature && movementKeys.has(positionKey(gridCursor))) {
       setCombat((current) => moveActiveCreature(current, gridCursor));
@@ -262,15 +261,20 @@ export function App() {
       setBasicTargetId(creature.id);
 
       if (isMultiattackAction(selectedAction)) {
-        const nextStep = selectedAction.multiattack?.steps.find((step) => !multiattackTargets[step.id]);
+        const nextStep = getNextUnassignedMultiattackStep(selectedAction, multiattackTargets);
         setSelectedTargetId((current) => current ?? creature.id);
         if (nextStep) {
           setMultiattackTargets((current) => ({
             ...current,
             [nextStep.id]: creature.id
           }));
+          setAreaOrigin(creature.position);
+          return;
         }
-        setAreaOrigin(creature.position);
+
+        if (areMultiattackTargetsComplete(selectedAction, multiattackTargets, selectedTargetId)) {
+          applySelectedAction();
+        }
         return;
       }
 
@@ -280,6 +284,11 @@ export function App() {
         setSelectedTargetId(creature.id);
         setAreaOrigin(creature.position);
       }
+      return;
+    }
+
+    if (selectedAction && isMultiattackAction(selectedAction) && areMultiattackTargetsComplete(selectedAction, multiattackTargets, selectedTargetId)) {
+      applySelectedAction();
       return;
     }
 
@@ -296,6 +305,11 @@ export function App() {
   }
 
   function handleCellClick(position: GridPosition) {
+    if (mapTool !== 'select') {
+      handleMapToolCell(position);
+      return;
+    }
+
     if (selectionMode === 'move' && activeCreature && movementKeys.has(positionKey(position))) {
       setCombat((current) => moveActiveCreature(current, position));
       setSelectedCreatureId(activeCreature.id);
@@ -306,6 +320,18 @@ export function App() {
     if (creature) {
       setSelectedCreatureId(creature.id);
       setBasicTargetId(creature.id);
+      if (selectedAction && isMultiattackAction(selectedAction)) {
+        const nextStep = getNextUnassignedMultiattackStep(selectedAction, multiattackTargets);
+        setSelectedTargetId((current) => current ?? creature.id);
+        if (nextStep) {
+          setMultiattackTargets((current) => ({
+            ...current,
+            [nextStep.id]: creature.id
+          }));
+        }
+        setAreaOrigin(creature.position);
+        return;
+      }
       if (selectedAction && (selectedAction.shape?.type === 'single' || isMultiattackAction(selectedAction))) {
         setSelectedTargetId(creature.id);
         setAreaOrigin(creature.position);
@@ -316,6 +342,38 @@ export function App() {
     if (selectedAction?.type === 'savingThrowEffect') {
       setAreaOrigin(position);
     }
+  }
+
+  function selectMapTool(tool: MapTool) {
+    setMapTool(tool);
+    if (tool === 'select') {
+      clearMapToolMeasurement();
+      return;
+    }
+
+    setMapToolStart((current) => current ?? gridCursor);
+    setMapToolEnd((current) => current ?? gridCursor);
+  }
+
+  function clearMapToolMeasurement() {
+    setMapToolStart(undefined);
+    setMapToolEnd(undefined);
+  }
+
+  function handleMapToolCell(position: GridPosition) {
+    if (!mapToolStart) {
+      setMapToolStart(position);
+      setMapToolEnd(position);
+      return;
+    }
+
+    if (mapToolEnd && samePosition(mapToolStart, position) && samePosition(mapToolEnd, position)) {
+      setMapToolStart(position);
+      setMapToolEnd(undefined);
+      return;
+    }
+
+    setMapToolEnd(position);
   }
 
   function handleBasicAction(actionName: BasicActionName) {
@@ -329,8 +387,8 @@ export function App() {
     }
 
     if (actionName === 'Cast a Spell') {
-      const spell = activeSpellActions[0] ?? activeActions.find((action) => action.tags.includes('spell') || action.kind === 'spell');
-      resetTargeting(spell?.id);
+      const spellLikeAction = activeActions.find((action) => action.tags.includes('spell') || action.kind === 'spell');
+      resetTargeting(spellLikeAction?.id);
       return;
     }
 
@@ -392,21 +450,6 @@ export function App() {
 
   function applySelectedAction() {
     if (!activeCreature || !selectedAction) {
-      return;
-    }
-
-    if (selectedAction.spellId) {
-      const targets = getTargetsForAction(combat, activeCreature, selectedAction, selectedTargetId, areaOrigin, direction);
-      setCombat((current) =>
-        performSpellCast(current, {
-          spellId: selectedAction.spellId!,
-          targetId: selectedTargetId,
-          targetIds: targets.map((target) => target.id),
-          castAtLevel: selectedSpellCastLevel,
-          areaOrigin,
-          direction
-        })
-      );
       return;
     }
 
@@ -500,6 +543,15 @@ export function App() {
     setJsonError(undefined);
   }
 
+  function loadEncounterFromEditor(state: CombatState) {
+    setCombat(state);
+    setSelectedCreatureId(state.activeCreatureId ?? state.creatures[0]?.id);
+    resetTargeting();
+    setJsonText(serializeCombatState(state));
+    setJsonError(undefined);
+    setActiveView('combat');
+  }
+
   return (
     <main className="app-shell">
       <header className="top-bar">
@@ -508,12 +560,19 @@ export function App() {
           <p>Round {combat.round || '-'} - Active: {activeCreature?.name ?? 'No initiative'}</p>
         </div>
         <div className="top-actions">
+          <button className={activeView === 'combat' ? 'selected-action' : ''} onClick={() => setActiveView('combat')}>
+            Combat
+          </button>
+          <button className={activeView === 'editor' ? 'selected-action' : ''} onClick={() => setActiveView('editor')}>
+            Editor
+          </button>
           <button onClick={() => setCombat((current) => rollInitiative(current))}>Roll Initiative</button>
           <button onClick={() => setCombat((current) => endTurn(current))}>End Turn / Next Turn</button>
           <button onClick={loadSample}>Load Sample</button>
         </div>
       </header>
 
+      {activeView === 'combat' ? (
       <section className="cockpit-layout">
         <aside className="panel left-rail" tabIndex={0} aria-label="Initiative and creature list">
           <div className="round-card">
@@ -588,6 +647,75 @@ export function App() {
 
         <section className="layout">
         <section className="panel board-panel" aria-label="Battle grid panel">
+          <div className="map-toolbar">
+            <div className="map-toolbar-row">
+              <strong>Battlemap</strong>
+              <span>
+                {combat.grid.width} x {combat.grid.height}
+              </span>
+              <label>
+                Cell
+                <input
+                  max={64}
+                  min={24}
+                  step={4}
+                  type="range"
+                  value={gridCellSize}
+                  onChange={(event) => setGridCellSize(Number(event.target.value))}
+                />
+                <span>{gridCellSize}px</span>
+              </label>
+            </div>
+            <div className="map-toolbar-row">
+              {(['select', 'distance', 'lineOfSight', 'radius', 'line', 'cone'] as const).map((tool) => (
+                <button
+                  className={mapTool === tool ? 'selected-action' : ''}
+                  key={tool}
+                  onClick={() => selectMapTool(tool)}
+                >
+                  {formatMapToolLabel(tool)}
+                </button>
+              ))}
+              <button onClick={clearMapToolMeasurement} disabled={mapToolStart === undefined && mapToolEnd === undefined}>
+                Clear
+              </button>
+            </div>
+            {mapTool !== 'select' && (
+              <div className="map-toolbar-row map-tool-options">
+                {(mapTool === 'radius' || mapTool === 'line' || mapTool === 'cone') && (
+                  <label>
+                    {mapTool === 'radius' ? 'Radius' : 'Length'}
+                    <input
+                      min={5}
+                      step={5}
+                      type="number"
+                      value={mapTool === 'radius' ? mapToolRadiusFeet : mapToolLengthFeet}
+                      onChange={(event) =>
+                        mapTool === 'radius'
+                          ? setMapToolRadiusFeet(Math.max(5, Number(event.target.value)))
+                          : setMapToolLengthFeet(Math.max(5, Number(event.target.value)))
+                      }
+                    />
+                    ft
+                  </label>
+                )}
+                {(mapTool === 'line' || mapTool === 'cone') && (
+                  <span className="direction-buttons">
+                    {directions.map((candidate) => (
+                      <button
+                        className={candidate === mapToolDirection ? 'selected-action' : ''}
+                        key={candidate}
+                        onClick={() => setMapToolDirection(candidate)}
+                      >
+                        {candidate}
+                      </button>
+                    ))}
+                  </span>
+                )}
+                <span className="map-tool-readout">{mapToolResult}</span>
+              </div>
+            )}
+          </div>
           <div
             aria-label="Battle grid"
             className="grid-board"
@@ -595,7 +723,7 @@ export function App() {
             role="grid"
             tabIndex={0}
             title="Grid focused. Use arrow keys to move the cursor and Enter to select."
-            style={{ gridTemplateColumns: `repeat(${combat.grid.width}, 48px)` }}
+            style={{ gridTemplateColumns: `repeat(${combat.grid.width}, ${gridCellSize}px)` }}
           >
             {Array.from({ length: combat.grid.height }).flatMap((_, y) =>
               Array.from({ length: combat.grid.width }).map((_, x) => {
@@ -604,9 +732,12 @@ export function App() {
                 const blocked = combat.grid.blocked.some((cell) => samePosition(cell, position));
                 const movement = selectionMode === 'move' && movementKeys.has(positionKey(position));
                 const highlighted = highlightedKeys.has(positionKey(position));
+                const toolHighlighted = mapToolKeys.has(positionKey(position));
                 const active = creature?.id === combat.activeCreatureId;
                 const selected = creature?.id === selectedCreatureId;
                 const cursor = samePosition(gridCursor, position);
+                const toolStart = mapToolStart ? samePosition(mapToolStart, position) : false;
+                const toolEnd = mapToolEnd ? samePosition(mapToolEnd, position) : false;
 
                 return (
                   <button
@@ -615,13 +746,17 @@ export function App() {
                       'grid-cell',
                       blocked ? 'blocked' : '',
                       highlighted ? 'highlighted' : '',
+                      toolHighlighted ? 'tool-highlighted' : '',
                       movement ? 'movement-cell' : '',
                       active ? 'active-cell' : '',
                       selected ? 'selected-cell' : '',
+                      toolStart ? 'tool-start-cell' : '',
+                      toolEnd ? 'tool-end-cell' : '',
                       cursor ? 'keyboard-cursor' : ''
                     ].join(' ')}
                     key={positionKey(position)}
                     onClick={() => handleCellClick(position)}
+                    style={{ height: gridCellSize, width: gridCellSize }}
                   >
                     <span className="coord">{x},{y}</span>
                     {creature && (
@@ -742,57 +877,17 @@ export function App() {
                 </div>
               </details>
 
-              <SpellActionPanel
-                spells={activeSpells}
-                visibleSpells={visibleSpells}
-                spellActions={visibleSpellActions}
-                search={spellSearch}
-                showAllSpells={showAllSpells}
-                selectedActionId={selectedActionId}
-                onSearchChange={setSpellSearch}
-                onShowAllSpellsChange={setShowAllSpells}
-                getDisabledReason={(action) => getSpellActionDisabledReason(activeCreature, action, combat.turnState)}
-                onSelect={handleCreatureActionSelect}
-              />
-
               <CreatureActionGroups
-                activeCreature={activeCreature}
                 actions={activeActions}
                 selectedActionId={selectedActionId}
                 selectedTab={actionTab}
                 onSelectTab={setActionTab}
-                turnState={combat.turnState}
                 getDisabledReason={(action) => getActionDisabledReason(activeCreature, action, combat.turnState)}
                 onSelect={handleCreatureActionSelect}
               />
               {selectedAction && (
                 <div className="target-panel" ref={targetPanelRef} tabIndex={0} aria-label="Target panel">
                   <p>{describeAction(selectedAction)}</p>
-                  {selectedSpell && selectedSpell.automationLevel !== 'full' && (
-                    <p className="manual-resolution">
-                      {selectedSpell.automationLevel}: {selectedSpell.manualResolution ?? 'Resolve remaining spell effects manually.'}
-                    </p>
-                  )}
-                  {selectedSpell && selectedSpell.level > 0 && (
-                    <label>
-                      Cast level
-                      <select
-                        value={selectedSpellCastLevel ?? selectedSpell.level}
-                        onChange={(event) =>
-                          setSpellCastLevels((current) => ({
-                            ...current,
-                            [selectedSpell.id]: Number(event.target.value)
-                          }))
-                        }
-                      >
-                        {getAvailableCastLevels(activeCreature, selectedSpell).map((level) => (
-                          <option key={level} value={level}>
-                            Level {level}
-                          </option>
-                        ))}
-                      </select>
-                    </label>
-                  )}
                   {isAttackAction(selectedAction) && (
                     <details
                       className="attack-debug compact-details"
@@ -897,7 +992,7 @@ export function App() {
                       Target
                       <select value={selectedTargetId ?? ''} onChange={(event) => setSelectedTargetId(event.target.value || undefined)}>
                           <option value="">None</option>
-                          {getTargetOptions(combat, activeCreature, selectedAction, selectedSpell).map((creature) => (
+                          {getTargetOptions(combat, activeCreature, selectedAction).map((creature) => (
                             <option key={creature.id} value={creature.id}>
                               {creature.name} AC {formatBaseEffectiveNumber(creature.ac, getEffectiveAC(creature, combat))}
                             </option>
@@ -1021,6 +1116,9 @@ export function App() {
         </section>
         </section>
       </section>
+      ) : (
+        <EncounterEditor currentCombat={combat} onLoadEncounter={loadEncounterFromEditor} />
+      )}
       {showHelp && <KeyboardHelpOverlay onClose={() => setShowHelp(false)} />}
     </main>
   );
@@ -1058,106 +1156,18 @@ function CreatureSummary({ creature, state }: { creature: Creature; state: Comba
 }
 
 
-function SpellActionPanel({
-  spells,
-  visibleSpells,
-  spellActions,
-  search,
-  showAllSpells,
-  selectedActionId,
-  onSearchChange,
-  onShowAllSpellsChange,
-  getDisabledReason,
-  onSelect
-}: {
-  spells: SpellDefinition[];
-  visibleSpells: SpellDefinition[];
-  spellActions: ActionDefinition[];
-  search: string;
-  showAllSpells: boolean;
-  selectedActionId?: string;
-  onSearchChange: (search: string) => void;
-  onShowAllSpellsChange: (showAll: boolean) => void;
-  getDisabledReason: (action: ActionDefinition) => string | undefined;
-  onSelect: (action: ActionDefinition) => void;
-}) {
-  const knownSpellIds = new Set(spells.map((spell) => spell.id));
-  const spellById = new Map(visibleSpells.map((spell) => [spell.id, spell]));
-  const normalizedSearch = search.trim().toLowerCase();
-  const filteredActions = spellActions.filter((action) => {
-    const spell = action.spellId ? spellById.get(action.spellId) : undefined;
-    if (!spell || normalizedSearch.length === 0) {
-      return true;
-    }
-
-    return [spell.name, spell.school, spell.level === 0 ? 'cantrip' : `level ${spell.level}`, ...spell.tags, ...spell.classes]
-      .join(' ')
-      .toLowerCase()
-      .includes(normalizedSearch);
-  });
-
-  return (
-    <section className="spell-panel">
-      <div className="spell-panel-header">
-        <h3>Cast a Spell</h3>
-        <input
-          aria-label="Search spells"
-          placeholder="Search spells"
-          value={search}
-          onChange={(event) => onSearchChange(event.target.value)}
-        />
-        <label className="spell-toggle">
-          <input type="checkbox" checked={showAllSpells} onChange={(event) => onShowAllSpellsChange(event.target.checked)} />
-          All
-        </label>
-      </div>
-      <div className="spell-list">
-        {filteredActions.length === 0 && <span className="empty-list">No spells match.</span>}
-        {filteredActions.map((action) => {
-          const spell = action.spellId ? spellById.get(action.spellId) : undefined;
-          const disabledReason = getDisabledReason(action);
-          const slot = spell ? getSpellSlotCost(spell) : undefined;
-          return (
-            <button
-              className={['spell-row', action.id === selectedActionId ? 'selected-action' : ''].join(' ')}
-              disabled={Boolean(disabledReason)}
-              key={action.id}
-              title={disabledReason ?? spell?.manualResolution ?? spell?.descriptionSummary ?? action.description}
-              onClick={() => onSelect(action)}
-            >
-              <strong>{action.name}</strong>
-              <span>{spell ? getSpellLevelLabel(spell) : 'Spell'}</span>
-              <span>{formatActionCost(action.actionCost)}</span>
-              <span>{spell?.range.text ?? `R ${action.range}`}</span>
-              {spell?.concentration && <span>Conc.</span>}
-              <span>{slot ? `Slot L${slot.level}` : 'At will'}</span>
-              {spell && spell.automationLevel !== 'full' && <small>{spell.automationLevel}: {spell.manualResolution}</small>}
-              {spell && !knownSpellIds.has(spell.id) && <small>Not known or prepared.</small>}
-              {disabledReason && <small>{disabledReason}</small>}
-            </button>
-          );
-        })}
-      </div>
-    </section>
-  );
-}
-
 function CreatureActionGroups({
-  activeCreature,
   actions,
   selectedActionId,
   selectedTab,
   onSelectTab,
-  turnState,
   getDisabledReason,
   onSelect
 }: {
-  activeCreature: Creature;
   actions: ActionDefinition[];
   selectedActionId?: string;
   selectedTab: ActionDefinition['actionCost'];
   onSelectTab: (tab: ActionDefinition['actionCost']) => void;
-  turnState: TurnState;
   getDisabledReason: (action: ActionDefinition) => string | undefined;
   onSelect: (action: ActionDefinition) => void;
 }) {
@@ -1220,18 +1230,6 @@ function CreatureActionGroups({
 }
 
 function describeAction(action: ActionDefinition): string {
-  const spell = action.spellId ? getSpellDefinition(action.spellId) : undefined;
-  if (spell) {
-    const parts = [
-      getSpellLevelLabel(spell),
-      formatActionCost(action.actionCost),
-      spell.range.text,
-      spell.concentration ? 'concentration' : undefined,
-      spell.automationLevel !== 'full' ? `${spell.automationLevel} automation` : undefined
-    ].filter(Boolean);
-    return `${parts.join(' - ')}. ${spell.descriptionSummary}`;
-  }
-
   const rulesKind = action.type ?? action.kind;
   if (rulesKind === 'savingThrowEffect') {
     const save = action.save ?? action.effects.find((effect) => effect.save)?.save;
@@ -1247,21 +1245,6 @@ function describeAction(action: ActionDefinition): string {
 }
 
 function getActionMeta(action: ActionDefinition): string {
-  const spell = action.spellId ? getSpellDefinition(action.spellId) : undefined;
-  if (spell) {
-    const slot = getSpellSlotCost(spell);
-    return [
-      getSpellLevelLabel(spell),
-      spell.range.text,
-      spell.damage?.dice,
-      spell.healing?.dice ? `Heal ${spell.healing.dice}` : undefined,
-      spell.saveAbility ? `${spell.saveAbility.toUpperCase()} save` : undefined,
-      slot ? `slot L${slot.level}` : undefined
-    ]
-      .filter(Boolean)
-      .join(' | ');
-  }
-
   const bits: string[] = [];
   const rulesKind = action.type ?? action.kind;
 
@@ -1287,14 +1270,14 @@ function getActionMeta(action: ActionDefinition): string {
   }
 
   if ((action.resourceCosts ?? []).length > 0) {
-    bits.push((action.resourceCosts ?? []).map((cost) => `${cost.amount} ${cost.resourceId}`).join(', '));
+    bits.push(
+      (action.resourceCosts ?? [])
+        .map((cost) => `${cost.amount} ${cost.resourceId}${cost.spendActionWhenDepleted ? ' then action at 0' : ''}`)
+        .join(', ')
+    );
   }
 
   return bits.join(' | ') || action.description || 'Utility';
-}
-
-function getSpellLevelLabel(spell: SpellDefinition): string {
-  return spell.level === 0 ? 'Cantrip' : `Level ${spell.level}`;
 }
 
 function formatActionCost(actionCost: ActionDefinition['actionCost']): string {
@@ -1318,6 +1301,10 @@ function getMultiattackStepTargetValue(
   return stepTargets[stepId] ?? (action.multiattack?.targetMode === 'fixed' ? '' : sharedTargetId ?? '');
 }
 
+function getNextUnassignedMultiattackStep(action: ActionDefinition, stepTargets: Record<string, string>) {
+  return (action.multiattack?.steps ?? []).find((step) => !stepTargets[step.id]);
+}
+
 function areMultiattackTargetsComplete(
   action: ActionDefinition,
   stepTargets: Record<string, string>,
@@ -1325,10 +1312,6 @@ function areMultiattackTargetsComplete(
 ): boolean {
   const steps = action.multiattack?.steps ?? [];
   return steps.length > 0 && steps.every((step) => Boolean(getMultiattackStepTargetValue(action, step.id, stepTargets, sharedTargetId)));
-}
-
-function getVisibleActionHotkeys(actions: ActionDefinition[], actionCost: ActionDefinition['actionCost']): ActionDefinition[] {
-  return getActionsForHotkeyCost(actions, actionCost);
 }
 
 function getActionHotkeyLabel(actionCost: ActionDefinition['actionCost'], index: number): string {
@@ -1440,15 +1423,6 @@ function getActionDisabledReason(creature: Creature, action: ActionDefinition, t
   return getUnavailableActionReason(creature, action);
 }
 
-function getSpellActionDisabledReason(creature: Creature, action: ActionDefinition, turnState: TurnState): string | undefined {
-  const spell = action.spellId ? getSpellDefinition(action.spellId) : undefined;
-  if (spell && !canCreatureCastSpell(creature, spell)) {
-    return 'Not known or prepared.';
-  }
-
-  return getActionDisabledReason(creature, action, turnState);
-}
-
 function getTargetPanelDisabledReason(
   creature: Creature,
   action: ActionDefinition,
@@ -1463,15 +1437,6 @@ function getTargetPanelDisabledReason(
 
   if (isMultiattackAction(action) && !areMultiattackTargetsComplete(action, multiattackTargets, selectedTargetId)) {
     return 'Choose a target for each multiattack step.';
-  }
-
-  const spell = action.spellId ? getSpellDefinition(action.spellId) : undefined;
-  if (spell?.automationLevel === 'manual' || spell?.targetType === 'self' || spell?.targetType === 'manual') {
-    return undefined;
-  }
-
-  if (action.spellId && spell?.targetType === 'creature' && !selectedTargetId) {
-    return 'Choose a spell target.';
   }
 
   return undefined;
@@ -1515,35 +1480,88 @@ function getTargetsForAction(
   return [];
 }
 
+function getMapToolSquares(
+  combat: CombatState,
+  tool: MapTool,
+  start: GridPosition | undefined,
+  end: GridPosition | undefined,
+  direction: CardinalDirection,
+  radiusFeet: number,
+  lengthFeet: number
+): GridPosition[] {
+  if (tool === 'select' || !start) {
+    return [];
+  }
+
+  if (tool === 'distance' || tool === 'lineOfSight') {
+    return getLineSquares(start, end ?? start).filter((position) => isInBounds(position, combat.grid));
+  }
+
+  const shape: ShapeDefinition =
+    tool === 'radius'
+      ? { type: 'radius', radius: feetToSquares(radiusFeet) }
+      : { type: tool, length: feetToSquares(lengthFeet), direction };
+
+  return getShapeSquares(shape, start, combat.grid, direction);
+}
+
+function getMapToolResult(
+  combat: CombatState,
+  tool: MapTool,
+  start: GridPosition | undefined,
+  end: GridPosition | undefined,
+  squares: GridPosition[]
+): string {
+  if (tool === 'select') {
+    return 'Combat controls active.';
+  }
+
+  if (!start) {
+    return 'Choose a start square.';
+  }
+
+  if (tool === 'distance' || tool === 'lineOfSight') {
+    const target = end ?? start;
+    const gridDistance = getDistanceFeet(start, target);
+    const straightDistance = Math.round(Math.hypot(target.x - start.x, target.y - start.y) * 5);
+    const blocked = squares.filter((square) => combat.grid.blocked.some((cell) => samePosition(cell, square))).length;
+    const losText = tool === 'lineOfSight' ? ` LOS ${hasLineOfSight(combat, start, target) ? 'clear' : 'blocked'}.` : '';
+    return `${formatPosition(start)} to ${formatPosition(target)}: ${gridDistance} ft grid, ${straightDistance} ft straight.${blocked ? ` ${blocked} blocked square(s) crossed.` : ''}${losText}`;
+  }
+
+  const creatures = combat.creatures
+    .filter((creature) => !isDefeated(creature) && squares.some((square) => samePosition(square, creature.position)))
+    .map((creature) => creature.name);
+  return `${squares.length} square(s). Creatures: ${creatures.join(', ') || 'none'}.`;
+}
+
+function feetToSquares(feet: number): number {
+  return Math.max(1, Math.ceil(feet / 5));
+}
+
+function formatPosition(position: GridPosition): string {
+  return `${position.x},${position.y}`;
+}
+
+function formatMapToolLabel(tool: MapTool): string {
+  if (tool === 'lineOfSight') {
+    return 'Line of Sight';
+  }
+  return tool.charAt(0).toUpperCase() + tool.slice(1);
+}
+
 function getTargetOptions(
   combat: CombatState,
   activeCreature: Creature,
-  action: ActionDefinition,
-  spell?: SpellDefinition
+  _action: ActionDefinition
 ): Creature[] {
-  if (spell?.targetType === 'self') {
-    return [activeCreature];
-  }
-
   return combat.creatures.filter((creature) => {
     if (isDefeated(creature)) {
       return false;
     }
 
-    return Boolean(action.spellId && spell?.targetType === 'creature') || creature.id !== activeCreature.id;
+    return creature.id !== activeCreature.id;
   });
-}
-
-function getAvailableCastLevels(creature: Creature, spell: SpellDefinition): number[] {
-  const slotLevels = (creature.resources ?? [])
-    .map((resource) => {
-      const match = /^spell-slot-(\d+)$/.exec(resource.id);
-      return match && resource.current > 0 ? Number(match[1]) : undefined;
-    })
-    .filter((level): level is number => level !== undefined && level >= spell.level);
-
-  const levels = new Set([spell.level, ...slotLevels]);
-  return [...levels].sort((left, right) => left - right);
 }
 
 function HpBar({ creature, compact = false }: { creature: Creature; compact?: boolean }) {

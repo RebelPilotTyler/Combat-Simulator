@@ -43,7 +43,7 @@ npm.cmd test
 - Movement cannot end on occupied cells and pathing avoids blocked cells.
 - Pick a basic action from the active creature panel. Dash and Dodge are implemented; other basics are visible placeholders.
 - The basic action option fields provide shared inputs for Help, Ready, Search, Use an Object, Grapple, Shove, and Improvised Action.
-- Cast a Spell selects the first creature action tagged as a spell; spell slots are not tracked yet.
+- Cast a Spell selects the first creature action tagged as a spell; spell-like abilities are normal actions that can spend any creature resource.
 - Creature actions are grouped by Action, Bonus Action, Reaction, and Free.
 - Bonus actions and reactions have separate per-turn resources from the main action.
 - Moving out of enemy melee reach creates a pending opportunity attack prompt unless Disengage or a blocking condition prevents it.

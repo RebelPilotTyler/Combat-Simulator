@@ -99,6 +99,7 @@ export function normalizeImportedCombatState(state: CombatState): CombatState {
     },
     turnResources: state.turnResources ?? {},
     pendingReactions: state.pendingReactions ?? [],
+    ruleMemory: state.ruleMemory ?? {},
     log: state.log ?? []
   };
 }
@@ -146,13 +147,20 @@ function normalizeImportedCreature(creature: Creature): Creature {
   return {
     ...creature,
     conditions: normalizeConditions(creature.conditions),
-    actions: creature.actions.map((action) => ({
-      ...action,
-      kind: action.kind ?? action.type ?? 'custom',
-      actionCost: action.actionCost ?? 'action',
-      tags: action.tags ?? [],
-      effects: action.effects ?? []
-    }))
+    actions: creature.actions.map((action) => {
+      const kind = action.kind ?? action.type ?? 'custom';
+      const type = kind === 'multiattack' || kind === 'basicAction'
+        ? undefined
+        : action.type ?? (kind === 'meleeAttack' || kind === 'rangedAttack' || kind === 'savingThrowEffect' ? kind : undefined);
+      return {
+        ...action,
+        kind,
+        type,
+        actionCost: action.actionCost ?? 'action',
+        tags: action.tags ?? [],
+        effects: action.effects ?? []
+      };
+    })
   };
 }
 

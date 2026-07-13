@@ -13,8 +13,7 @@ import type {
   Ability,
   Skill,
   RollMode,
-  MultiattackStep,
-  SpellDefinition
+  MultiattackStep
 } from './types';
 import { getShapeSquares, isBlocked, isInBounds, samePosition } from './shapes';
 import { getMovementCost, isOccupied } from './movement';
@@ -57,18 +56,20 @@ import {
   getFeatureStatModifiers,
   getUnavailableActionReason,
   hasResourcesForAction,
-  resetResources
+  resetResources,
+  type ResourceConsumption
 } from './features';
 import {
-  canCreatureCastSpell,
-  consumeSpellSlot,
-  getScaledSpellHealingDice,
-  getSpellDefinition,
-  getSpellUnavailableReason,
-  getSpellcastingAbilityModifier,
-  hasSpellSlot,
-  spellToActionDefinition
-} from './spells';
+  applyBeforeDamageRules,
+  collectBeforeAttackRollRuleModifiers,
+  collectBeforeSavingThrowRuleModifiers,
+  runActionUsedRules,
+  runAfterAttackRollRules,
+  runAfterDamageRules,
+  runAfterSavingThrowRules,
+  runConditionAppliedRules,
+  runTurnRules
+} from './rules';
 
 export const BASIC_ACTIONS = [
   'Attack',
@@ -97,15 +98,6 @@ export type SearchMode = 'perception' | 'investigation';
 export interface MultiattackTargetSelections {
   targetId?: string;
   stepTargets?: Record<string, string>;
-}
-
-export interface SpellCastOptions {
-  spellId: string;
-  targetId?: string;
-  targetIds?: string[];
-  castAtLevel?: number;
-  areaOrigin?: GridPosition;
-  direction?: CardinalDirection;
 }
 
 export interface AttackDebugStats {
@@ -137,6 +129,7 @@ export function createCombatState(
     turnState: createTurnState(undefined),
     turnResources: Object.fromEntries(normalizedCreatures.map((creature) => [creature.id, createTurnState(creature)])),
     pendingReactions: [],
+    ruleMemory: {},
     log: []
   };
 }
@@ -198,6 +191,7 @@ export function endTurn(state: CombatState, hooks: CombatHooks = {}): CombatStat
 
   const endingCreature = findCreature(next, next.activeCreatureId);
   runConditionTurnHooks(next, endingCreature, 'end');
+  runTurnRules(next, endingCreature, 'onTurnEnd');
   hooks.onTurnEnd?.(next, endingCreature);
   logExpiredConditions(next, expireConditionsForTurn(next, endingCreature, 'end'));
   addLog(next, 'turn', `${endingCreature.name} ends their turn.`);
@@ -223,6 +217,7 @@ export function endTurn(state: CombatState, hooks: CombatHooks = {}): CombatStat
   next.turnResources[activeCreature.id] = createTurnState(activeCreature, next);
   next.turnState = next.turnResources[activeCreature.id];
   runConditionTurnHooks(next, activeCreature, 'start');
+  runTurnRules(next, activeCreature, 'onTurnStart');
   hooks.onTurnStart?.(next, activeCreature);
   addLog(next, 'turn', `Round ${next.round}: ${activeCreature.name} starts their turn.`);
 
@@ -474,10 +469,11 @@ export function performCreatureUtilityAction(state: CombatState, actionId: strin
   if (!spendActionCost(next, creature, action.actionCost)) {
     return next;
   }
-  if (!spendActionResources(next, creature, action)) {
+  if (!spendActionResources(next, creature, action).ok) {
     rollbackActionCost(next, creature, action.actionCost);
     return next;
   }
+  runActionUsedRules(next, creature, action);
 
   if (action.tags.includes('movement')) {
     const extraMovement = action.normalRange ?? 10;
@@ -683,14 +679,30 @@ export function performAttackAction(
     return next;
   }
 
-  if (!spendActionCost(next, attacker, action.actionCost)) {
-    return next;
-  }
-  if (!spendActionResources(next, attacker, action)) {
-    rollbackActionCost(next, attacker, action.actionCost);
-    return next;
+  if (!usesDeferredActionCost(action)) {
+    if (!spendActionCost(next, attacker, action.actionCost)) {
+      return next;
+    }
+    if (!spendActionResources(next, attacker, action).ok) {
+      rollbackActionCost(next, attacker, action.actionCost);
+      return next;
+    }
+  } else {
+    const actionCostError = getActionCostUnavailableReason(next, attacker, action.actionCost);
+    if (actionCostError) {
+      addLog(next, 'system', actionCostError);
+      return next;
+    }
+    const resourceResult = spendActionResources(next, attacker, action);
+    if (!resourceResult.ok) {
+      return next;
+    }
+    if (shouldSpendDeferredActionCost(resourceResult.consumptions)) {
+      spendActionCost(next, attacker, action.actionCost);
+    }
   }
 
+  runActionUsedRules(next, attacker, action, [target]);
   resolveAttackAction(next, attacker.id, action, target.id, random, hooks);
   return next;
 }
@@ -719,12 +731,20 @@ export function performMultiattackAction(
     return next;
   }
 
-  if (!spendActionResources(next, attacker, multiattack)) {
+  if (!spendActionResources(next, attacker, multiattack).ok) {
     rollbackActionCost(next, attacker, multiattack.actionCost);
     return next;
   }
 
   addLog(next, 'action', `${attacker.name} uses ${multiattack.name}.`);
+  runActionUsedRules(
+    next,
+    attacker,
+    multiattack,
+    Object.values(targetSelections.stepTargets ?? {})
+      .concat(targetSelections.targetId ? [targetSelections.targetId] : [])
+      .map((targetId) => findCreature(next, targetId))
+  );
 
   for (const step of multiattack.multiattack.steps) {
     const activeAttacker = findCreature(next, attacker.id);
@@ -807,6 +827,7 @@ function resolveAttackAction(
     action,
     getDistanceFeet(attacker.position, target.position)
   );
+  attackModifier = mergeRollModifiers(attackModifier, collectBeforeAttackRollRuleModifiers(next, { attacker, target, action }));
   if ((actionKind === 'rangedAttack' || action.tags.includes('ranged')) && getHostileCreaturesWithinReach(next, attacker).length > 0) {
     attackModifier = mergeRollModifiers(attackModifier, {
       disadvantage: true,
@@ -827,6 +848,7 @@ function resolveAttackAction(
   const hit = naturalMiss ? false : critical ? true : attackModifier.autoFail ? false : attackModifier.autoSuccess ? true : attackTotal >= targetAc;
 
   hooks.afterAttackRoll?.(next, { attacker, target, action, attackTotal });
+  runAfterAttackRollRules(next, { attacker, target, action, attackTotal, hit, critical });
   addLog(
     next,
     'attack',
@@ -839,11 +861,11 @@ function resolveAttackAction(
       spendActionResources(next, attacker, action, 'hit');
     }
     const damage = rollDamageDice(action.damage.dice, random, critical);
-    applyDamage(next, attacker.id, target.id, action, damage.total, hooks);
+    const appliedDamage = applyDamage(next, attacker.id, target.id, action, damage.total, hooks, random);
     addLog(
       next,
       'damage',
-      `${target.name} takes ${damage.total} ${action.damage.type ?? 'damage'}${critical ? ' (critical)' : ''} (${damage.rolls.join(', ')} + ${damage.modifier}).`
+      `${target.name} takes ${appliedDamage} ${action.damage.type ?? 'damage'}${critical ? ' (critical)' : ''} (${damage.rolls.join(', ')} + ${damage.modifier}).`
     );
   }
 }
@@ -870,116 +892,21 @@ export function performSavingThrowAction(
   if (!spendActionCost(next, source, action.actionCost)) {
     return next;
   }
-  if (!spendActionResources(next, source, action)) {
+  if (!spendActionResources(next, source, action).ok) {
     rollbackActionCost(next, source, action.actionCost);
     return next;
   }
+  runActionUsedRules(
+    next,
+    source,
+    action,
+    targetIds.map((targetId) => findCreature(next, targetId))
+  );
   if (action.tags.includes('spell') || action.kind === 'spell') {
     addLog(next, 'action', `${source.name} casts ${action.name}.`);
   }
 
   resolveSavingThrowDamageAction(next, source.id, action, targetIds, random, hooks);
-
-  return next;
-}
-
-export function performSpellCast(
-  state: CombatState,
-  options: SpellCastOptions,
-  random: RandomSource = Math.random,
-  hooks: CombatHooks = {}
-): CombatState {
-  const next = ensureTurnState(normalizeState(cloneState(state)));
-  const caster = getActiveCreature(next);
-  const spell = getSpellDefinition(options.spellId);
-
-  if (!spell) {
-    addLog(next, 'system', `Spell not found: ${options.spellId}.`);
-    return next;
-  }
-
-  if (!canCreatureCastSpell(caster, spell)) {
-    addLog(next, 'system', `${caster.name} cannot cast ${spell.name}. ${getSpellUnavailableReason(caster, spell)}`);
-    return next;
-  }
-
-  const castAtLevel = options.castAtLevel ?? spell.level;
-  const action = spellToActionDefinition(spell, caster, castAtLevel);
-  const targetError = getSpellCastTargetError(next, caster, spell, action, options);
-  if (targetError) {
-    addLog(next, 'system', targetError);
-    return next;
-  }
-
-  if (!spendActionCost(next, caster, action.actionCost)) {
-    return next;
-  }
-
-  if (!hasSpellSlot(caster, spell, castAtLevel)) {
-    addLog(next, 'system', `${caster.name} cannot cast ${spell.name}. ${getSpellUnavailableReason(caster, spell, castAtLevel)}`);
-    rollbackActionCost(next, caster, action.actionCost);
-    return next;
-  }
-
-  consumeSpellSlot(caster, spell, castAtLevel).forEach((message) => addLog(next, 'action', message));
-  addLog(next, 'action', `${caster.name} casts ${spell.name}${castAtLevel > spell.level ? ` at level ${castAtLevel}` : ''}.`);
-  markConcentration(next, caster, spell);
-  logManualSpellResolution(next, caster, spell);
-
-  if (spell.automationLevel === 'manual' || spell.attackType === 'manual') {
-    return next;
-  }
-
-  if (spell.attackType === 'meleeSpellAttack' || spell.attackType === 'rangedSpellAttack') {
-    const targetId = options.targetId ?? options.targetIds?.[0];
-    if (!targetId) {
-      addLog(next, 'system', `${spell.name} needs a target.`);
-      return next;
-    }
-
-    resolveAttackAction(next, caster.id, action, targetId, random, hooks);
-    return next;
-  }
-
-  if (spell.attackType === 'save') {
-    const targetIds = options.targetIds ?? (options.targetId ? [options.targetId] : []);
-    if (targetIds.length === 0) {
-      addLog(next, 'system', `${spell.name} needs at least one target.`);
-      return next;
-    }
-
-    resolveSavingThrowDamageAction(next, caster.id, action, targetIds, random, hooks);
-    return next;
-  }
-
-  if (spell.healing) {
-    const targetId = options.targetId ?? options.targetIds?.[0] ?? (spell.targetType === 'self' ? caster.id : undefined);
-    if (!targetId) {
-      addLog(next, 'system', `${spell.name} needs a healing target.`);
-      return next;
-    }
-
-    resolveSpellHealing(next, caster.id, targetId, spell, action, castAtLevel, random);
-    return next;
-  }
-
-  if (spell.damage && spell.attackType === 'automatic') {
-    const targetId = options.targetId ?? options.targetIds?.[0];
-    if (!targetId) {
-      addLog(next, 'system', `${spell.name} needs a damage target.`);
-      return next;
-    }
-
-    const target = findCreature(next, targetId);
-    if (!isInActionRange(action, caster.position, target.position)) {
-      addLog(next, 'system', `${target.name} is out of range for ${spell.name}.`);
-      return next;
-    }
-
-    const damage = rollDice(action.damage?.dice ?? spell.damage.dice, random);
-    applyDamage(next, caster.id, target.id, action, damage.total, hooks);
-    addLog(next, 'damage', `${target.name} takes ${damage.total} ${spell.damage.type ?? 'damage'} from ${spell.name} (${damage.rolls.join(', ')} + ${damage.modifier}).`);
-  }
 
   return next;
 }
@@ -1013,12 +940,15 @@ export function getAttackDebugStats(
   const attacker = getActiveCreature(normalized);
   const target = findCreature(normalized, targetId);
   const action = findAction(attacker, actionId, normalized);
-  const attackModifier = collectAttackRollModifiers(
-    normalized,
-    attacker,
-    target,
-    action,
-    getDistanceFeet(attacker.position, target.position)
+  const attackModifier = mergeRollModifiers(
+    collectAttackRollModifiers(
+      normalized,
+      attacker,
+      target,
+      action,
+      getDistanceFeet(attacker.position, target.position)
+    ),
+    collectBeforeAttackRollRuleModifiers(normalized, { attacker, target, action })
   );
   const rollMode = resolveRollMode(attackModifier);
   const attackBonus = getEffectiveAttackBonus(action, attacker, normalized) + (attackModifier.flatModifier ?? 0);
@@ -1151,22 +1081,26 @@ function applyDamage(
   targetId: string,
   action: ActionDefinition,
   amount: number,
-  hooks: CombatHooks
-): void {
+  hooks: CombatHooks,
+  random: RandomSource = Math.random
+): number {
   const source = findCreature(state, sourceId);
   const target = findCreature(state, targetId);
-  const modifiedAmount = Math.max(0, applyBeforeDamageModifiers(state, source, target, action, amount));
+  let modifiedAmount = Math.max(0, applyBeforeDamageModifiers(state, source, target, action, amount));
+  modifiedAmount = Math.max(0, applyBeforeDamageRules(state, { source, target, action, amount: modifiedAmount, random }));
   hooks.beforeDamage?.(state, { source, target, action, amount: modifiedAmount });
 
   target.hp = Math.max(0, target.hp - modifiedAmount);
 
   runAfterDamageHooks(state, source, target, action, modifiedAmount);
+  runAfterDamageRules(state, { source, target, action, amount: modifiedAmount });
   hooks.afterDamage?.(state, { source, target, action, amount: modifiedAmount });
   if (target.hp === 0 && !hasCondition(target, 'defeated')) {
     applyConditionToCreature(target, createAppliedCondition('defeated'));
     hooks.onCreatureDefeated?.(state, target);
     addLog(state, 'defeat', `${target.name} is defeated.`);
   }
+  return modifiedAmount;
 }
 
 function resolveSavingThrowDamageAction(
@@ -1193,7 +1127,10 @@ function resolveSavingThrowDamageAction(
       return;
     }
 
-    const saveRollModifier = collectSavingThrowModifiers(state, target, save.ability);
+    const saveRollModifier = mergeRollModifiers(
+      collectSavingThrowModifiers(state, target, save.ability),
+      collectBeforeSavingThrowRuleModifiers(state, { source, target, action, ability: save.ability })
+    );
     const rollMode = resolveRollMode(saveRollModifier);
     const firstSaveRoll = rollDice('1d20', random);
     const secondSaveRoll = rollMode === 'normal' ? undefined : rollDice('1d20', random);
@@ -1213,146 +1150,25 @@ function resolveSavingThrowDamageAction(
       'save',
       `${target.name} rolls ${save.ability.toUpperCase()} save against ${action.name}: ${formatD20Roll(firstSaveRoll.total, secondSaveRoll?.total, rollMode)} + ${saveModifier}${flatModifier ? ` ${formatSigned(flatModifier)}` : ''} = ${saveTotal} vs DC ${save.dc}. ${success ? 'Success.' : 'Failure.'}`
     );
+    runAfterSavingThrowRules(state, { source, target, action, ability: save.ability, total: saveTotal, success });
 
-    applyDamage(state, source.id, target.id, action, amount, hooks);
+    const appliedDamage = applyDamage(state, source.id, target.id, action, amount, hooks, random);
     addLog(
       state,
       'damage',
-      `${target.name} takes ${amount} ${damageDefinition.type ?? 'damage'} from ${action.name} (${damageRoll.rolls.join(', ')} + ${damageRoll.modifier}${success ? ', halved' : ''}).`
+      `${target.name} takes ${appliedDamage} ${damageDefinition.type ?? 'damage'} from ${action.name} (${damageRoll.rolls.join(', ')} + ${damageRoll.modifier}${success ? ', halved' : ''}).`
     );
   });
 }
 
-function resolveSpellHealing(
-  state: CombatState,
-  casterId: string,
-  targetId: string,
-  spell: SpellDefinition,
-  action: ActionDefinition,
-  castAtLevel: number,
-  random: RandomSource
-): void {
-  if (!spell.healing) {
-    return;
-  }
-
-  const caster = findCreature(state, casterId);
-  const target = findCreature(state, targetId);
-  if (!isInActionRange(action, caster.position, target.position)) {
-    addLog(state, 'system', `${target.name} is out of range for ${spell.name}.`);
-    return;
-  }
-
-  const healingDice = getScaledSpellHealingDice(spell, castAtLevel) ?? spell.healing.dice;
-  const roll = rollDice(healingDice, random);
-  const modifier = spell.healing.addSpellcastingModifier ? getSpellcastingAbilityModifier(caster) : 0;
-  const amount = Math.max(0, roll.total + modifier);
-  target.hp = Math.min(target.maxHp, target.hp + amount);
-  if (target.hp > 0) {
-    removeConditionFromCreature(target, 'defeated');
-  }
-
-  addLog(
-    state,
-    'damage',
-    `${target.name} regains ${amount} HP from ${spell.name} (${roll.rolls.join(', ')} + ${roll.modifier}${modifier ? ` ${formatSigned(modifier)}` : ''}).`
-  );
-}
-
-function markConcentration(state: CombatState, caster: Creature, spell: SpellDefinition): void {
-  if (!spell.concentration) {
-    return;
-  }
-
-  removeConditionFromCreature(caster, 'concentrating');
-  const condition = createAppliedCondition('concentrating', {
-    sourceCreatureId: caster.id,
-    metadata: { spellId: spell.id, spellName: spell.name }
-  });
-  const result = applyConditionToCreature(caster, condition);
-  logConditionChange(state, caster, condition, result);
-  addLog(state, 'system', `${caster.name} is concentrating on ${spell.name}. Concentration checks are manual for now.`);
-}
-
-function logManualSpellResolution(state: CombatState, caster: Creature, spell: SpellDefinition): void {
-  if (spell.automationLevel === 'full') {
-    return;
-  }
-
-  addLog(
-    state,
-    'system',
-    `${spell.name} automation is ${spell.automationLevel}. ${spell.manualResolution ?? 'Resolve the remaining spell effects manually.'}`
-  );
-}
-
-function getSpellCastTargetError(
-  state: CombatState,
-  caster: Creature,
-  spell: SpellDefinition,
-  action: ActionDefinition,
-  options: SpellCastOptions
-): string | undefined {
-  if (spell.automationLevel === 'manual' || spell.attackType === 'manual') {
-    return undefined;
-  }
-
-  if (spell.attackType === 'meleeSpellAttack' || spell.attackType === 'rangedSpellAttack') {
-    const targetId = options.targetId ?? options.targetIds?.[0];
-    if (!targetId) {
-      return `${spell.name} needs a target.`;
-    }
-
-    const target = findCreature(state, targetId);
-    if (!isInActionRange(action, caster.position, target.position)) {
-      return `${target.name} is out of range for ${spell.name}.`;
-    }
-
-    if (spell.attackType === 'rangedSpellAttack' && !hasLineOfSight(state, caster.position, target.position)) {
-      return `${caster.name} does not have line of sight to ${target.name}.`;
-    }
-  }
-
-  if (spell.attackType === 'save' && (options.targetIds ?? (options.targetId ? [options.targetId] : [])).length === 0) {
-    return `${spell.name} needs at least one target.`;
-  }
-
-  if (spell.healing || (spell.damage && spell.attackType === 'automatic')) {
-    const targetId = options.targetId ?? options.targetIds?.[0] ?? (spell.targetType === 'self' ? caster.id : undefined);
-    if (!targetId) {
-      return `${spell.name} needs a target.`;
-    }
-
-    const target = findCreature(state, targetId);
-    if (!isInActionRange(action, caster.position, target.position)) {
-      return `${target.name} is out of range for ${spell.name}.`;
-    }
-  }
-
-  return undefined;
-}
-
 function findAction(creature: Creature, actionId: string, state?: CombatState): ActionDefinition {
   const actions = state ? getAvailableActions(creature, state) : creature.actions;
-  const action = actions.find((candidate) => candidate.id === actionId) ?? findSpellAction(creature, actionId);
+  const action = actions.find((candidate) => candidate.id === actionId);
   if (!action) {
     throw new Error(`${creature.name} does not have action ${actionId}.`);
   }
 
   return action;
-}
-
-function findSpellAction(creature: Creature, actionId: string): ActionDefinition | undefined {
-  if (!actionId.startsWith('spell:')) {
-    return undefined;
-  }
-
-  const spell = getSpellDefinition(actionId.slice('spell:'.length));
-  if (!spell || !canCreatureCastSpell(creature, spell)) {
-    return undefined;
-  }
-
-  return spellToActionDefinition(spell, creature);
 }
 
 function getMultiattackStepAction(creature: Creature, step: MultiattackStep, state: CombatState): ActionDefinition | undefined {
@@ -1398,7 +1214,55 @@ function spendAction(state: CombatState, creature: Creature): boolean {
   return spendActionCost(state, creature, 'action');
 }
 
+function usesDeferredActionCost(action: ActionDefinition): boolean {
+  return action.actionCost === 'action' && (action.resourceCosts ?? []).some((cost) => cost.consumeOn === 'use' && cost.spendActionWhenDepleted);
+}
+
+function shouldSpendDeferredActionCost(consumptions: ResourceConsumption[]): boolean {
+  return consumptions.some((consumption) => consumption.cost.spendActionWhenDepleted && consumption.after <= 0);
+}
+
+function getActionCostUnavailableReason(
+  state: CombatState,
+  creature: Creature,
+  actionCost: ActionDefinition['actionCost']
+): string | undefined {
+  const resource = getResource(state, creature.id);
+
+  if (actionCost === 'free') {
+    return undefined;
+  }
+
+  if (actionCost === 'reaction') {
+    if (resource.reactionUsed) {
+      return `${creature.name} has already used their reaction.`;
+    }
+
+    if (!canCreatureTakeReaction(state, creature)) {
+      return `${creature.name} cannot take reactions because of a condition.`;
+    }
+
+    return undefined;
+  }
+
+  if (!canCreatureTakeAction(state, creature)) {
+    return `${creature.name} cannot take actions because of a condition.`;
+  }
+
+  if (actionCost === 'bonusAction') {
+    return resource.bonusActionUsed ? `${creature.name} has already used their bonus action.` : undefined;
+  }
+
+  return resource.actionUsed ? `${creature.name} has already used their action this turn.` : undefined;
+}
+
 function spendActionCost(state: CombatState, creature: Creature, actionCost: ActionDefinition['actionCost']): boolean {
+  const unavailableReason = getActionCostUnavailableReason(state, creature, actionCost);
+  if (unavailableReason) {
+    addLog(state, 'system', unavailableReason);
+    return false;
+  }
+
   const resource = getResource(state, creature.id);
 
   if (actionCost === 'free') {
@@ -1406,40 +1270,15 @@ function spendActionCost(state: CombatState, creature: Creature, actionCost: Act
   }
 
   if (actionCost === 'reaction') {
-    if (resource.reactionUsed) {
-      addLog(state, 'system', `${creature.name} has already used their reaction.`);
-      return false;
-    }
-
-    if (!canCreatureTakeReaction(state, creature)) {
-      addLog(state, 'system', `${creature.name} cannot take reactions because of a condition.`);
-      return false;
-    }
-
     resource.reactionUsed = true;
     syncActiveTurnState(state);
     return true;
   }
 
-  if (!canCreatureTakeAction(state, creature)) {
-    addLog(state, 'system', `${creature.name} cannot take actions because of a condition.`);
-    return false;
-  }
-
   if (actionCost === 'bonusAction') {
-    if (resource.bonusActionUsed) {
-      addLog(state, 'system', `${creature.name} has already used their bonus action.`);
-      return false;
-    }
-
     resource.bonusActionUsed = true;
     syncActiveTurnState(state);
     return true;
-  }
-
-  if (resource.actionUsed) {
-    addLog(state, 'system', `${creature.name} has already used their action this turn.`);
-    return false;
   }
 
   resource.actionUsed = true;
@@ -1464,14 +1303,15 @@ function spendActionResources(
   creature: Creature,
   action: ActionDefinition,
   consumeOn: 'use' | 'hit' | 'failedSave' | 'manual' = 'use'
-): boolean {
+): { ok: boolean; consumptions: ResourceConsumption[] } {
   if (consumeOn === 'use' && !hasResourcesForAction(creature, action)) {
     addLog(state, 'system', `${creature.name} cannot use ${action.name}. ${getUnavailableActionReason(creature, action)}`);
-    return false;
+    return { ok: false, consumptions: [] };
   }
 
-  consumeActionResources(creature, action, consumeOn).forEach((message) => addLog(state, 'action', message));
-  return true;
+  const consumptions = consumeActionResources(creature, action, consumeOn);
+  consumptions.forEach((consumption) => addLog(state, 'action', consumption.message));
+  return { ok: true, consumptions };
 }
 
 function performFeatureGeneratedBasicAction(state: CombatState, creature: Creature, action: ActionDefinition): boolean {
@@ -1483,10 +1323,11 @@ function performFeatureGeneratedBasicAction(state: CombatState, creature: Creatu
     return true;
   }
 
-  if (!spendActionResources(state, creature, action)) {
+  if (!spendActionResources(state, creature, action).ok) {
     rollbackActionCost(state, creature, action.actionCost);
     return true;
   }
+  runActionUsedRules(state, creature, action);
 
   if (action.baseActionName === 'Dash') {
     const resource = getResource(state, creature.id);
@@ -1713,6 +1554,7 @@ function normalizeState(state: CombatState): CombatState {
     };
   });
   state.pendingReactions = state.pendingReactions ?? [];
+  state.ruleMemory = state.ruleMemory ?? {};
   if (!state.turnState) {
     state.turnState = createTurnState(state.activeCreatureId ? findCreature(state, state.activeCreatureId) : undefined, state);
   }
@@ -1726,14 +1568,25 @@ function normalizeCreatures(creatures: Creature[]): Creature[] {
     ...creature,
     conditions: normalizeConditions(creature.conditions),
     skillBonuses: creature.skillBonuses ?? {},
-    actions: creature.actions.map((action) => ({
-      ...action,
-      kind: action.kind ?? action.type ?? 'custom',
-      actionCost: action.actionCost ?? 'action',
-      tags: action.tags ?? [],
-      effects: action.effects ?? []
-    }))
+    actions: creature.actions.map(normalizeActionDefinition)
   }));
+}
+
+function normalizeActionDefinition(action: ActionDefinition): ActionDefinition {
+  const kind = action.kind ?? action.type ?? 'custom';
+  const type = kind === 'multiattack' || kind === 'basicAction' ? undefined : action.type ?? (isRulesActionKind(kind) ? kind : undefined);
+  return {
+    ...action,
+    kind,
+    type,
+    actionCost: action.actionCost ?? 'action',
+    tags: action.tags ?? [],
+    effects: action.effects ?? []
+  };
+}
+
+function isRulesActionKind(kind: ActionDefinition['kind']): kind is NonNullable<ActionDefinition['type']> {
+  return kind === 'meleeAttack' || kind === 'rangedAttack' || kind === 'savingThrowEffect';
 }
 
 function logConditionChange(
@@ -1745,6 +1598,12 @@ function logConditionChange(
   const label = getConditionLabel(condition);
   const verb = result === 'applied' ? 'applied to' : result === 'refreshed' ? 'refreshed on' : 'stacked on';
   addLog(state, 'condition', `${label} ${verb} ${creature.name}.`);
+  runConditionAppliedRules(
+    state,
+    creature,
+    condition,
+    condition.sourceCreatureId ? state.creatures.find((source) => source.id === condition.sourceCreatureId) : undefined
+  );
 }
 
 function logExpiredConditions(state: CombatState, conditions: AppliedCondition[]): void {

@@ -70,8 +70,20 @@ export function hasResourcesForAction(creature: Creature, action: ActionDefiniti
     .every((cost) => (getResource(creature, cost.resourceId)?.current ?? 0) >= cost.amount);
 }
 
-export function consumeActionResources(creature: Creature, action: ActionDefinition, consumeOn: ResourceCost['consumeOn'] = 'use'): string[] {
-  const messages: string[] = [];
+export interface ResourceConsumption {
+  cost: ResourceCost;
+  resource: Resource;
+  before: number;
+  after: number;
+  message: string;
+}
+
+export function consumeActionResources(
+  creature: Creature,
+  action: ActionDefinition,
+  consumeOn: ResourceCost['consumeOn'] = 'use'
+): ResourceConsumption[] {
+  const consumptions: ResourceConsumption[] = [];
 
   (action.resourceCosts ?? [])
     .filter((cost) => cost.consumeOn === consumeOn)
@@ -81,11 +93,18 @@ export function consumeActionResources(creature: Creature, action: ActionDefinit
         return;
       }
 
+      const before = resource.current;
       resource.current = Math.max(0, resource.current - cost.amount);
-      messages.push(`${creature.name} spends ${cost.amount} ${resource.name} (${resource.current}/${resource.max}).`);
+      consumptions.push({
+        cost,
+        resource,
+        before,
+        after: resource.current,
+        message: `${creature.name} spends ${cost.amount} ${resource.name} (${resource.current}/${resource.max}).`
+      });
     });
 
-  return messages;
+  return consumptions;
 }
 
 export function resetResources(creature: Creature, resetOn: ResourceReset): void {
