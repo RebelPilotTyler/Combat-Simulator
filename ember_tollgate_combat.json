@@ -1,0 +1,1346 @@
+{
+  "creatures": [
+    {
+      "id": "sable-warden",
+      "name": "Sable Warden",
+      "team": "players",
+      "hp": 46,
+      "maxHp": 46,
+      "ac": 17,
+      "abilityScores": {
+        "str": 18,
+        "dex": 10,
+        "con": 15,
+        "int": 9,
+        "wis": 12,
+        "cha": 11
+      },
+      "proficiencyBonus": 3,
+      "speed": 30,
+      "position": {
+        "x": 1,
+        "y": 4
+      },
+      "conditions": [],
+      "actions": [
+        {
+          "id": "warden-spear",
+          "name": "Warden Spear",
+          "kind": "meleeAttack",
+          "type": "meleeAttack",
+          "actionCost": "action",
+          "tags": [
+            "attack",
+            "melee"
+          ],
+          "range": 1,
+          "attackBonus": 7,
+          "damage": {
+            "dice": "1d8+4",
+            "type": "piercing"
+          },
+          "shape": {
+            "type": "single"
+          },
+          "effects": [],
+          "description": "A disciplined spear thrust.",
+          "reach": 5
+        },
+        {
+          "id": "shield-bash",
+          "name": "Shield Bash",
+          "kind": "meleeAttack",
+          "type": "meleeAttack",
+          "actionCost": "bonusAction",
+          "tags": [
+            "attack",
+            "melee",
+            "bonus"
+          ],
+          "range": 1,
+          "attackBonus": 7,
+          "damage": {
+            "dice": "1d6+4",
+            "type": "bludgeoning"
+          },
+          "shape": {
+            "type": "single"
+          },
+          "effects": [],
+          "description": "A bonus action shield strike.",
+          "reach": 5
+        },
+        {
+          "id": "guarding-riposte",
+          "name": "Guarding Riposte",
+          "kind": "meleeAttack",
+          "type": "meleeAttack",
+          "actionCost": "reaction",
+          "tags": [
+            "attack",
+            "melee",
+            "reaction",
+            "opportunity"
+          ],
+          "range": 1,
+          "attackBonus": 7,
+          "damage": {
+            "dice": "1d8+4",
+            "type": "piercing"
+          },
+          "shape": {
+            "type": "single"
+          },
+          "effects": [],
+          "description": "A reaction melee attack for opportunity attacks.",
+          "reach": 5
+        },
+        {
+          "id": "shield-drill",
+          "name": "Shield Drill",
+          "kind": "multiattack",
+          "actionCost": "action",
+          "tags": [
+            "attack",
+            "melee"
+          ],
+          "range": 1,
+          "effects": [],
+          "description": "Make a Warden Spear attack and a Shield Bash as one focused routine.",
+          "multiattack": {
+            "targetMode": "chooseEach",
+            "steps": [
+              {
+                "id": "spear-step",
+                "name": "Warden Spear",
+                "actionId": "warden-spear"
+              },
+              {
+                "id": "bash-step",
+                "name": "Shield Bash",
+                "actionId": "shield-bash"
+              }
+            ]
+          }
+        }
+      ],
+      "resources": [
+        {
+          "id": "second-wind",
+          "name": "Second Wind",
+          "current": 1,
+          "max": 1,
+          "resetOn": "shortRest",
+          "display": {
+            "showOnCreaturePanel": true,
+            "mode": "pips"
+          }
+        },
+        {
+          "id": "warden-grit",
+          "name": "Warden Grit",
+          "current": 3,
+          "max": 3,
+          "resetOn": "shortRest",
+          "display": {
+            "showOnCreaturePanel": true,
+            "mode": "pips"
+          }
+        }
+      ],
+      "features": [
+        {
+          "id": "tower-shield",
+          "name": "Tower Shield",
+          "description": "+1 AC while braced behind a heavy shield.",
+          "enabled": true,
+          "source": "encounter",
+          "modifiers": {
+            "ac": 1
+          }
+        }
+      ],
+      "skillBonuses": {
+        "athletics": 7,
+        "perception": 4
+      }
+    },
+    {
+      "id": "lyra-mirewitch",
+      "name": "Lyra Mirewitch",
+      "team": "players",
+      "hp": 32,
+      "maxHp": 32,
+      "ac": 14,
+      "abilityScores": {
+        "str": 8,
+        "dex": 14,
+        "con": 13,
+        "int": 18,
+        "wis": 13,
+        "cha": 12
+      },
+      "proficiencyBonus": 3,
+      "speed": 30,
+      "position": {
+        "x": 1,
+        "y": 6
+      },
+      "conditions": [],
+      "actions": [
+        {
+          "id": "staff-strike",
+          "name": "Staff Strike",
+          "kind": "meleeAttack",
+          "type": "meleeAttack",
+          "actionCost": "action",
+          "tags": [
+            "attack",
+            "melee"
+          ],
+          "range": 1,
+          "attackBonus": 4,
+          "damage": {
+            "dice": "1d6+1",
+            "type": "bludgeoning"
+          },
+          "shape": {
+            "type": "single"
+          },
+          "effects": [],
+          "description": "A simple staff strike.",
+          "reach": 5
+        }
+      ],
+      "resources": [
+        {
+          "id": "spell-slot-1",
+          "name": "Spell Slots L1",
+          "current": 4,
+          "max": 4,
+          "resetOn": "longRest",
+          "display": {
+            "showOnCreaturePanel": true,
+            "mode": "pips"
+          }
+        },
+        {
+          "id": "spell-slot-2",
+          "name": "Spell Slots L2",
+          "current": 3,
+          "max": 3,
+          "resetOn": "longRest",
+          "display": {
+            "showOnCreaturePanel": true,
+            "mode": "pips"
+          }
+        },
+        {
+          "id": "spell-slot-3",
+          "name": "Spell Slots L3",
+          "current": 2,
+          "max": 2,
+          "resetOn": "longRest",
+          "display": {
+            "showOnCreaturePanel": true,
+            "mode": "pips"
+          }
+        },
+        {
+          "id": "witch-focus",
+          "name": "Witch Focus",
+          "current": 3,
+          "max": 3,
+          "resetOn": "shortRest",
+          "display": {
+            "showOnCreaturePanel": true,
+            "mode": "number"
+          }
+        }
+      ],
+      "features": [
+        {
+          "id": "quickened-hex",
+          "name": "Quickened Hex",
+          "description": "Spend focus to cast a cantrip as a bonus action placeholder.",
+          "enabled": true,
+          "source": "encounter",
+          "alternateActions": [
+            {
+              "id": "quickened-fire-bolt",
+              "name": "Quickened Fire Bolt",
+              "baseActionName": "Cast a Spell",
+              "actionCost": "bonusAction",
+              "tags": [
+                "spell",
+                "bonus",
+                "placeholder"
+              ],
+              "resourceCosts": [
+                {
+                  "resourceId": "witch-focus",
+                  "amount": 2,
+                  "consumeOn": "use"
+                }
+              ],
+              "description": "Placeholder bonus-action spell conversion."
+            }
+          ]
+        }
+      ],
+      "skillBonuses": {
+        "stealth": 5,
+        "investigation": 7,
+        "perception": 4
+      },
+      "spellcasting": {
+        "ability": "int",
+        "saveDc": 15,
+        "attackBonus": 7,
+        "knownSpells": [
+          "fire-bolt",
+          "ray-of-frost",
+          "magic-missile",
+          "shield",
+          "burning-hands",
+          "thunderwave",
+          "sleep"
+        ],
+        "preparedSpells": [
+          "healing-word"
+        ]
+      }
+    },
+    {
+      "id": "pip-quickknife",
+      "name": "Pip Quickknife",
+      "team": "players",
+      "hp": 36,
+      "maxHp": 36,
+      "ac": 15,
+      "abilityScores": {
+        "str": 9,
+        "dex": 18,
+        "con": 14,
+        "int": 12,
+        "wis": 12,
+        "cha": 11
+      },
+      "proficiencyBonus": 3,
+      "speed": 35,
+      "position": {
+        "x": 0,
+        "y": 5
+      },
+      "conditions": [],
+      "actions": [
+        {
+          "id": "quickknife-stab",
+          "name": "Quickknife Stab",
+          "kind": "meleeAttack",
+          "type": "meleeAttack",
+          "actionCost": "action",
+          "tags": [
+            "attack",
+            "melee"
+          ],
+          "range": 1,
+          "attackBonus": 7,
+          "damage": {
+            "dice": "1d6+4",
+            "type": "piercing"
+          },
+          "shape": {
+            "type": "single"
+          },
+          "effects": [],
+          "description": "A fast dagger strike.",
+          "reach": 5
+        },
+        {
+          "id": "throwing-knife",
+          "name": "Throwing Knife",
+          "kind": "rangedAttack",
+          "type": "rangedAttack",
+          "actionCost": "action",
+          "tags": [
+            "attack",
+            "ranged"
+          ],
+          "range": 4,
+          "attackBonus": 7,
+          "damage": {
+            "dice": "1d4+4",
+            "type": "piercing"
+          },
+          "shape": {
+            "type": "single"
+          },
+          "effects": [],
+          "description": "A thrown dagger.",
+          "normalRange": 20,
+          "longRange": 60
+        },
+        {
+          "id": "offhand-dagger",
+          "name": "Offhand Dagger",
+          "kind": "meleeAttack",
+          "type": "meleeAttack",
+          "actionCost": "bonusAction",
+          "tags": [
+            "attack",
+            "melee",
+            "bonus"
+          ],
+          "range": 1,
+          "attackBonus": 7,
+          "damage": {
+            "dice": "1d4",
+            "type": "piercing"
+          },
+          "shape": {
+            "type": "single"
+          },
+          "effects": [],
+          "description": "A light offhand strike.",
+          "reach": 5
+        }
+      ],
+      "resources": [
+        {
+          "id": "luck",
+          "name": "Luck",
+          "current": 1,
+          "max": 1,
+          "resetOn": "longRest",
+          "display": {
+            "showOnCreaturePanel": true,
+            "mode": "pips"
+          }
+        }
+      ],
+      "features": [
+        {
+          "id": "cunning-action",
+          "name": "Cunning Action",
+          "description": "Dash, Disengage, and Hide can be used as bonus actions.",
+          "enabled": true,
+          "source": "encounter",
+          "alternateActions": [
+            {
+              "id": "cunning-action-dash",
+              "name": "Cunning Action: Dash",
+              "baseActionName": "Dash",
+              "actionCost": "bonusAction",
+              "tags": [
+                "movement",
+                "bonus"
+              ],
+              "description": "Dash as a bonus action."
+            },
+            {
+              "id": "cunning-action-disengage",
+              "name": "Cunning Action: Disengage",
+              "baseActionName": "Disengage",
+              "actionCost": "bonusAction",
+              "tags": [
+                "bonus"
+              ],
+              "description": "Disengage as a bonus action."
+            },
+            {
+              "id": "cunning-action-hide",
+              "name": "Cunning Action: Hide",
+              "baseActionName": "Hide",
+              "actionCost": "bonusAction",
+              "tags": [
+                "bonus"
+              ],
+              "description": "Hide as a bonus action."
+            }
+          ]
+        },
+        {
+          "id": "light-footed",
+          "name": "Light Footed",
+          "description": "+5 ft speed.",
+          "enabled": true,
+          "source": "encounter",
+          "modifiers": {
+            "speed": 5
+          }
+        }
+      ],
+      "skillBonuses": {
+        "acrobatics": 7,
+        "stealth": 7,
+        "perception": 4
+      }
+    },
+    {
+      "id": "brother-caldus",
+      "name": "Brother Caldus",
+      "team": "players",
+      "hp": 38,
+      "maxHp": 38,
+      "ac": 17,
+      "abilityScores": {
+        "str": 14,
+        "dex": 10,
+        "con": 14,
+        "int": 10,
+        "wis": 17,
+        "cha": 12
+      },
+      "proficiencyBonus": 3,
+      "speed": 30,
+      "position": {
+        "x": 1,
+        "y": 7
+      },
+      "conditions": [],
+      "actions": [
+        {
+          "id": "temple-mace",
+          "name": "Temple Mace",
+          "kind": "meleeAttack",
+          "type": "meleeAttack",
+          "actionCost": "action",
+          "tags": [
+            "attack",
+            "melee"
+          ],
+          "range": 1,
+          "attackBonus": 5,
+          "damage": {
+            "dice": "1d6+2",
+            "type": "bludgeoning"
+          },
+          "shape": {
+            "type": "single"
+          },
+          "effects": [],
+          "description": "A simple mace attack.",
+          "reach": 5
+        }
+      ],
+      "resources": [
+        {
+          "id": "spell-slot-1",
+          "name": "Spell Slots L1",
+          "current": 4,
+          "max": 4,
+          "resetOn": "longRest",
+          "display": {
+            "showOnCreaturePanel": true,
+            "mode": "pips"
+          }
+        },
+        {
+          "id": "spell-slot-2",
+          "name": "Spell Slots L2",
+          "current": 3,
+          "max": 3,
+          "resetOn": "longRest",
+          "display": {
+            "showOnCreaturePanel": true,
+            "mode": "pips"
+          }
+        },
+        {
+          "id": "channel-divinity",
+          "name": "Channel Divinity",
+          "current": 1,
+          "max": 1,
+          "resetOn": "shortRest",
+          "display": {
+            "showOnCreaturePanel": true,
+            "mode": "pips"
+          }
+        }
+      ],
+      "features": [
+        {
+          "id": "iron-prayer",
+          "name": "Iron Prayer",
+          "description": "+1 AC from worn ceremonial mail.",
+          "enabled": true,
+          "source": "encounter",
+          "modifiers": {
+            "ac": 1
+          }
+        }
+      ],
+      "skillBonuses": {
+        "religion": 3,
+        "medicine": 6,
+        "perception": 6
+      },
+      "spellcasting": {
+        "ability": "wis",
+        "saveDc": 14,
+        "attackBonus": 6,
+        "knownSpells": [
+          "sacred-flame",
+          "guiding-bolt",
+          "cure-wounds",
+          "healing-word",
+          "bless",
+          "shield-of-faith"
+        ],
+        "preparedSpells": [
+          "guiding-bolt",
+          "cure-wounds",
+          "healing-word",
+          "bless"
+        ]
+      }
+    },
+    {
+      "id": "ashgate-captain",
+      "name": "Ashgate Captain",
+      "team": "enemies",
+      "hp": 68,
+      "maxHp": 68,
+      "ac": 17,
+      "abilityScores": {
+        "str": 16,
+        "dex": 16,
+        "con": 15,
+        "int": 12,
+        "wis": 12,
+        "cha": 14
+      },
+      "proficiencyBonus": 3,
+      "speed": 30,
+      "position": {
+        "x": 8,
+        "y": 4
+      },
+      "conditions": [],
+      "actions": [
+        {
+          "id": "ashgate-saber",
+          "name": "Ashgate Saber",
+          "kind": "meleeAttack",
+          "type": "meleeAttack",
+          "actionCost": "action",
+          "tags": [
+            "attack",
+            "melee"
+          ],
+          "range": 1,
+          "attackBonus": 7,
+          "damage": {
+            "dice": "1d8+4",
+            "type": "slashing"
+          },
+          "shape": {
+            "type": "single"
+          },
+          "effects": [],
+          "description": "A precise military saber cut.",
+          "reach": 5
+        },
+        {
+          "id": "ashgate-pistol",
+          "name": "Ashgate Pistol",
+          "kind": "rangedAttack",
+          "type": "rangedAttack",
+          "actionCost": "action",
+          "tags": [
+            "attack",
+            "ranged"
+          ],
+          "range": 6,
+          "attackBonus": 6,
+          "damage": {
+            "dice": "1d8+3",
+            "type": "piercing"
+          },
+          "shape": {
+            "type": "single"
+          },
+          "effects": [],
+          "description": "A short-range pistol shot.",
+          "normalRange": 30,
+          "longRange": 90
+        },
+        {
+          "id": "captain-multiattack",
+          "name": "Captain Multiattack",
+          "kind": "multiattack",
+          "actionCost": "action",
+          "tags": [
+            "attack",
+            "melee"
+          ],
+          "range": 1,
+          "effects": [],
+          "description": "Make two Ashgate Saber attacks. Targets may be split.",
+          "multiattack": {
+            "targetMode": "chooseEach",
+            "steps": [
+              {
+                "id": "saber-1",
+                "name": "Saber 1",
+                "actionId": "ashgate-saber"
+              },
+              {
+                "id": "saber-2",
+                "name": "Saber 2",
+                "actionId": "ashgate-saber"
+              }
+            ]
+          }
+        },
+        {
+          "id": "ashgate-parry",
+          "name": "Ashgate Parry",
+          "kind": "meleeAttack",
+          "type": "meleeAttack",
+          "actionCost": "reaction",
+          "tags": [
+            "attack",
+            "melee",
+            "reaction",
+            "opportunity"
+          ],
+          "range": 1,
+          "attackBonus": 7,
+          "damage": {
+            "dice": "1d6+4",
+            "type": "slashing"
+          },
+          "shape": {
+            "type": "single"
+          },
+          "effects": [],
+          "description": "Reaction placeholder for parries/opportunity attacks.",
+          "reach": 5
+        }
+      ],
+      "resources": [
+        {
+          "id": "commanding-step",
+          "name": "Commanding Step",
+          "current": 2,
+          "max": 2,
+          "resetOn": "shortRest",
+          "display": {
+            "showOnCreaturePanel": true,
+            "mode": "pips"
+          }
+        },
+        {
+          "id": "parry",
+          "name": "Parry",
+          "current": 2,
+          "max": 2,
+          "resetOn": "shortRest",
+          "display": {
+            "showOnCreaturePanel": true,
+            "mode": "pips"
+          }
+        }
+      ],
+      "features": [
+        {
+          "id": "captain-discipline",
+          "name": "Captain's Discipline",
+          "description": "+1 attack bonus while commanding the tollgate.",
+          "enabled": true,
+          "source": "encounter",
+          "modifiers": {
+            "attackBonus": 1
+          }
+        }
+      ],
+      "skillBonuses": {
+        "athletics": 6,
+        "perception": 4,
+        "intimidation": 5
+      }
+    },
+    {
+      "id": "cinder-acolyte",
+      "name": "Cinder Acolyte",
+      "team": "enemies",
+      "hp": 32,
+      "maxHp": 32,
+      "ac": 13,
+      "abilityScores": {
+        "str": 8,
+        "dex": 14,
+        "con": 12,
+        "int": 16,
+        "wis": 10,
+        "cha": 11
+      },
+      "proficiencyBonus": 3,
+      "speed": 30,
+      "position": {
+        "x": 8,
+        "y": 2
+      },
+      "conditions": [],
+      "actions": [
+        {
+          "id": "ember-dagger",
+          "name": "Ember Dagger",
+          "kind": "meleeAttack",
+          "type": "meleeAttack",
+          "actionCost": "action",
+          "tags": [
+            "attack",
+            "melee"
+          ],
+          "range": 1,
+          "attackBonus": 4,
+          "damage": {
+            "dice": "1d4+1",
+            "type": "piercing"
+          },
+          "shape": {
+            "type": "single"
+          },
+          "effects": [],
+          "description": "A desperate dagger slash.",
+          "reach": 5
+        }
+      ],
+      "resources": [
+        {
+          "id": "spell-slot-1",
+          "name": "Spell Slots L1",
+          "current": 4,
+          "max": 4,
+          "resetOn": "longRest",
+          "display": {
+            "showOnCreaturePanel": true,
+            "mode": "pips"
+          }
+        },
+        {
+          "id": "spell-slot-2",
+          "name": "Spell Slots L2",
+          "current": 2,
+          "max": 2,
+          "resetOn": "longRest",
+          "display": {
+            "showOnCreaturePanel": true,
+            "mode": "pips"
+          }
+        }
+      ],
+      "features": [],
+      "skillBonuses": {
+        "arcana": 6,
+        "perception": 3
+      },
+      "spellcasting": {
+        "ability": "int",
+        "saveDc": 14,
+        "attackBonus": 6,
+        "knownSpells": [
+          "fire-bolt",
+          "magic-missile",
+          "shield",
+          "burning-hands",
+          "thunderwave"
+        ],
+        "preparedSpells": [
+          "magic-missile",
+          "shield",
+          "burning-hands"
+        ]
+      }
+    },
+    {
+      "id": "tollgate-hexer",
+      "name": "Tollgate Hexer",
+      "team": "enemies",
+      "hp": 36,
+      "maxHp": 36,
+      "ac": 14,
+      "abilityScores": {
+        "str": 8,
+        "dex": 14,
+        "con": 14,
+        "int": 12,
+        "wis": 16,
+        "cha": 10
+      },
+      "proficiencyBonus": 3,
+      "speed": 30,
+      "position": {
+        "x": 8,
+        "y": 6
+      },
+      "conditions": [],
+      "actions": [
+        {
+          "id": "hexer-knife",
+          "name": "Hexer Knife",
+          "kind": "meleeAttack",
+          "type": "meleeAttack",
+          "actionCost": "action",
+          "tags": [
+            "attack",
+            "melee"
+          ],
+          "range": 1,
+          "attackBonus": 4,
+          "damage": {
+            "dice": "1d4+1",
+            "type": "piercing"
+          },
+          "shape": {
+            "type": "single"
+          },
+          "effects": [],
+          "description": "A ritual knife strike.",
+          "reach": 5
+        }
+      ],
+      "resources": [
+        {
+          "id": "spell-slot-1",
+          "name": "Spell Slots L1",
+          "current": 4,
+          "max": 4,
+          "resetOn": "longRest",
+          "display": {
+            "showOnCreaturePanel": true,
+            "mode": "pips"
+          }
+        },
+        {
+          "id": "spell-slot-2",
+          "name": "Spell Slots L2",
+          "current": 2,
+          "max": 2,
+          "resetOn": "longRest",
+          "display": {
+            "showOnCreaturePanel": true,
+            "mode": "pips"
+          }
+        }
+      ],
+      "features": [
+        {
+          "id": "hex-focus",
+          "name": "Hex Focus",
+          "description": "+1 spell attack bonus from a soot-black focus.",
+          "enabled": true,
+          "source": "encounter",
+          "modifiers": {
+            "attackBonus": 1
+          }
+        }
+      ],
+      "skillBonuses": {
+        "religion": 4,
+        "perception": 6
+      },
+      "spellcasting": {
+        "ability": "wis",
+        "saveDc": 14,
+        "attackBonus": 6,
+        "knownSpells": [
+          "sacred-flame",
+          "ray-of-frost",
+          "thunderwave",
+          "healing-word",
+          "bane",
+          "bless"
+        ],
+        "preparedSpells": [
+          "healing-word",
+          "bane",
+          "thunderwave"
+        ]
+      }
+    },
+    {
+      "id": "ash-dog-1",
+      "name": "Ash Dog 1",
+      "team": "enemies",
+      "hp": 24,
+      "maxHp": 24,
+      "ac": 14,
+      "abilityScores": {
+        "str": 14,
+        "dex": 16,
+        "con": 12,
+        "int": 4,
+        "wis": 12,
+        "cha": 6
+      },
+      "proficiencyBonus": 3,
+      "speed": 40,
+      "position": {
+        "x": 7,
+        "y": 7
+      },
+      "conditions": [],
+      "actions": [
+        {
+          "id": "ash-dog-bite",
+          "name": "Ash Dog Bite",
+          "kind": "meleeAttack",
+          "type": "meleeAttack",
+          "actionCost": "action",
+          "tags": [
+            "attack",
+            "melee"
+          ],
+          "range": 1,
+          "attackBonus": 6,
+          "damage": {
+            "dice": "1d8+3",
+            "type": "piercing"
+          },
+          "shape": {
+            "type": "single"
+          },
+          "effects": [],
+          "description": "A snapping ember-hot bite.",
+          "reach": 5
+        },
+        {
+          "id": "ash-dog-snap",
+          "name": "Ash Dog Snap",
+          "kind": "meleeAttack",
+          "type": "meleeAttack",
+          "actionCost": "reaction",
+          "tags": [
+            "attack",
+            "melee",
+            "reaction",
+            "opportunity"
+          ],
+          "range": 1,
+          "attackBonus": 6,
+          "damage": {
+            "dice": "1d4+3",
+            "type": "piercing"
+          },
+          "shape": {
+            "type": "single"
+          },
+          "effects": [],
+          "description": "A reaction bite for opportunity attacks.",
+          "reach": 5
+        },
+        {
+          "id": "ash-sprint",
+          "name": "Ash Sprint",
+          "kind": "custom",
+          "actionCost": "bonusAction",
+          "tags": [
+            "movement",
+            "bonus"
+          ],
+          "range": 0,
+          "normalRange": 10,
+          "effects": [],
+          "description": "Gain 10 feet of extra movement."
+        }
+      ],
+      "resources": [],
+      "features": [
+        {
+          "id": "pack-hunter",
+          "name": "Pack Hunter",
+          "description": "+1 attack bonus from pack instincts.",
+          "enabled": true,
+          "source": "encounter",
+          "modifiers": {
+            "attackBonus": 1
+          }
+        }
+      ],
+      "skillBonuses": {
+        "athletics": 5,
+        "perception": 4
+      }
+    },
+    {
+      "id": "ash-dog-2",
+      "name": "Ash Dog 2",
+      "team": "enemies",
+      "hp": 24,
+      "maxHp": 24,
+      "ac": 14,
+      "abilityScores": {
+        "str": 14,
+        "dex": 16,
+        "con": 12,
+        "int": 4,
+        "wis": 12,
+        "cha": 6
+      },
+      "proficiencyBonus": 3,
+      "speed": 40,
+      "position": {
+        "x": 9,
+        "y": 7
+      },
+      "conditions": [],
+      "actions": [
+        {
+          "id": "ash-dog-bite",
+          "name": "Ash Dog Bite",
+          "kind": "meleeAttack",
+          "type": "meleeAttack",
+          "actionCost": "action",
+          "tags": [
+            "attack",
+            "melee"
+          ],
+          "range": 1,
+          "attackBonus": 6,
+          "damage": {
+            "dice": "1d8+3",
+            "type": "piercing"
+          },
+          "shape": {
+            "type": "single"
+          },
+          "effects": [],
+          "description": "A snapping ember-hot bite.",
+          "reach": 5
+        },
+        {
+          "id": "ash-dog-snap",
+          "name": "Ash Dog Snap",
+          "kind": "meleeAttack",
+          "type": "meleeAttack",
+          "actionCost": "reaction",
+          "tags": [
+            "attack",
+            "melee",
+            "reaction",
+            "opportunity"
+          ],
+          "range": 1,
+          "attackBonus": 6,
+          "damage": {
+            "dice": "1d4+3",
+            "type": "piercing"
+          },
+          "shape": {
+            "type": "single"
+          },
+          "effects": [],
+          "description": "A reaction bite for opportunity attacks.",
+          "reach": 5
+        },
+        {
+          "id": "ash-sprint",
+          "name": "Ash Sprint",
+          "kind": "custom",
+          "actionCost": "bonusAction",
+          "tags": [
+            "movement",
+            "bonus"
+          ],
+          "range": 0,
+          "normalRange": 10,
+          "effects": [],
+          "description": "Gain 10 feet of extra movement."
+        }
+      ],
+      "resources": [],
+      "features": [
+        {
+          "id": "pack-hunter",
+          "name": "Pack Hunter",
+          "description": "+1 attack bonus from pack instincts.",
+          "enabled": true,
+          "source": "encounter",
+          "modifiers": {
+            "attackBonus": 1
+          }
+        }
+      ],
+      "skillBonuses": {
+        "athletics": 5,
+        "perception": 4
+      }
+    }
+  ],
+  "grid": {
+    "width": 10,
+    "height": 10,
+    "blocked": [
+      {
+        "x": 4,
+        "y": 0
+      },
+      {
+        "x": 5,
+        "y": 0
+      },
+      {
+        "x": 4,
+        "y": 1
+      },
+      {
+        "x": 5,
+        "y": 1
+      },
+      {
+        "x": 4,
+        "y": 2
+      },
+      {
+        "x": 5,
+        "y": 2
+      },
+      {
+        "x": 4,
+        "y": 4
+      },
+      {
+        "x": 5,
+        "y": 4
+      },
+      {
+        "x": 4,
+        "y": 5
+      },
+      {
+        "x": 5,
+        "y": 5
+      },
+      {
+        "x": 4,
+        "y": 7
+      },
+      {
+        "x": 5,
+        "y": 7
+      },
+      {
+        "x": 4,
+        "y": 8
+      },
+      {
+        "x": 5,
+        "y": 8
+      },
+      {
+        "x": 4,
+        "y": 9
+      },
+      {
+        "x": 5,
+        "y": 9
+      },
+      {
+        "x": 7,
+        "y": 1
+      },
+      {
+        "x": 9,
+        "y": 3
+      },
+      {
+        "x": 6,
+        "y": 8
+      },
+      {
+        "x": 2,
+        "y": 2
+      }
+    ]
+  },
+  "initiative": [],
+  "round": 0,
+  "turnIndex": 0,
+  "turnState": {
+    "remainingMovement": 0,
+    "movementRemaining": 0,
+    "actionUsed": false,
+    "bonusActionUsed": false,
+    "reactionUsed": false
+  },
+  "turnResources": {
+    "sable-warden": {
+      "creatureId": "sable-warden",
+      "remainingMovement": 30,
+      "movementRemaining": 30,
+      "actionUsed": false,
+      "bonusActionUsed": false,
+      "reactionUsed": false
+    },
+    "lyra-mirewitch": {
+      "creatureId": "lyra-mirewitch",
+      "remainingMovement": 30,
+      "movementRemaining": 30,
+      "actionUsed": false,
+      "bonusActionUsed": false,
+      "reactionUsed": false
+    },
+    "pip-quickknife": {
+      "creatureId": "pip-quickknife",
+      "remainingMovement": 35,
+      "movementRemaining": 35,
+      "actionUsed": false,
+      "bonusActionUsed": false,
+      "reactionUsed": false
+    },
+    "brother-caldus": {
+      "creatureId": "brother-caldus",
+      "remainingMovement": 30,
+      "movementRemaining": 30,
+      "actionUsed": false,
+      "bonusActionUsed": false,
+      "reactionUsed": false
+    },
+    "ashgate-captain": {
+      "creatureId": "ashgate-captain",
+      "remainingMovement": 30,
+      "movementRemaining": 30,
+      "actionUsed": false,
+      "bonusActionUsed": false,
+      "reactionUsed": false
+    },
+    "cinder-acolyte": {
+      "creatureId": "cinder-acolyte",
+      "remainingMovement": 30,
+      "movementRemaining": 30,
+      "actionUsed": false,
+      "bonusActionUsed": false,
+      "reactionUsed": false
+    },
+    "tollgate-hexer": {
+      "creatureId": "tollgate-hexer",
+      "remainingMovement": 30,
+      "movementRemaining": 30,
+      "actionUsed": false,
+      "bonusActionUsed": false,
+      "reactionUsed": false
+    },
+    "ash-dog-1": {
+      "creatureId": "ash-dog-1",
+      "remainingMovement": 40,
+      "movementRemaining": 40,
+      "actionUsed": false,
+      "bonusActionUsed": false,
+      "reactionUsed": false
+    },
+    "ash-dog-2": {
+      "creatureId": "ash-dog-2",
+      "remainingMovement": 40,
+      "movementRemaining": 40,
+      "actionUsed": false,
+      "bonusActionUsed": false,
+      "reactionUsed": false
+    }
+  },
+  "pendingReactions": [],
+  "log": []
+}

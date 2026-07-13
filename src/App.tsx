@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { createSampleEncounter } from './data/sampleEncounter';
+import { SPELLS } from './data/spells';
 import {
   BASIC_ACTIONS,
   applyHpChange,
@@ -39,7 +40,14 @@ import { getReachableMovementSquares } from './engine/movement';
 import { formatBaseEffectiveBonus, formatBaseEffectiveNumber, getConditionTags, getHpPercent } from './engine/presentation';
 import { parseCombatStateJson, serializeCombatState } from './engine/serialization';
 import { positionKey, samePosition } from './engine/shapes';
-import { getAvailableSpellActions, getAvailableSpells, getSpellDefinition, getSpellSlotCost } from './engine/spells';
+import {
+  canCreatureCastSpell,
+  getAvailableSpellActions,
+  getAvailableSpells,
+  getSpellDefinition,
+  getSpellSlotCost,
+  spellToActionDefinition
+} from './engine/spells';
 import type { Ability, ActionDefinition, CardinalDirection, CombatState, Creature, GridPosition, SpellDefinition, TurnState } from './engine/types';
 import { getActionForNumberHotkey, getActionsForHotkeyCost, getNumberHotkeyIndex, isTypingShortcutTarget, moveGridCursor } from './ui/keyboard';
 
@@ -70,6 +78,7 @@ export function App() {
   const [multiattackTargets, setMultiattackTargets] = useState<Record<string, string>>({});
   const [actionTab, setActionTab] = useState<ActionDefinition['actionCost']>('action');
   const [spellSearch, setSpellSearch] = useState('');
+  const [showAllSpells, setShowAllSpells] = useState(false);
   const [spellCastLevels, setSpellCastLevels] = useState<Record<string, number>>({});
   const [gridCursor, setGridCursor] = useState<GridPosition>(combat.creatures[0]?.position ?? { x: 0, y: 0 });
   const [debugOpen, setDebugOpen] = useState(false);
@@ -85,7 +94,9 @@ export function App() {
   const selectedCreature = selectedCreatureId ? findCreature(combat, selectedCreatureId) : undefined;
   const activeCreatureActions = activeCreature ? getAvailableActions(activeCreature, combat) : [];
   const activeSpellActions = activeCreature ? getAvailableSpellActions(activeCreature) : [];
+  const visibleSpellActions = activeCreature && showAllSpells ? SPELLS.map((spell) => spellToActionDefinition(spell, activeCreature)) : activeSpellActions;
   const activeSpells = activeCreature ? getAvailableSpells(activeCreature) : [];
+  const visibleSpells = activeCreature && showAllSpells ? SPELLS : activeSpells;
   const activeActions = useMemo(
     () => [...activeCreatureActions, ...activeSpellActions],
     [activeCreatureActions, activeSpellActions]
@@ -733,11 +744,14 @@ export function App() {
 
               <SpellActionPanel
                 spells={activeSpells}
-                spellActions={activeSpellActions}
+                visibleSpells={visibleSpells}
+                spellActions={visibleSpellActions}
                 search={spellSearch}
+                showAllSpells={showAllSpells}
                 selectedActionId={selectedActionId}
                 onSearchChange={setSpellSearch}
-                getDisabledReason={(action) => getActionDisabledReason(activeCreature, action, combat.turnState)}
+                onShowAllSpellsChange={setShowAllSpells}
+                getDisabledReason={(action) => getSpellActionDisabledReason(activeCreature, action, combat.turnState)}
                 onSelect={handleCreatureActionSelect}
               />
 
@@ -1046,22 +1060,29 @@ function CreatureSummary({ creature, state }: { creature: Creature; state: Comba
 
 function SpellActionPanel({
   spells,
+  visibleSpells,
   spellActions,
   search,
+  showAllSpells,
   selectedActionId,
   onSearchChange,
+  onShowAllSpellsChange,
   getDisabledReason,
   onSelect
 }: {
   spells: SpellDefinition[];
+  visibleSpells: SpellDefinition[];
   spellActions: ActionDefinition[];
   search: string;
+  showAllSpells: boolean;
   selectedActionId?: string;
   onSearchChange: (search: string) => void;
+  onShowAllSpellsChange: (showAll: boolean) => void;
   getDisabledReason: (action: ActionDefinition) => string | undefined;
   onSelect: (action: ActionDefinition) => void;
 }) {
-  const spellById = new Map(spells.map((spell) => [spell.id, spell]));
+  const knownSpellIds = new Set(spells.map((spell) => spell.id));
+  const spellById = new Map(visibleSpells.map((spell) => [spell.id, spell]));
   const normalizedSearch = search.trim().toLowerCase();
   const filteredActions = spellActions.filter((action) => {
     const spell = action.spellId ? spellById.get(action.spellId) : undefined;
@@ -1085,6 +1106,10 @@ function SpellActionPanel({
           value={search}
           onChange={(event) => onSearchChange(event.target.value)}
         />
+        <label className="spell-toggle">
+          <input type="checkbox" checked={showAllSpells} onChange={(event) => onShowAllSpellsChange(event.target.checked)} />
+          All
+        </label>
       </div>
       <div className="spell-list">
         {filteredActions.length === 0 && <span className="empty-list">No spells match.</span>}
@@ -1107,6 +1132,7 @@ function SpellActionPanel({
               {spell?.concentration && <span>Conc.</span>}
               <span>{slot ? `Slot L${slot.level}` : 'At will'}</span>
               {spell && spell.automationLevel !== 'full' && <small>{spell.automationLevel}: {spell.manualResolution}</small>}
+              {spell && !knownSpellIds.has(spell.id) && <small>Not known or prepared.</small>}
               {disabledReason && <small>{disabledReason}</small>}
             </button>
           );
@@ -1412,6 +1438,15 @@ function getActionDisabledReason(creature: Creature, action: ActionDefinition, t
   }
 
   return getUnavailableActionReason(creature, action);
+}
+
+function getSpellActionDisabledReason(creature: Creature, action: ActionDefinition, turnState: TurnState): string | undefined {
+  const spell = action.spellId ? getSpellDefinition(action.spellId) : undefined;
+  if (spell && !canCreatureCastSpell(creature, spell)) {
+    return 'Not known or prepared.';
+  }
+
+  return getActionDisabledReason(creature, action, turnState);
 }
 
 function getTargetPanelDisabledReason(

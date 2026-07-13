@@ -7,9 +7,11 @@ import {
   getAvailableSpells,
   getSpellDefinition,
   getSpellSlotCost,
-  hasSpellSlot
+  hasSpellSlot,
+  normalizeSpellDefinition,
+  spellToActionDefinition
 } from './spells';
-import type { Creature } from './types';
+import type { Creature, SpellDefinition } from './types';
 
 function sequence(values: number[]) {
   let index = 0;
@@ -69,6 +71,46 @@ describe('spell engine', () => {
       expect.arrayContaining(['fire-bolt', 'sacred-flame', 'cure-wounds', 'healing-word', 'magic-missile', 'shield'])
     );
     expect(getSpellDefinition('guiding-bolt')?.automationLevel).toBe('partial');
+  });
+
+  it('loads the generated full spell index alongside curated overrides', () => {
+    expect(SPELLS.length).toBeGreaterThan(500);
+    expect(getSpellDefinition('acid-splash')).toMatchObject({
+      name: 'Acid Splash',
+      level: 0,
+      automationLevel: 'manual'
+    });
+    expect(getSpellDefinition('wish')).toMatchObject({
+      name: 'Wish',
+      level: 9,
+      automationLevel: 'manual'
+    });
+    expect(getSpellDefinition('fire-bolt')?.automationLevel).toBe('full');
+  });
+
+  it('normalizes malformed spell data into safe manual defaults', () => {
+    const malformed = {
+      id: '',
+      name: '',
+      level: 99,
+      school: 'nonsense',
+      actionCost: 'later',
+      targetType: 'who-knows',
+      automationLevel: 'aggressive'
+    } as unknown as SpellDefinition;
+
+    const normalized = normalizeSpellDefinition(malformed);
+    expect(normalized).toMatchObject({
+      id: 'unknown-spell',
+      name: 'Unknown Spell',
+      level: 9,
+      school: 'evocation',
+      actionCost: 'action',
+      targetType: 'manual',
+      attackType: 'manual',
+      automationLevel: 'manual'
+    });
+    expect(() => spellToActionDefinition(malformed, caster)).not.toThrow();
   });
 
   it('filters available spells by creature known and prepared ids', () => {
@@ -165,6 +207,21 @@ describe('spell engine', () => {
 
     expect(hasCondition(resultCaster, 'concentrating')).toBe(true);
     expect(result.log.some((entry) => entry.message.includes('concentrating on Bless'))).toBe(true);
+  });
+
+  it('represents generated reaction, concentration, and area spells without automation crashes', () => {
+    expect(getSpellDefinition('feather-fall')).toMatchObject({
+      actionCost: 'reaction',
+      automationLevel: 'manual'
+    });
+    expect(getSpellDefinition('fog-cloud')).toMatchObject({
+      concentration: true,
+      automationLevel: 'manual'
+    });
+    expect(getSpellDefinition('burning-hands')).toMatchObject({
+      targetType: 'area',
+      area: { shape: 'cone', size: 15 }
+    });
   });
 
   it('partially automated spells log manual remainders and still resolve supported effects', () => {

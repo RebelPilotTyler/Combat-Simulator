@@ -1,6 +1,7 @@
+import { GENERATED_SPELLS } from './spells.generated';
 import type { SpellDefinition } from '../engine/types';
 
-export const SPELLS: SpellDefinition[] = [
+const SPELL_OVERRIDES: SpellDefinition[] = [
   {
     id: 'fire-bolt',
     name: 'Fire Bolt',
@@ -253,4 +254,19 @@ export const SPELLS: SpellDefinition[] = [
   }
 ];
 
-export const SPELLS_BY_ID = Object.fromEntries(SPELLS.map((spell) => [spell.id, spell]));
+export const SPELLS: SpellDefinition[] = mergeSpellDefinitions(GENERATED_SPELLS, SPELL_OVERRIDES);
+
+export const SPELLS_BY_ID: Record<string, SpellDefinition> = Object.fromEntries(SPELLS.map((spell) => [spell.id, spell]));
+
+function mergeSpellDefinitions(generated: SpellDefinition[], overrides: SpellDefinition[]): SpellDefinition[] {
+  const byId = new Map<string, SpellDefinition>();
+  generated.forEach((spell) => byId.set(spell.id, spell));
+  overrides.forEach((spell) => byId.set(spell.id, spell));
+  return [...byId.values()].sort((left, right) => {
+    if (left.level !== right.level) {
+      return left.level - right.level;
+    }
+
+    return left.name.localeCompare(right.name);
+  });
+}

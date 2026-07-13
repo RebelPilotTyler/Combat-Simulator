@@ -478,11 +478,18 @@ summary:focus-visible {
   align-items: center;
   display: grid;
   gap: 6px;
-  grid-template-columns: minmax(90px, auto) minmax(140px, 1fr);
+  grid-template-columns: minmax(90px, auto) minmax(140px, 1fr) auto;
 }
 
 .spell-panel-header h3 {
   margin: 0;
+}
+
+.spell-toggle {
+  align-items: center;
+  display: flex;
+  gap: 4px;
+  white-space: nowrap;
 }
 
 .spell-list {

@@ -3,12 +3,14 @@ import { abilityModifier, parseDiceExpression } from './dice';
 import type {
   ActionCost,
   ActionDefinition,
+  Ability,
   Creature,
   Resource,
   SpellActionCost,
   SpellDamageDefinition,
   SpellDefinition,
-  SpellScalingDefinition
+  SpellScalingDefinition,
+  SpellSchool
 } from './types';
 
 export interface SpellSlotCost {
@@ -17,8 +19,66 @@ export interface SpellSlotCost {
   level: number;
 }
 
+const SPELL_SCHOOLS: SpellSchool[] = [
+  'abjuration',
+  'conjuration',
+  'divination',
+  'enchantment',
+  'evocation',
+  'illusion',
+  'necromancy',
+  'transmutation'
+];
+
+const ABILITIES: Ability[] = ['str', 'dex', 'con', 'int', 'wis', 'cha'];
+
+export function normalizeSpellDefinition(spell: SpellDefinition): SpellDefinition {
+  const level = Number.isFinite(spell.level) ? Math.max(0, Math.min(9, Math.trunc(spell.level))) : 0;
+  const school = SPELL_SCHOOLS.includes(spell.school) ? spell.school : 'evocation';
+  const actionCost: SpellActionCost = ['action', 'bonus', 'reaction', 'free'].includes(spell.actionCost)
+    ? spell.actionCost
+    : 'action';
+  const targetType = ['self', 'creature', 'point', 'area', 'manual'].includes(spell.targetType)
+    ? spell.targetType
+    : 'manual';
+  const attackType = spell.attackType && ['meleeSpellAttack', 'rangedSpellAttack', 'save', 'automatic', 'manual'].includes(spell.attackType)
+    ? spell.attackType
+    : 'manual';
+  const automationLevel = ['full', 'partial', 'manual'].includes(spell.automationLevel) ? spell.automationLevel : 'manual';
+
+  return {
+    ...spell,
+    id: typeof spell.id === 'string' && spell.id.trim() ? spell.id : 'unknown-spell',
+    name: typeof spell.name === 'string' && spell.name.trim() ? spell.name : 'Unknown Spell',
+    level,
+    school,
+    castingTime: spell.castingTime || '1 action',
+    actionCost,
+    range: {
+      type: spell.range?.type ?? 'special',
+      feet: spell.range?.feet,
+      text: spell.range?.text || 'Special'
+    },
+    targetType,
+    duration: spell.duration || 'Special',
+    concentration: Boolean(spell.concentration),
+    ritual: Boolean(spell.ritual),
+    components: spell.components ?? {},
+    classes: Array.isArray(spell.classes) ? spell.classes : [],
+    attackType,
+    saveAbility: spell.saveAbility && ABILITIES.includes(spell.saveAbility) ? spell.saveAbility : undefined,
+    tags: Array.isArray(spell.tags) && spell.tags.length > 0 ? spell.tags : ['utility'],
+    descriptionSummary: spell.descriptionSummary || `${spell.name || 'This spell'} requires manual resolution.`,
+    automationLevel,
+    manualResolution:
+      spell.manualResolution ??
+      (automationLevel === 'full' ? undefined : 'Resolve this spell manually; no spell-specific automation is configured yet.')
+  };
+}
+
 export function getSpellDefinition(spellId: string): SpellDefinition | undefined {
-  return SPELLS_BY_ID[spellId];
+  const spell = SPELLS_BY_ID[spellId];
+  return spell ? normalizeSpellDefinition(spell) : undefined;
 }
 
 export function requireSpellDefinition(spellId: string): SpellDefinition {
@@ -32,7 +92,7 @@ export function requireSpellDefinition(spellId: string): SpellDefinition {
 
 export function getAvailableSpells(creature: Creature, spellbook: SpellDefinition[] = SPELLS): SpellDefinition[] {
   const spellIds = getCreatureSpellIds(creature);
-  return spellbook.filter((spell) => spellIds.has(spell.id));
+  return spellbook.map(normalizeSpellDefinition).filter((spell) => spellIds.has(spell.id));
 }
 
 export function getAvailableSpellActions(creature: Creature, spellbook: SpellDefinition[] = SPELLS): ActionDefinition[] {
@@ -44,6 +104,7 @@ export function getCreatureSpellIds(creature: Creature): Set<string> {
 }
 
 export function canCreatureCastSpell(creature: Creature, spell: SpellDefinition): boolean {
+  spell = normalizeSpellDefinition(spell);
   return getCreatureSpellIds(creature).has(spell.id);
 }
 
@@ -52,6 +113,7 @@ export function getSpellSlotResourceId(level: number): string {
 }
 
 export function getSpellSlotCost(spell: SpellDefinition, castAtLevel = spell.level): SpellSlotCost | undefined {
+  spell = normalizeSpellDefinition(spell);
   if (spell.level === 0) {
     return undefined;
   }
@@ -79,6 +141,7 @@ export function hasSpellSlot(creature: Creature, spell: SpellDefinition, castAtL
 }
 
 export function getSpellUnavailableReason(creature: Creature, spell: SpellDefinition, castAtLevel = spell.level): string | undefined {
+  spell = normalizeSpellDefinition(spell);
   if (!canCreatureCastSpell(creature, spell)) {
     return `${creature.name} does not know or have ${spell.name} prepared.`;
   }
@@ -93,6 +156,7 @@ export function getSpellUnavailableReason(creature: Creature, spell: SpellDefini
 }
 
 export function consumeSpellSlot(creature: Creature, spell: SpellDefinition, castAtLevel = spell.level): string[] {
+  spell = normalizeSpellDefinition(spell);
   const cost = getSpellSlotCost(spell, castAtLevel);
   if (!cost) {
     return [];
@@ -135,7 +199,8 @@ export function getSpellcastingAbilityModifier(creature: Creature): number {
 }
 
 export function getScaledSpellDamage(spell: SpellDefinition, castAtLevel = spell.level): SpellDamageDefinition | undefined {
-  if (!spell.damage) {
+  spell = normalizeSpellDefinition(spell);
+  if (!spell.damage?.dice || typeof spell.damage.dice !== 'string') {
     return undefined;
   }
 
@@ -146,7 +211,8 @@ export function getScaledSpellDamage(spell: SpellDefinition, castAtLevel = spell
 }
 
 export function getScaledSpellHealingDice(spell: SpellDefinition, castAtLevel = spell.level): string | undefined {
-  if (!spell.healing) {
+  spell = normalizeSpellDefinition(spell);
+  if (!spell.healing?.dice || typeof spell.healing.dice !== 'string') {
     return undefined;
   }
 
@@ -154,6 +220,7 @@ export function getScaledSpellHealingDice(spell: SpellDefinition, castAtLevel = 
 }
 
 export function spellToActionDefinition(spell: SpellDefinition, creature: Creature, castAtLevel = spell.level): ActionDefinition {
+  spell = normalizeSpellDefinition(spell);
   const attackType = spell.attackType;
   const isAttack = attackType === 'meleeSpellAttack' || attackType === 'rangedSpellAttack';
   const isSave = attackType === 'save';
