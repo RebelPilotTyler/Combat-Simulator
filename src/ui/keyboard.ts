@@ -16,7 +16,19 @@ export function isTypingShortcutTarget(target: KeyboardTargetLike | null | undef
 
 export function getNumberHotkeyIndex(key: string): number | undefined {
   if (!/^[1-9]$/.test(key)) {
-    return undefined;
+    const shiftedNumberSymbols: Record<string, number> = {
+      '!': 1,
+      '@': 2,
+      '#': 3,
+      '$': 4,
+      '%': 5,
+      '^': 6,
+      '&': 7,
+      '*': 8,
+      '(': 9
+    };
+    const shiftedNumber = shiftedNumberSymbols[key];
+    return shiftedNumber === undefined ? undefined : shiftedNumber - 1;
   }
 
   return Number(key) - 1;

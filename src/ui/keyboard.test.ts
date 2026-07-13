@@ -5,6 +5,9 @@ describe('keyboard shortcut helpers', () => {
   it('maps number hotkeys to zero-based action indexes', () => {
     expect(getNumberHotkeyIndex('1')).toBe(0);
     expect(getNumberHotkeyIndex('9')).toBe(8);
+    expect(getNumberHotkeyIndex('!')).toBe(0);
+    expect(getNumberHotkeyIndex('@')).toBe(1);
+    expect(getNumberHotkeyIndex('(')).toBe(8);
     expect(getNumberHotkeyIndex('0')).toBeUndefined();
     expect(getNumberHotkeyIndex('a')).toBeUndefined();
   });
@@ -28,6 +31,7 @@ describe('keyboard shortcut helpers', () => {
 
     expect(getActionForNumberHotkey(actions, '2', { shiftKey: false, ctrlKey: false, metaKey: false })?.id).toBe('dash');
     expect(getActionForNumberHotkey(actions, '2', { shiftKey: true, ctrlKey: false, metaKey: false })?.id).toBe('quick-step');
+    expect(getActionForNumberHotkey(actions, '@', { shiftKey: true, ctrlKey: false, metaKey: false })?.id).toBe('quick-step');
     expect(getActionForNumberHotkey(actions, '1', { shiftKey: false, ctrlKey: true, metaKey: false })?.id).toBe('riposte');
   });
 

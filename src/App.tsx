@@ -47,8 +47,26 @@ const directions: CardinalDirection[] = ['north', 'east', 'south', 'west'];
 type SelectionMode = 'move' | 'target';
 type AppView = 'combat' | 'editor';
 type MapTool = 'select' | 'distance' | 'lineOfSight' | 'radius' | 'line' | 'cone';
+type UiTheme = 'slate' | 'parchment' | 'midnight';
+type TextScale = 'compact' | 'normal' | 'large';
+type UiDensity = 'comfortable' | 'compact';
+
+interface UiSettings {
+  theme: UiTheme;
+  textScale: TextScale;
+  density: UiDensity;
+  shortcutsEnabled: boolean;
+  showShortcutHints: boolean;
+  showAdvancedTools: boolean;
+  showMapTools: boolean;
+  showGridCoordinates: boolean;
+}
+
+const UI_SETTINGS_KEY = 'dnd5e-combat.uiSettings.v1';
 
 export function App() {
+  const [uiSettings, setUiSettings] = useState<UiSettings>(loadUiSettings);
+  const [settingsOpen, setSettingsOpen] = useState(false);
   const [activeView, setActiveView] = useState<AppView>('combat');
   const [combat, setCombat] = useState<CombatState>(() => createSampleEncounter());
   const [selectedCreatureId, setSelectedCreatureId] = useState<string | undefined>(combat.creatures[0]?.id);
@@ -110,8 +128,11 @@ export function App() {
 
   const highlightedKeys = new Set(highlightedSquares.map(positionKey));
   const mapToolSquares = useMemo(
-    () => getMapToolSquares(combat, mapTool, mapToolStart, mapToolEnd, mapToolDirection, mapToolRadiusFeet, mapToolLengthFeet),
-    [combat, mapTool, mapToolDirection, mapToolEnd, mapToolLengthFeet, mapToolRadiusFeet, mapToolStart]
+    () =>
+      uiSettings.showMapTools
+        ? getMapToolSquares(combat, mapTool, mapToolStart, mapToolEnd, mapToolDirection, mapToolRadiusFeet, mapToolLengthFeet)
+        : [],
+    [combat, mapTool, mapToolDirection, mapToolEnd, mapToolLengthFeet, mapToolRadiusFeet, mapToolStart, uiSettings.showMapTools]
   );
   const mapToolKeys = new Set(mapToolSquares.map(positionKey));
   const movementKeys = new Set(movementOptions.map((option) => positionKey(option.position)));
@@ -125,7 +146,7 @@ export function App() {
       ? getAttackDebugStats(combat, selectedAction.id, selectedTarget.id, 0)
       : undefined;
   const keyboardHint = getKeyboardHint(selectionMode, selectedAction, gridCursor, combat);
-  const mapToolResult = getMapToolResult(combat, mapTool, mapToolStart, mapToolEnd, mapToolSquares);
+  const mapToolResult = uiSettings.showMapTools ? getMapToolResult(combat, mapTool, mapToolStart, mapToolEnd, mapToolSquares) : '';
 
   useEffect(() => {
     if (activeCreature) {
@@ -134,7 +155,14 @@ export function App() {
   }, [activeCreature?.id]);
 
   useEffect(() => {
+    saveUiSettings(uiSettings);
+  }, [uiSettings]);
+
+  useEffect(() => {
     if (activeView !== 'combat') {
+      return;
+    }
+    if (!uiSettings.shortcutsEnabled) {
       return;
     }
 
@@ -214,7 +242,9 @@ export function App() {
     selectedTargetId,
     selectionMode,
     showHelp,
-    multiattackTargets
+    multiattackTargets,
+    uiSettings.shortcutsEnabled,
+    uiSettings.showMapTools
   ]);
 
   function resetTargeting(actionId?: string) {
@@ -226,7 +256,7 @@ export function App() {
   }
 
   function cancelSelection() {
-    if (mapTool !== 'select') {
+    if (uiSettings.showMapTools && mapTool !== 'select') {
       clearMapToolMeasurement();
       return;
     }
@@ -243,7 +273,7 @@ export function App() {
   }
 
   function handleGridConfirm() {
-    if (mapTool !== 'select') {
+    if (uiSettings.showMapTools && mapTool !== 'select') {
       handleMapToolCell(gridCursor);
       return;
     }
@@ -305,7 +335,7 @@ export function App() {
   }
 
   function handleCellClick(position: GridPosition) {
-    if (mapTool !== 'select') {
+    if (uiSettings.showMapTools && mapTool !== 'select') {
       handleMapToolCell(position);
       return;
     }
@@ -552,12 +582,25 @@ export function App() {
     setActiveView('combat');
   }
 
+  function updateUiSettings(update: Partial<UiSettings>) {
+    setUiSettings((current) => ({ ...current, ...update }));
+  }
+
+  function toggleMapTools() {
+    const nextShowMapTools = !uiSettings.showMapTools;
+    updateUiSettings({ showMapTools: nextShowMapTools });
+    if (!nextShowMapTools) {
+      setMapTool('select');
+      clearMapToolMeasurement();
+    }
+  }
+
   return (
-    <main className="app-shell">
+    <main className={['app-shell', `theme-${uiSettings.theme}`, `text-${uiSettings.textScale}`, `density-${uiSettings.density}`].join(' ')}>
       <header className="top-bar">
-        <div>
+        <div className="brand-block">
           <h1>Combat Sandbox</h1>
-          <p>Round {combat.round || '-'} - Active: {activeCreature?.name ?? 'No initiative'}</p>
+          <p>Round {combat.round || '-'} · {activeCreature?.name ?? 'No active creature'}</p>
         </div>
         <div className="top-actions">
           <button className={activeView === 'combat' ? 'selected-action' : ''} onClick={() => setActiveView('combat')}>
@@ -569,6 +612,7 @@ export function App() {
           <button onClick={() => setCombat((current) => rollInitiative(current))}>Roll Initiative</button>
           <button onClick={() => setCombat((current) => endTurn(current))}>End Turn / Next Turn</button>
           <button onClick={loadSample}>Load Sample</button>
+          <button onClick={() => setSettingsOpen(true)}>Settings</button>
         </div>
       </header>
 
@@ -665,55 +709,68 @@ export function App() {
                 />
                 <span>{gridCellSize}px</span>
               </label>
-            </div>
-            <div className="map-toolbar-row">
-              {(['select', 'distance', 'lineOfSight', 'radius', 'line', 'cone'] as const).map((tool) => (
-                <button
-                  className={mapTool === tool ? 'selected-action' : ''}
-                  key={tool}
-                  onClick={() => selectMapTool(tool)}
-                >
-                  {formatMapToolLabel(tool)}
-                </button>
-              ))}
-              <button onClick={clearMapToolMeasurement} disabled={mapToolStart === undefined && mapToolEnd === undefined}>
-                Clear
+              <button className={uiSettings.showMapTools ? 'selected-action' : ''} onClick={toggleMapTools}>
+                {uiSettings.showMapTools ? 'Hide Measure Tools' : 'Show Measure Tools'}
+              </button>
+              <button
+                className={uiSettings.showGridCoordinates ? 'selected-action' : ''}
+                onClick={() => updateUiSettings({ showGridCoordinates: !uiSettings.showGridCoordinates })}
+              >
+                {uiSettings.showGridCoordinates ? 'Hide Coordinates' : 'Show Coordinates'}
               </button>
             </div>
-            {mapTool !== 'select' && (
-              <div className="map-toolbar-row map-tool-options">
-                {(mapTool === 'radius' || mapTool === 'line' || mapTool === 'cone') && (
-                  <label>
-                    {mapTool === 'radius' ? 'Radius' : 'Length'}
-                    <input
-                      min={5}
-                      step={5}
-                      type="number"
-                      value={mapTool === 'radius' ? mapToolRadiusFeet : mapToolLengthFeet}
-                      onChange={(event) =>
-                        mapTool === 'radius'
-                          ? setMapToolRadiusFeet(Math.max(5, Number(event.target.value)))
-                          : setMapToolLengthFeet(Math.max(5, Number(event.target.value)))
-                      }
-                    />
-                    ft
-                  </label>
+            {uiSettings.showMapTools && (
+              <>
+                <div className="map-toolbar-row">
+                  {(['select', 'distance', 'lineOfSight', 'radius', 'line', 'cone'] as const).map((tool) => (
+                    <button
+                      className={mapTool === tool ? 'selected-action' : ''}
+                      key={tool}
+                      onClick={() => selectMapTool(tool)}
+                    >
+                      {formatMapToolLabel(tool)}
+                    </button>
+                  ))}
+                  <button onClick={clearMapToolMeasurement} disabled={mapToolStart === undefined && mapToolEnd === undefined}>
+                    Clear
+                  </button>
+                </div>
+                {mapTool !== 'select' && (
+                  <div className="map-toolbar-row map-tool-options">
+                    {(mapTool === 'radius' || mapTool === 'line' || mapTool === 'cone') && (
+                      <label>
+                        {mapTool === 'radius' ? 'Radius' : 'Length'}
+                        <input
+                          min={5}
+                          step={5}
+                          type="number"
+                          value={mapTool === 'radius' ? mapToolRadiusFeet : mapToolLengthFeet}
+                          onChange={(event) =>
+                            mapTool === 'radius'
+                              ? setMapToolRadiusFeet(Math.max(5, Number(event.target.value)))
+                              : setMapToolLengthFeet(Math.max(5, Number(event.target.value)))
+                          }
+                        />
+                        ft
+                      </label>
+                    )}
+                    {(mapTool === 'line' || mapTool === 'cone') && (
+                      <span className="direction-buttons">
+                        {directions.map((candidate) => (
+                          <button
+                            className={candidate === mapToolDirection ? 'selected-action' : ''}
+                            key={candidate}
+                            onClick={() => setMapToolDirection(candidate)}
+                          >
+                            {candidate}
+                          </button>
+                        ))}
+                      </span>
+                    )}
+                    <span className="map-tool-readout">{mapToolResult}</span>
+                  </div>
                 )}
-                {(mapTool === 'line' || mapTool === 'cone') && (
-                  <span className="direction-buttons">
-                    {directions.map((candidate) => (
-                      <button
-                        className={candidate === mapToolDirection ? 'selected-action' : ''}
-                        key={candidate}
-                        onClick={() => setMapToolDirection(candidate)}
-                      >
-                        {candidate}
-                      </button>
-                    ))}
-                  </span>
-                )}
-                <span className="map-tool-readout">{mapToolResult}</span>
-              </div>
+              </>
             )}
           </div>
           <div
@@ -732,12 +789,12 @@ export function App() {
                 const blocked = combat.grid.blocked.some((cell) => samePosition(cell, position));
                 const movement = selectionMode === 'move' && movementKeys.has(positionKey(position));
                 const highlighted = highlightedKeys.has(positionKey(position));
-                const toolHighlighted = mapToolKeys.has(positionKey(position));
+                const toolHighlighted = uiSettings.showMapTools && mapToolKeys.has(positionKey(position));
                 const active = creature?.id === combat.activeCreatureId;
                 const selected = creature?.id === selectedCreatureId;
                 const cursor = samePosition(gridCursor, position);
-                const toolStart = mapToolStart ? samePosition(mapToolStart, position) : false;
-                const toolEnd = mapToolEnd ? samePosition(mapToolEnd, position) : false;
+                const toolStart = uiSettings.showMapTools && mapToolStart ? samePosition(mapToolStart, position) : false;
+                const toolEnd = uiSettings.showMapTools && mapToolEnd ? samePosition(mapToolEnd, position) : false;
 
                 return (
                   <button
@@ -758,7 +815,7 @@ export function App() {
                     onClick={() => handleCellClick(position)}
                     style={{ height: gridCellSize, width: gridCellSize }}
                   >
-                    <span className="coord">{x},{y}</span>
+                    {uiSettings.showGridCoordinates && <span className="coord">{x},{y}</span>}
                     {creature && (
                       <span className="token-stack" title={`${creature.name} HP ${creature.hp}/${creature.maxHp} ${getConditionLabels(creature)}`}>
                         <span className={`token ${creature.team} ${isDefeated(creature) ? 'defeated' : ''}`}>
@@ -792,7 +849,7 @@ export function App() {
                 </button>
                 <button onClick={cancelSelection}>Cancel Selection</button>
               </div>
-              <p className="keyboard-hint">{keyboardHint}</p>
+              {uiSettings.showShortcutHints && <p className="keyboard-hint">{keyboardHint}</p>}
 
               <h3>Basic Actions</h3>
               <div className="action-list">
@@ -896,7 +953,7 @@ export function App() {
                       tabIndex={0}
                       onToggle={(event) => setDebugOpen(event.currentTarget.open)}
                     >
-                      <summary>Attack debug</summary>
+                      <summary>Hit chance</summary>
                       <span>Attack bonus: {formatBaseEffectiveBonus(selectedAction.attackBonus ?? 0, getEffectiveAttackBonus(selectedAction, activeCreature, combat))}</span>
                       <span>
                         Target AC:{' '}
@@ -1025,9 +1082,9 @@ export function App() {
               <span>Reaction used: {combat.turnState.reactionUsed ? 'yes' : 'no'}</span>
             </div>
           )}
-          {selectedCreature && (
+          {selectedCreature && uiSettings.showAdvancedTools && (
             <details className="condition-dev-panel compact-details">
-              <summary>Dev / Test Tools</summary>
+              <summary>Creature Tools</summary>
               <div className="hp-tools">
                 <label>
                   HP amount
@@ -1092,6 +1149,7 @@ export function App() {
           </ol>
         </section>
 
+        {uiSettings.showAdvancedTools && (
         <section className="panel json-panel">
           <details
             className="compact-details"
@@ -1100,7 +1158,7 @@ export function App() {
             tabIndex={0}
             onToggle={(event) => setToolsOpen(event.currentTarget.open)}
           >
-            <summary>Tools: import / export JSON</summary>
+            <summary>Import / Export</summary>
             <div className="json-actions">
               <button onClick={exportCurrent}>Export Current</button>
               <button onClick={loadJson}>Load JSON</button>
@@ -1114,12 +1172,20 @@ export function App() {
             <textarea value={jsonText} onChange={(event) => setJsonText(event.target.value)} spellCheck={false} />
           </details>
         </section>
+        )}
         </section>
       </section>
       ) : (
         <EncounterEditor currentCombat={combat} onLoadEncounter={loadEncounterFromEditor} />
       )}
       {showHelp && <KeyboardHelpOverlay onClose={() => setShowHelp(false)} />}
+      {settingsOpen && (
+        <SettingsDialog
+          settings={uiSettings}
+          onChange={updateUiSettings}
+          onClose={() => setSettingsOpen(false)}
+        />
+      )}
     </main>
   );
 }
@@ -1376,11 +1442,146 @@ function KeyboardHelpOverlay({ onClose }: { onClose: () => void }) {
           <span>G / T / L</span>
           <p>Focus grid, target panel, or combat log</p>
           <span>D / I</span>
-          <p>Toggle debug or import/export tools</p>
+          <p>Toggle hit chance or import/export panels</p>
           <span>? / H</span>
           <p>Open this help</p>
         </div>
       </section>
+    </div>
+  );
+}
+
+function SettingsDialog({
+  settings,
+  onChange,
+  onClose
+}: {
+  settings: UiSettings;
+  onChange: (update: Partial<UiSettings>) => void;
+  onClose: () => void;
+}) {
+  return (
+    <div className="help-backdrop" role="presentation" onClick={onClose}>
+      <section className="settings-modal" role="dialog" aria-modal="true" aria-label="Settings" onClick={(event) => event.stopPropagation()}>
+        <header>
+          <div>
+            <h2>Settings</h2>
+            <p>Display and keyboard preferences</p>
+          </div>
+          <button onClick={onClose} aria-label="Close settings">
+            Close
+          </button>
+        </header>
+
+        <section className="settings-section">
+          <h3>Appearance</h3>
+          <div className="settings-grid">
+            <label>
+              Theme
+              <select value={settings.theme} onChange={(event) => onChange({ theme: event.target.value as UiTheme })}>
+                <option value="slate">Slate</option>
+                <option value="parchment">Parchment</option>
+                <option value="midnight">Midnight</option>
+              </select>
+            </label>
+            <label>
+              Text Size
+              <select value={settings.textScale} onChange={(event) => onChange({ textScale: event.target.value as TextScale })}>
+                <option value="compact">Compact</option>
+                <option value="normal">Normal</option>
+                <option value="large">Large</option>
+              </select>
+            </label>
+            <label>
+              Layout Density
+              <select value={settings.density} onChange={(event) => onChange({ density: event.target.value as UiDensity })}>
+                <option value="comfortable">Comfortable</option>
+                <option value="compact">Compact</option>
+              </select>
+            </label>
+          </div>
+        </section>
+
+        <section className="settings-section">
+          <h3>Interface</h3>
+          <div className="settings-toggles">
+            <label>
+              <input
+                type="checkbox"
+                checked={settings.shortcutsEnabled}
+                onChange={(event) => onChange({ shortcutsEnabled: event.target.checked })}
+              />
+              Keyboard shortcuts enabled
+            </label>
+            <label>
+              <input
+                type="checkbox"
+                checked={settings.showShortcutHints}
+                onChange={(event) => onChange({ showShortcutHints: event.target.checked })}
+              />
+              Show shortcut hints in combat
+            </label>
+            <label>
+              <input
+                type="checkbox"
+                checked={settings.showAdvancedTools}
+                onChange={(event) => onChange({ showAdvancedTools: event.target.checked })}
+              />
+              Show advanced import and creature tools
+            </label>
+            <label>
+              <input
+                type="checkbox"
+                checked={settings.showMapTools}
+                onChange={(event) => onChange({ showMapTools: event.target.checked })}
+              />
+              Show battlemap measure tools
+            </label>
+            <label>
+              <input
+                type="checkbox"
+                checked={settings.showGridCoordinates}
+                onChange={(event) => onChange({ showGridCoordinates: event.target.checked })}
+              />
+              Show grid coordinates
+            </label>
+          </div>
+        </section>
+
+        <section className="settings-section">
+          <h3>Keyboard Shortcuts</h3>
+          <ShortcutReference />
+        </section>
+      </section>
+    </div>
+  );
+}
+
+function ShortcutReference() {
+  return (
+    <div className="shortcut-grid settings-shortcuts">
+      <span>Space</span>
+      <p>End turn</p>
+      <span>R</span>
+      <p>Roll initiative</p>
+      <span>M</span>
+      <p>Move mode</p>
+      <span>Esc</span>
+      <p>Cancel targeting or close dialogs</p>
+      <span>Arrows</span>
+      <p>Move the grid cursor</p>
+      <span>Enter</span>
+      <p>Select the cursor square or confirm the selected action</p>
+      <span>1-9</span>
+      <p>Use visible action buttons</p>
+      <span>Shift+1-9</span>
+      <p>Use visible bonus action buttons</p>
+      <span>Ctrl/Cmd+1-9</span>
+      <p>Use visible reaction or free buttons</p>
+      <span>G / T / L</span>
+      <p>Focus grid, target panel, or combat log</p>
+      <span>? / H</span>
+      <p>Open shortcut help</p>
     </div>
   );
 }
@@ -1617,4 +1818,49 @@ function getBasicActionDescription(action: BasicActionName): string {
     'Improvised Action': 'Log a note and optionally roll an ability check.'
   };
   return descriptions[action];
+}
+
+function loadUiSettings(): UiSettings {
+  if (typeof window === 'undefined') {
+    return defaultUiSettings();
+  }
+
+  const raw = window.localStorage.getItem(UI_SETTINGS_KEY);
+  if (!raw) {
+    return defaultUiSettings();
+  }
+
+  try {
+    const parsed = JSON.parse(raw) as Partial<UiSettings>;
+    return {
+      ...defaultUiSettings(),
+      ...parsed,
+      theme: parsed.theme === 'parchment' || parsed.theme === 'midnight' || parsed.theme === 'slate' ? parsed.theme : 'slate',
+      textScale: parsed.textScale === 'compact' || parsed.textScale === 'large' || parsed.textScale === 'normal' ? parsed.textScale : 'normal',
+      density: parsed.density === 'compact' || parsed.density === 'comfortable' ? parsed.density : 'comfortable'
+    };
+  } catch {
+    return defaultUiSettings();
+  }
+}
+
+function saveUiSettings(settings: UiSettings): void {
+  if (typeof window === 'undefined') {
+    return;
+  }
+
+  window.localStorage.setItem(UI_SETTINGS_KEY, JSON.stringify(settings));
+}
+
+function defaultUiSettings(): UiSettings {
+  return {
+    theme: 'slate',
+    textScale: 'normal',
+    density: 'comfortable',
+    shortcutsEnabled: true,
+    showShortcutHints: true,
+    showAdvancedTools: false,
+    showMapTools: true,
+    showGridCoordinates: true
+  };
 }
