@@ -56,6 +56,7 @@ import {
   getEffectiveAC,
   getEffectiveAttackBonus,
   getEffectiveMovementSpeed,
+  getEffectiveSaveDc,
   getEffectiveSaveBonus,
   getEffectiveSpeed,
   getFeatureStatModifiers,
@@ -1390,7 +1391,8 @@ function resolveSavingThrowDamageAction(
     const flatModifier = saveRollModifier.flatModifier ?? 0;
     const d20Total = chooseD20(firstSaveRoll.total, secondSaveRoll?.total, rollMode);
     const saveTotal = d20Total + saveModifier + flatModifier;
-    const success = saveRollModifier.autoFail ? false : saveRollModifier.autoSuccess ? true : saveTotal >= save.dc;
+    const saveDc = getEffectiveSaveDc(action, source, state) ?? save.dc;
+    const success = saveRollModifier.autoFail ? false : saveRollModifier.autoSuccess ? true : saveTotal >= saveDc;
     if (!success) {
       spendActionResources(state, source, action, 'failedSave');
     }
@@ -1400,7 +1402,7 @@ function resolveSavingThrowDamageAction(
     addLog(
       state,
       'save',
-      `${target.name} rolls ${save.ability.toUpperCase()} save against ${action.name}: ${formatD20Roll(firstSaveRoll.total, secondSaveRoll?.total, rollMode)}${formatRollReasons(saveRollModifier.notes)} + ${saveModifier}${flatModifier ? ` ${formatSigned(flatModifier)}` : ''} = ${saveTotal} vs DC ${save.dc}. ${success ? 'Success.' : 'Failure.'}`
+      `${target.name} rolls ${save.ability.toUpperCase()} save against ${action.name}: ${formatD20Roll(firstSaveRoll.total, secondSaveRoll?.total, rollMode)}${formatRollReasons(saveRollModifier.notes)} + ${saveModifier}${flatModifier ? ` ${formatSigned(flatModifier)}` : ''} = ${saveTotal} vs DC ${saveDc}. ${success ? 'Success.' : 'Failure.'}`
     );
     runAfterSavingThrowRules(state, { source, target, action, ability: save.ability, total: saveTotal, success });
 

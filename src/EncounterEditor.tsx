@@ -92,6 +92,11 @@ const effectTypes: EffectOperationType[] = [
   'reduceDamage',
   'setDamageMinimum',
   'multiplyMovementCost',
+  'modifyArmorClass',
+  'modifySpeed',
+  'modifyAttackBonus',
+  'modifySavingThrowBonus',
+  'modifySaveDc',
   'applyCondition',
   'removeCondition',
   'spendResource',
@@ -2317,6 +2322,32 @@ function renderEffectFields(
   if (effect.type === 'addFlatModifier' || effect.type === 'reduceDamage' || effect.type === 'setDamageMinimum') {
     return <NumberInput disabled={readOnly} label="Amount" value={effect.amount} onChange={(amount) => onChange({ ...effect, amount })} />;
   }
+  if (
+    effect.type === 'modifyArmorClass' ||
+    effect.type === 'modifySpeed' ||
+    effect.type === 'modifyAttackBonus' ||
+    effect.type === 'modifySaveDc'
+  ) {
+    return <NumberInput disabled={readOnly} label="Amount" value={effect.amount} onChange={(amount) => onChange({ ...effect, amount })} />;
+  }
+  if (effect.type === 'modifySavingThrowBonus') {
+    return (
+      <>
+        <label>
+          Ability
+          <select disabled={readOnly} value={effect.ability ?? ''} onChange={(event) => onChange({ ...effect, ability: (event.target.value || undefined) as Ability | undefined })}>
+            <option value="">All saves</option>
+            {abilities.map((ability) => (
+              <option key={ability} value={ability}>
+                {ability.toUpperCase()}
+              </option>
+            ))}
+          </select>
+        </label>
+        <NumberInput disabled={readOnly} label="Amount" value={effect.amount} onChange={(amount) => onChange({ ...effect, amount })} />
+      </>
+    );
+  }
   if (effect.type === 'multiplyMovementCost') {
     return <NumberInput disabled={readOnly} label="Cost x" value={effect.factor} min={0.1} onChange={(factor) => onChange({ ...effect, factor })} />;
   }
@@ -3315,6 +3346,15 @@ function createBlankEffect(type: EffectOperationType = 'addFlatModifier', update
   }
   if (type === 'reduceDamage' || type === 'setDamageMinimum') {
     return { amount: 1, ...update, type } as RuleEffectOperation;
+  }
+  if (
+    type === 'modifyArmorClass' ||
+    type === 'modifySpeed' ||
+    type === 'modifyAttackBonus' ||
+    type === 'modifySavingThrowBonus' ||
+    type === 'modifySaveDc'
+  ) {
+    return { amount: type === 'modifySpeed' ? 10 : 1, ...update, type } as RuleEffectOperation;
   }
   if (type === 'applyCondition') {
     return { conditionId: 'prone', ...update, type } as RuleEffectOperation;

@@ -26,7 +26,15 @@ import {
 } from './combat';
 import { collectAbilityCheckModifiers, createAppliedCondition, getConditionLabel, hasCondition, resolveRollMode } from './conditions';
 import { createAppliedConditionFromTemplate, normalizeCustomConditionTemplate, registerCustomConditionTemplates } from './customConditions';
-import { getAvailableActions, getEffectiveAC, getEffectiveSpeed, getUnavailableActionReason } from './features';
+import {
+  getAvailableActions,
+  getEffectiveAC,
+  getEffectiveAttackBonus,
+  getEffectiveSaveBonus,
+  getEffectiveSaveDc,
+  getEffectiveSpeed,
+  getUnavailableActionReason
+} from './features';
 import { getMovementOption, getReachableMovementSquares } from './movement';
 import { formatBaseEffectiveNumber, getConditionTag, getHpPercent } from './presentation';
 import { parseCombatStateJson, serializeCombatState, validateCombatStateShape } from './serialization';
@@ -2320,6 +2328,76 @@ describe('combat engine', () => {
     expect(stats.attackBonus).toBe(6);
     expect(stats.targetAc).toBe(13);
     expect(stats.expectedHitPercentage).toBeCloseTo(70);
+  });
+
+  it('while-active rule effects can modify AC, speed, attack bonus, save bonus, and save DC', () => {
+    const focusCondition = createAppliedCondition('battle-focus', {
+      rules: [
+        {
+          id: 'focus-stats',
+          trigger: 'whileActive',
+          selectors: [{ type: 'self' }],
+          effects: [
+            { type: 'modifyArmorClass', amount: 2 },
+            { type: 'modifySpeed', amount: 10 },
+            { type: 'modifyAttackBonus', amount: 1 },
+            { type: 'modifySavingThrowBonus', ability: 'dex', amount: 3 },
+            { type: 'modifySaveDc', amount: 2 }
+          ]
+        }
+      ]
+    });
+    const saveAction: ActionDefinition = {
+      ...baseCreature.actions[1],
+      id: 'focus-burst',
+      name: 'Focus Burst',
+      save: { ability: 'dex', dc: 12, halfDamageOnSuccess: true }
+    };
+    const state = createCombatState([
+      creature({
+        id: 'a',
+        name: 'Alpha',
+        ac: 12,
+        speed: 30,
+        actions: [baseCreature.actions[0], saveAction],
+        conditions: [focusCondition]
+      })
+    ]);
+
+    expect(getEffectiveAC(state.creatures[0], state)).toBe(14);
+    expect(getEffectiveSpeed(state.creatures[0], state)).toBe(40);
+    expect(getEffectiveAttackBonus(baseCreature.actions[0], state.creatures[0], state)).toBe(5);
+    expect(getEffectiveSaveBonus(state.creatures[0], 'dex', state)).toBe(3);
+    expect(getEffectiveSaveDc(saveAction, state.creatures[0], state)).toBe(14);
+  });
+
+  it('while-active rule effects can target allies within range as an aura', () => {
+    const state = createCombatState([
+      creature({
+        id: 'a',
+        name: 'Alpha',
+        position: { x: 0, y: 0 },
+        conditions: [
+          createAppliedCondition('guardian-aura', {
+            rules: [
+              {
+                id: 'guardian-ac',
+                trigger: 'whileActive',
+                selectors: [{ type: 'alliesWithinRange', range: 10 }],
+                effects: [{ type: 'modifyArmorClass', amount: 1 }]
+              }
+            ]
+          })
+        ]
+      }),
+      creature({ id: 'b', name: 'Bravo', team: 'players', ac: 12, position: { x: 2, y: 0 } }),
+      creature({ id: 'c', name: 'Charlie', team: 'players', ac: 12, position: { x: 3, y: 0 } }),
+      creature({ id: 'd', name: 'Delta', team: 'enemies', ac: 12, position: { x: 1, y: 0 } })
+    ]);
+
+    expect(getEffectiveAC(state.creatures[1], state)).toBe(13);
+    expect(getEffectiveAC(state.creatures[2], state)).toBe(12);
+    expect(getEffectiveAC(state.creatures[3], state)).toBe(12);
   });
 
   it('effective speed initializes turn movement', () => {

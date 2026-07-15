@@ -272,6 +272,16 @@ export function getRuleEffectPlainEnglish(effect: RuleEffectOperation): string {
       return `Raise damage dealt by the selected source to at least ${effect.amount}.`;
     case 'multiplyMovementCost':
       return `Movement costs ${effect.factor}x as much while this condition is active.`;
+    case 'modifyArmorClass':
+      return `Change the selected creature's AC by ${formatSigned(effect.amount)} while active.`;
+    case 'modifySpeed':
+      return `Change the selected creature's walking speed by ${formatSigned(effect.amount)} feet while active.`;
+    case 'modifyAttackBonus':
+      return `Change the selected creature's attack bonus by ${formatSigned(effect.amount)} while active.`;
+    case 'modifySavingThrowBonus':
+      return `Change ${effect.ability ? `${effect.ability.toUpperCase()} saves` : 'all saving throws'} by ${formatSigned(effect.amount)} while active.`;
+    case 'modifySaveDc':
+      return `Change the selected creature's saving throw DCs by ${formatSigned(effect.amount)} while active.`;
     case 'applyCondition':
       return `Apply condition "${effect.conditionId}" to the selected creature.`;
     case 'removeCondition':
@@ -302,6 +312,9 @@ export function getRuleEffectWarnings(effect: RuleEffectOperation): string[] {
   }
   if (effect.type === 'multiplyMovementCost' && effect.factor <= 0) {
     warnings.push('Movement cost multiplier must be greater than 0.');
+  }
+  if (effect.type === 'modifySpeed' && effect.amount % 5 !== 0) {
+    warnings.push('Speed changes usually work best in 5-foot increments.');
   }
   if ((effect.type === 'applyCondition' || effect.type === 'removeCondition') && !effect.conditionId.trim()) {
     warnings.push('Condition ID is required.');
@@ -466,6 +479,11 @@ function normalizeEffect(effect: RuleEffectOperation): RuleEffectOperation | und
     case 'addFlatModifier':
     case 'reduceDamage':
     case 'setDamageMinimum':
+    case 'modifyArmorClass':
+    case 'modifySpeed':
+    case 'modifyAttackBonus':
+    case 'modifySavingThrowBonus':
+    case 'modifySaveDc':
       return typeof effect.amount === 'number' ? effect : undefined;
     case 'addDamageDice':
     case 'dealDamage':

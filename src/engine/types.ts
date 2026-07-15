@@ -53,6 +53,11 @@ export type EffectOperationType =
   | 'reduceDamage'
   | 'setDamageMinimum'
   | 'multiplyMovementCost'
+  | 'modifyArmorClass'
+  | 'modifySpeed'
+  | 'modifyAttackBonus'
+  | 'modifySavingThrowBonus'
+  | 'modifySaveDc'
   | 'applyCondition'
   | 'removeCondition'
   | 'spendResource'
@@ -104,6 +109,11 @@ export type RuleEffectOperation =
   | { type: 'reduceDamage'; amount: number; note?: string }
   | { type: 'setDamageMinimum'; amount: number; note?: string }
   | { type: 'multiplyMovementCost'; factor: number; note?: string }
+  | { type: 'modifyArmorClass'; amount: number; note?: string }
+  | { type: 'modifySpeed'; amount: number; note?: string }
+  | { type: 'modifyAttackBonus'; amount: number; note?: string }
+  | { type: 'modifySavingThrowBonus'; ability?: Ability; amount: number; note?: string }
+  | { type: 'modifySaveDc'; amount: number; note?: string }
   | {
       type: 'applyCondition';
       conditionId: ConditionId;
@@ -321,6 +331,7 @@ export interface StatModifiers {
   flySpeed?: number;
   ac?: number;
   attackBonus?: number;
+  saveDc?: number;
   saveBonus?: Partial<Record<Ability, number>>;
   abilityScoreBonus?: Partial<Record<Ability, number>>;
   maxHp?: number;
