@@ -22,6 +22,7 @@ export const CORE_CONDITION_IDS = [
   'incapacitated',
   'invisible',
   'paralyzed',
+  'petrified',
   'poisoned',
   'prone',
   'restrained',
@@ -149,6 +150,22 @@ export const CORE_CONDITIONS: Record<CoreConditionId, ConditionDefinition> = {
       canTakeReaction: noAction,
       beforeAttackRoll: advantageAgainstBearer,
       beforeSavingThrow: autoFailStrengthAndDexteritySaves
+    }
+  },
+  petrified: {
+    id: 'petrified',
+    name: 'Petrified',
+    description: 'Transformed into solid matter. Cannot move, act, or react. Attacks against the creature have advantage; Strength and Dexterity saves fail.',
+    defaultDurationType: 'permanentUntilRemoved',
+    defaultStackBehavior: 'refresh',
+    hooks: {
+      canMove: noMove,
+      canTakeAction: noAction,
+      canTakeReaction: noAction,
+      beforeAttackRoll: advantageAgainstBearer,
+      beforeSavingThrow: autoFailStrengthAndDexteritySaves,
+      beforeDamage: (context) =>
+        context.conditionBearer.id === context.target.id ? Math.floor(context.amount / 2) : undefined
     }
   },
   poisoned: {
@@ -311,6 +328,10 @@ conditionRegistry.concentrating = {
 
 export function registerCondition(definition: ConditionDefinition): void {
   conditionRegistry[definition.id] = definition;
+}
+
+export function unregisterCondition(id: string): void {
+  delete conditionRegistry[id];
 }
 
 export function getConditionDefinition(id: string): ConditionDefinition {
@@ -482,6 +503,10 @@ export function tickRoundDurations(state: CombatState): AppliedCondition[] {
         return true;
       }
 
+      if (wasAppliedOnCurrentTurn(condition, state)) {
+        return true;
+      }
+
       condition.remainingRounds = Math.max(0, (condition.remainingRounds ?? 1) - 1);
       if (condition.remainingRounds === 0) {
         expired.push(condition);
@@ -493,6 +518,10 @@ export function tickRoundDurations(state: CombatState): AppliedCondition[] {
   });
 
   return expired;
+}
+
+function wasAppliedOnCurrentTurn(condition: AppliedCondition, state: CombatState): boolean {
+  return condition.metadata?.appliedRound === state.round - 1 && condition.metadata?.appliedTurnIndex === state.turnIndex;
 }
 
 export function collectAttackRollModifiers(
@@ -627,7 +656,20 @@ export function canCreatureTakeReaction(state: CombatState, creature: Creature):
 export function getMovementCostMultiplier(state: CombatState, creature: Creature): number {
   return normalizeConditions(creature.conditions).reduce((multiplier, condition) => {
     const hook = getConditionDefinition(condition.id).hooks.movementCostModifier;
-    return multiplier * (hook ? hook({ state, creature, condition }) : 1);
+    return multiplier * (hook ? hook({ state, creature, condition }) : 1) * getConditionRuleMovementCostMultiplier(condition);
+  }, 1);
+}
+
+function getConditionRuleMovementCostMultiplier(condition: AppliedCondition): number {
+  const definition = getConditionDefinition(condition.id);
+  return [...(definition.rules ?? []), ...(condition.rules ?? [])].reduce((multiplier, rule) => {
+    if (rule.enabled === false || rule.trigger !== 'whileActive') {
+      return multiplier;
+    }
+
+    return rule.effects.reduce((innerMultiplier, effect) => {
+      return effect.type === 'multiplyMovementCost' ? innerMultiplier * Math.max(0, effect.factor) : innerMultiplier;
+    }, multiplier);
   }, 1);
 }
 

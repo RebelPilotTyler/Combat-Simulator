@@ -301,6 +301,7 @@ function applyRuleEffect(
         metadata: effect.metadata,
         rules: effect.rules
       });
+      stampConditionApplicationTiming(state, condition);
       const result = applyConditionToCreature(creature, condition);
       logRuleMessage(state, `${getConditionDefinition(effect.conditionId).name} ${result === 'applied' ? 'applied to' : result === 'refreshed' ? 'refreshed on' : 'stacked on'} ${creature.name}.`);
       runConditionAppliedRules(state, creature, condition, event.source ?? entry.owner);
@@ -312,6 +313,30 @@ function applyRuleEffect(
     const changed = selected.filter((creature) => removeConditionFromCreature(creature, effect.conditionId));
     changed.forEach((creature) => logRuleMessage(state, `${getConditionDefinition(effect.conditionId).name} removed from ${creature.name}.`));
     return changed.length > 0;
+  }
+
+  if (effect.type === 'dealDamage') {
+    let changed = false;
+    selected.forEach((creature) => {
+      if (creature.hp <= 0 || hasCondition(creature, 'defeated')) {
+        return;
+      }
+      const damage = rollDamageDice(effect.dice, event.random ?? Math.random);
+      const before = creature.hp;
+      creature.hp = Math.max(0, creature.hp - damage.total);
+      if (creature.hp !== before) {
+        changed = true;
+        logRuleMessage(
+          state,
+          `${creature.name} takes ${damage.total} ${effect.damageType ?? 'damage'} from ${effect.note ?? entry.rule.name ?? entry.label}.`
+        );
+      }
+      if (creature.hp === 0 && !hasCondition(creature, 'defeated')) {
+        applyConditionToCreature(creature, createAppliedCondition('defeated'));
+        logRuleMessage(state, `${creature.name} is defeated.`);
+      }
+    });
+    return changed;
   }
 
   if (effect.type === 'spendResource' || effect.type === 'restoreResource') {
@@ -532,6 +557,18 @@ function logRuleMessage(state: CombatState, message: string): void {
     message,
     timestamp: new Date().toISOString()
   } satisfies CombatLogEntry);
+}
+
+function stampConditionApplicationTiming(state: CombatState, condition: AppliedCondition): void {
+  if (condition.durationType !== 'rounds') {
+    return;
+  }
+
+  condition.metadata = {
+    ...condition.metadata,
+    appliedRound: state.round,
+    appliedTurnIndex: state.turnIndex
+  };
 }
 
 function formatRuleMessage(message: string, entry: RuleSource, event: RuleEventContext): string {

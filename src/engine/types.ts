@@ -40,16 +40,19 @@ export type RuleTriggerPoint =
   | 'onTurnStart'
   | 'onTurnEnd'
   | 'onActionUsed'
-  | 'onConditionApplied';
+  | 'onConditionApplied'
+  | 'whileActive';
 
 export type EffectOperationType =
   | 'addFlatModifier'
   | 'grantAdvantage'
   | 'grantDisadvantage'
   | 'addDamageDice'
+  | 'dealDamage'
   | 'multiplyDamage'
   | 'reduceDamage'
   | 'setDamageMinimum'
+  | 'multiplyMovementCost'
   | 'applyCondition'
   | 'removeCondition'
   | 'spendResource'
@@ -96,9 +99,11 @@ export type RuleEffectOperation =
   | { type: 'grantAdvantage'; note?: string }
   | { type: 'grantDisadvantage'; note?: string }
   | { type: 'addDamageDice'; dice: string; damageType?: string; note?: string }
+  | { type: 'dealDamage'; dice: string; damageType?: string; note?: string }
   | { type: 'multiplyDamage'; factor: number; note?: string }
   | { type: 'reduceDamage'; amount: number; note?: string }
   | { type: 'setDamageMinimum'; amount: number; note?: string }
+  | { type: 'multiplyMovementCost'; factor: number; note?: string }
   | {
       type: 'applyCondition';
       conditionId: ConditionId;

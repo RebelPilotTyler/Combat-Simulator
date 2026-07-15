@@ -1360,9 +1360,47 @@ summary:focus-visible {
   padding: 6px;
 }
 
+.condition-builder-help {
+  background: var(--panel-muted);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--text);
+  display: grid;
+  gap: 6px;
+  padding: 8px;
+}
+
+.condition-builder-help p,
+.condition-builder-help ul {
+  margin: 0;
+}
+
+.condition-builder-help ul {
+  color: var(--text-muted);
+  padding-left: 18px;
+}
+
+.condition-builder-help li + li {
+  margin-top: 3px;
+}
+
 .condition-template-status span {
   color: var(--text-muted);
   font-size: 12px;
+}
+
+.condition-template-status.reference-note {
+  background: var(--panel-muted);
+  border-color: var(--border);
+}
+
+.library-list-heading {
+  color: var(--text-muted);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0;
+  padding: 3px 2px 0;
+  text-transform: uppercase;
 }
 
 .editor-subsection {
@@ -1466,6 +1504,23 @@ summary:focus-visible {
 
 .effect-row {
   background: color-mix(in srgb, var(--accent-soft) 35%, var(--panel-muted));
+}
+
+.rule-effect-help {
+  color: var(--text-muted);
+  font-size: 12px;
+  grid-column: 1 / -1;
+  margin: 0;
+}
+
+.rule-effect-warning {
+  background: var(--warning-bg);
+  border: 1px solid var(--warning-border);
+  border-radius: var(--radius-sm);
+  color: var(--text-muted);
+  font-size: 12px;
+  grid-column: 1 / -1;
+  padding: 4px 6px;
 }
 
 .rule-row label {

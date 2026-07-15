@@ -1241,6 +1241,7 @@ export function applyCondition(
   const next = normalizeState(cloneState(state));
   const target = findCreature(next, targetId);
   const applied = createAppliedCondition(conditionId, options);
+  stampConditionApplicationTiming(next, applied);
   const result = applyConditionToCreature(target, applied);
   logConditionChange(next, target, applied, result);
   return next;
@@ -1912,6 +1913,18 @@ function logConditionChange(
     condition,
     condition.sourceCreatureId ? state.creatures.find((source) => source.id === condition.sourceCreatureId) : undefined
   );
+}
+
+function stampConditionApplicationTiming(state: CombatState, condition: AppliedCondition): void {
+  if (condition.durationType !== 'rounds') {
+    return;
+  }
+
+  condition.metadata = {
+    ...condition.metadata,
+    appliedRound: state.round,
+    appliedTurnIndex: state.turnIndex
+  };
 }
 
 function logExpiredConditions(state: CombatState, conditions: AppliedCondition[]): void {

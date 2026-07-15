@@ -1,6 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   CUSTOM_CONDITION_LIBRARY_KEY,
+  EXAMPLE_CUSTOM_CONDITION_TEMPLATES,
+  REFERENCE_CONDITION_TEMPLATES,
   createAppliedConditionFromTemplate,
   createBlankCustomConditionTemplate,
   deleteCustomConditionTemplate,
@@ -14,6 +16,49 @@ import {
   saveCustomConditionLibrary,
   upsertCustomConditionTemplate
 } from './customConditions';
+import { createCombatState } from './combat';
+import { getMovementCost } from './movement';
+import { collectBeforeAttackRollRuleModifiers, runTurnRules } from './rules';
+import type { ActionDefinition, Creature } from './types';
+
+const strike: ActionDefinition = {
+  id: 'strike',
+  name: 'Strike',
+  kind: 'meleeAttack',
+  type: 'meleeAttack',
+  actionCost: 'action',
+  tags: ['attack', 'melee'],
+  range: 1,
+  attackBonus: 4,
+  damage: { dice: '1d6' },
+  shape: { type: 'single' },
+  effects: []
+};
+
+const baseCreature: Creature = {
+  id: 'a',
+  name: 'Alpha',
+  team: 'players',
+  hp: 10,
+  maxHp: 10,
+  ac: 12,
+  abilityScores: { str: 10, dex: 10, con: 10, int: 10, wis: 10, cha: 10 },
+  proficiencyBonus: 2,
+  speed: 30,
+  position: { x: 0, y: 0 },
+  conditions: [],
+  actions: [strike]
+};
+
+function creature(overrides: Partial<Creature>): Creature {
+  return {
+    ...baseCreature,
+    ...overrides,
+    abilityScores: overrides.abilityScores ?? baseCreature.abilityScores,
+    conditions: overrides.conditions ?? [],
+    actions: overrides.actions ?? baseCreature.actions
+  };
+}
 
 describe('custom condition templates', () => {
   beforeEach(() => {
@@ -139,5 +184,80 @@ describe('custom condition templates', () => {
       expect(parsed.templates[0].rules[0].effects).toEqual([]);
       expect(getCustomConditionTemplateWarnings(parsed.templates[0])).toContain('missing-amount has no valid mechanical effects.');
     }
+  });
+
+  it('includes read-only reference and example templates for the builder', () => {
+    expect(REFERENCE_CONDITION_TEMPLATES.map((template) => template.id)).toEqual(
+      expect.arrayContaining(['blinded', 'charmed', 'deafened', 'frightened', 'grappled', 'incapacitated', 'invisible', 'paralyzed', 'petrified', 'poisoned', 'prone', 'restrained', 'stunned', 'unconscious'])
+    );
+    expect(EXAMPLE_CUSTOM_CONDITION_TEMPLATES.map((template) => template.id)).toEqual(
+      expect.arrayContaining(['burning-example', 'slowed-example', 'marked-example', 'weakened-example'])
+    );
+  });
+
+  it('burning example deals damage at the start of the bearer turn', () => {
+    const burning = EXAMPLE_CUSTOM_CONDITION_TEMPLATES.find((template) => template.id === 'burning-example')!;
+    const state = createCombatState([
+      creature({
+        id: 'a',
+        conditions: [createAppliedConditionFromTemplate(burning)]
+      })
+    ]);
+
+    runTurnRules(state, state.creatures[0], 'onTurnStart');
+
+    expect(state.creatures[0].hp).toBeLessThan(10);
+    expect(state.log.some((entry) => entry.message.includes('fire'))).toBe(true);
+  });
+
+  it('slowed example doubles movement cost while active', () => {
+    const slowed = EXAMPLE_CUSTOM_CONDITION_TEMPLATES.find((template) => template.id === 'slowed-example')!;
+    const state = createCombatState([
+      creature({
+        id: 'a',
+        conditions: [createAppliedConditionFromTemplate(slowed)]
+      })
+    ], 2, 1);
+
+    expect(getMovementCost(state, 'a', { x: 1, y: 0 })).toBe(10);
+  });
+
+  it('marked example grants attack bonus against the marked target', () => {
+    const marked = EXAMPLE_CUSTOM_CONDITION_TEMPLATES.find((template) => template.id === 'marked-example')!;
+    const state = createCombatState([
+      creature({ id: 'a', name: 'Alpha', position: { x: 0, y: 0 } }),
+      creature({
+        id: 'b',
+        name: 'Bravo',
+        team: 'enemies',
+        position: { x: 1, y: 0 },
+        conditions: [createAppliedConditionFromTemplate(marked)]
+      })
+    ]);
+
+    const modifier = collectBeforeAttackRollRuleModifiers(state, {
+      attacker: state.creatures[0],
+      target: state.creatures[1],
+      action: strike
+    });
+
+    expect(modifier.flatModifier).toBe(2);
+    expect(modifier.notes).toContain('Marked');
+  });
+
+  it('blinded reference template demonstrates attack disadvantage and incoming attack advantage', () => {
+    const blinded = REFERENCE_CONDITION_TEMPLATES.find((template) => template.id === 'blinded')!;
+    const state = createCombatState([
+      creature({
+        id: 'a',
+        name: 'Alpha',
+        position: { x: 0, y: 0 },
+        conditions: [createAppliedConditionFromTemplate(blinded)]
+      }),
+      creature({ id: 'b', name: 'Bravo', team: 'enemies', position: { x: 1, y: 0 } })
+    ]);
+
+    expect(collectBeforeAttackRollRuleModifiers(state, { attacker: state.creatures[0], target: state.creatures[1], action: strike }).disadvantage).toBe(true);
+    expect(collectBeforeAttackRollRuleModifiers(state, { attacker: state.creatures[1], target: state.creatures[0], action: strike }).advantage).toBe(true);
   });
 });

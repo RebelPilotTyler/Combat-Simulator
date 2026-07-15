@@ -52,7 +52,8 @@ import { ALL_CONDITION_IDS, getConditionDefinition, getConditionLabel } from './
 import {
   createAppliedConditionFromTemplate,
   hasMechanicalCustomConditionEffects,
-  loadCustomConditionLibrary
+  loadCustomConditionLibrary,
+  registerCustomConditionTemplates
 } from './engine/customConditions';
 import {
   getAvailableActions,
@@ -276,6 +277,10 @@ export function App() {
       setCustomConditionLibrary(loadCustomConditionLibrary());
     }
   }, [activeView]);
+
+  useEffect(() => {
+    registerCustomConditionTemplates(customConditionLibrary);
+  }, [customConditionLibrary]);
 
   useEffect(() => {
     if (activeView !== 'combat') {

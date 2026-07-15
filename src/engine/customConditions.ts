@@ -9,8 +9,11 @@ import type {
   RuleTriggerPoint,
   StackBehavior
 } from './types';
+import { ALL_CONDITION_IDS, registerCondition, unregisterCondition } from './conditions';
 
 export const CUSTOM_CONDITION_LIBRARY_KEY = 'dnd5e-combat.customConditionLibrary.v1';
+const coreConditionIds = new Set<string>(ALL_CONDITION_IDS);
+const registeredCustomConditionIds = new Set<string>();
 
 const ruleTriggers: RuleTriggerPoint[] = [
   'beforeAttackRoll',
@@ -22,7 +25,8 @@ const ruleTriggers: RuleTriggerPoint[] = [
   'onTurnStart',
   'onTurnEnd',
   'onActionUsed',
-  'onConditionApplied'
+  'onConditionApplied',
+  'whileActive'
 ];
 
 const durationTypes: ConditionDurationType[] = [
@@ -35,6 +39,114 @@ const durationTypes: ConditionDurationType[] = [
 ];
 
 const stackBehaviors: StackBehavior[] = ['none', 'refresh', 'stackCount', 'stackIntensity'];
+
+export const REFERENCE_CONDITION_TEMPLATES: CustomConditionTemplate[] = [
+  conditionTemplate('blinded', 'Blinded', 'Cannot see. Attacks by the creature have disadvantage; attacks against it have advantage.', ['core', 'senses'], [
+    rule('blinded-own-attacks', 'Blinded creature attacks with disadvantage', 'beforeAttackRoll', [{ type: 'source' }], [], [
+      { type: 'grantDisadvantage', note: 'Blinded' }
+    ]),
+    rule('blinded-attacks-against', 'Attacks against blinded creature have advantage', 'beforeAttackRoll', [{ type: 'source' }], [{ type: 'targetHasCondition', conditionId: 'blinded' }], [
+      { type: 'grantAdvantage', note: 'Target is blinded' }
+    ])
+  ]),
+  conditionTemplate('charmed', 'Charmed', 'Cannot attack or target the charmer with harmful effects. The core engine enforces the source-specific targeting restriction.', ['core', 'mental'], []),
+  conditionTemplate('deafened', 'Deafened', 'Cannot hear. The current engine has no hearing-specific checks, so this is mostly a tracking condition.', ['core', 'senses'], []),
+  conditionTemplate('frightened', 'Frightened', 'Disadvantage on attacks while afraid. The core engine handles source-specific line-of-sight behavior.', ['core', 'fear'], [
+    rule('frightened-attacks', 'Frightened creature attacks with disadvantage', 'beforeAttackRoll', [{ type: 'source' }], [], [
+      { type: 'grantDisadvantage', note: 'Frightened' }
+    ])
+  ]),
+  conditionTemplate('grappled', 'Grappled', 'Speed becomes 0. Core behavior prevents movement; the custom-rule approximation shown here doubles movement cost instead.', ['core', 'movement'], [
+    rule('grappled-movement', 'Movement is heavily restricted', 'whileActive', [{ type: 'self' }], [], [
+      { type: 'multiplyMovementCost', factor: 99, note: 'Grappled' }
+    ])
+  ]),
+  conditionTemplate('incapacitated', 'Incapacitated', 'Cannot take actions or reactions. This is core engine behavior; custom rules cannot currently disable action spending directly.', ['core', 'control'], []),
+  conditionTemplate('invisible', 'Invisible', 'Attacks by the creature have advantage; attacks against it have disadvantage.', ['core', 'senses'], [
+    rule('invisible-attacks', 'Invisible creature attacks with advantage', 'beforeAttackRoll', [{ type: 'source' }], [], [
+      { type: 'grantAdvantage', note: 'Invisible' }
+    ]),
+    rule('attacks-against-invisible', 'Attacks against invisible creature have disadvantage', 'beforeAttackRoll', [{ type: 'source' }], [{ type: 'targetHasCondition', conditionId: 'invisible' }], [
+      { type: 'grantDisadvantage', note: 'Target is invisible' }
+    ])
+  ]),
+  conditionTemplate('paralyzed', 'Paralyzed', 'Cannot move, act, or react. Attacks against the creature have advantage; Strength and Dexterity saves fail.', ['core', 'control'], [
+    rule('paralyzed-attacks-against', 'Attacks against paralyzed creature have advantage', 'beforeAttackRoll', [{ type: 'source' }], [{ type: 'targetHasCondition', conditionId: 'paralyzed' }], [
+      { type: 'grantAdvantage', note: 'Target is paralyzed' }
+    ]),
+    rule('paralyzed-str-dex-saves', 'Paralyzed creature has disadvantage on Strength and Dexterity saves', 'beforeSavingThrow', [{ type: 'actionTarget' }], [{ type: 'targetHasCondition', conditionId: 'paralyzed' }], [
+      { type: 'grantDisadvantage', note: 'Paralyzed' }
+    ])
+  ]),
+  conditionTemplate('petrified', 'Petrified', 'Cannot move, act, or react. Attacks against it have advantage; Strength and Dexterity saves fail; damage is reduced.', ['core', 'control'], [
+    rule('petrified-attacks-against', 'Attacks against petrified creature have advantage', 'beforeAttackRoll', [{ type: 'source' }], [{ type: 'targetHasCondition', conditionId: 'petrified' }], [
+      { type: 'grantAdvantage', note: 'Target is petrified' }
+    ]),
+    rule('petrified-resistance', 'Damage against petrified creature is halved', 'beforeDamage', [{ type: 'actionTarget' }], [{ type: 'targetHasCondition', conditionId: 'petrified' }], [
+      { type: 'multiplyDamage', factor: 0.5, note: 'Petrified resistance' }
+    ])
+  ]),
+  conditionTemplate('poisoned', 'Poisoned', 'Disadvantage on attack rolls and ability checks. Custom rules can express the attack-roll part.', ['core', 'poison'], [
+    rule('poisoned-attacks', 'Poisoned creature attacks with disadvantage', 'beforeAttackRoll', [{ type: 'source' }], [], [
+      { type: 'grantDisadvantage', note: 'Poisoned' }
+    ])
+  ]),
+  conditionTemplate('prone', 'Prone', 'Attacks by the creature have disadvantage. Nearby attacks against it have advantage; distant attacks have disadvantage. Core behavior also doubles movement cost.', ['core', 'movement'], [
+    rule('prone-own-attacks', 'Prone creature attacks with disadvantage', 'beforeAttackRoll', [{ type: 'source' }], [], [
+      { type: 'grantDisadvantage', note: 'Prone' }
+    ]),
+    rule('prone-movement-cost', 'Movement costs double', 'whileActive', [{ type: 'self' }], [], [
+      { type: 'multiplyMovementCost', factor: 2, note: 'Prone' }
+    ])
+  ]),
+  conditionTemplate('restrained', 'Restrained', 'Speed becomes 0. Attacks by it have disadvantage; attacks against it have advantage; Dexterity saves have disadvantage.', ['core', 'control'], [
+    rule('restrained-own-attacks', 'Restrained creature attacks with disadvantage', 'beforeAttackRoll', [{ type: 'source' }], [], [
+      { type: 'grantDisadvantage', note: 'Restrained' }
+    ]),
+    rule('restrained-attacks-against', 'Attacks against restrained creature have advantage', 'beforeAttackRoll', [{ type: 'source' }], [{ type: 'targetHasCondition', conditionId: 'restrained' }], [
+      { type: 'grantAdvantage', note: 'Target is restrained' }
+    ]),
+    rule('restrained-movement', 'Movement is heavily restricted', 'whileActive', [{ type: 'self' }], [], [
+      { type: 'multiplyMovementCost', factor: 99, note: 'Restrained' }
+    ])
+  ]),
+  conditionTemplate('stunned', 'Stunned', 'Cannot move, act, or react. Attacks against it have advantage; Strength and Dexterity saves fail.', ['core', 'control'], [
+    rule('stunned-attacks-against', 'Attacks against stunned creature have advantage', 'beforeAttackRoll', [{ type: 'source' }], [{ type: 'targetHasCondition', conditionId: 'stunned' }], [
+      { type: 'grantAdvantage', note: 'Target is stunned' }
+    ])
+  ]),
+  conditionTemplate('unconscious', 'Unconscious', 'Cannot move, act, or react. Attacks against it have advantage; nearby hits become critical in the combat engine.', ['core', 'control'], [
+    rule('unconscious-attacks-against', 'Attacks against unconscious creature have advantage', 'beforeAttackRoll', [{ type: 'source' }], [{ type: 'targetHasCondition', conditionId: 'unconscious' }], [
+      { type: 'grantAdvantage', note: 'Target is unconscious' }
+    ])
+  ])
+];
+
+export const EXAMPLE_CUSTOM_CONDITION_TEMPLATES: CustomConditionTemplate[] = [
+  conditionTemplate('burning-example', 'Burning', 'At the start of the creature turn, it takes fire damage.', ['example', 'fire', 'damage'], [
+    rule('burning-start-damage', 'Burning damage', 'onTurnStart', [{ type: 'self' }], [], [
+      { type: 'dealDamage', dice: '1d6', damageType: 'fire', note: 'Burning' }
+    ])
+  ]),
+  conditionTemplate('slowed-example', 'Slowed', 'Movement costs twice as much while the condition is active.', ['example', 'movement'], [
+    rule('slowed-movement', 'Movement costs double', 'whileActive', [{ type: 'self' }], [], [
+      { type: 'multiplyMovementCost', factor: 2, note: 'Slowed' }
+    ])
+  ]),
+  conditionTemplate('marked-example', 'Marked', 'Attackers gain +2 on attack rolls against the marked target.', ['example', 'mark'], [
+    rule('marked-attack-bonus', 'Attack bonus against marked target', 'beforeAttackRoll', [{ type: 'source' }], [{ type: 'targetHasCondition', conditionId: 'marked-example' }], [
+      { type: 'addFlatModifier', amount: 2, note: 'Marked' }
+    ])
+  ]),
+  conditionTemplate('weakened-example', 'Weakened', 'The creature has disadvantage on attacks and deals less damage.', ['example', 'debuff'], [
+    rule('weakened-attacks', 'Weakened attacks with disadvantage', 'beforeAttackRoll', [{ type: 'source' }], [], [
+      { type: 'grantDisadvantage', note: 'Weakened' }
+    ]),
+    rule('weakened-damage-output', 'Damage dealt by weakened creature is reduced', 'beforeDamage', [{ type: 'actionTarget' }], [{ type: 'sourceHasCondition', conditionId: 'weakened-example' }], [
+      { type: 'reduceDamage', amount: 2, note: 'Weakened' }
+    ])
+  ])
+];
 
 export function createBlankCustomConditionTemplate(): CustomConditionTemplate {
   return normalizeCustomConditionTemplate({
@@ -129,12 +241,81 @@ export function getCustomConditionTemplateWarnings(template: CustomConditionTemp
     if (rule.effects.length === 0) {
       warnings.push(`${rule.name || rule.id} has no valid mechanical effects.`);
     }
+    rule.effects.forEach((effect) => {
+      getRuleEffectWarnings(effect).forEach((warning) => warnings.push(`${rule.name || rule.id}: ${warning}`));
+    });
   });
   return warnings;
 }
 
 export function hasMechanicalCustomConditionEffects(template: CustomConditionTemplate): boolean {
   return template.rules.some((rule) => rule.effects.length > 0);
+}
+
+export function getRuleEffectPlainEnglish(effect: RuleEffectOperation): string {
+  switch (effect.type) {
+    case 'addFlatModifier':
+      return `Add ${formatSigned(effect.amount)} to the selected roll.`;
+    case 'grantAdvantage':
+      return 'The selected creature rolls with advantage.';
+    case 'grantDisadvantage':
+      return 'The selected creature rolls with disadvantage.';
+    case 'addDamageDice':
+      return `Add ${effect.dice || 'extra dice'} to damage dealt by the selected source.`;
+    case 'dealDamage':
+      return `Deal ${effect.dice || 'damage'} ${effect.damageType ?? 'damage'} to the selected creature.`;
+    case 'multiplyDamage':
+      return `Multiply damage against the selected target by ${effect.factor}.`;
+    case 'reduceDamage':
+      return `Reduce damage against the selected target by ${effect.amount}.`;
+    case 'setDamageMinimum':
+      return `Raise damage dealt by the selected source to at least ${effect.amount}.`;
+    case 'multiplyMovementCost':
+      return `Movement costs ${effect.factor}x as much while this condition is active.`;
+    case 'applyCondition':
+      return `Apply condition "${effect.conditionId}" to the selected creature.`;
+    case 'removeCondition':
+      return `Remove condition "${effect.conditionId}" from the selected creature.`;
+    case 'spendResource':
+      return `Spend ${effect.amount} from the selected resource.`;
+    case 'restoreResource':
+      return `Restore ${effect.amount} to the selected resource.`;
+    case 'addTag':
+      return `Add the "${effect.tag}" tag to the current action.`;
+    case 'removeTag':
+      return `Remove the "${effect.tag}" tag from the current action.`;
+    case 'logMessage':
+      return 'Write a custom message to the combat log.';
+  }
+}
+
+export function getRuleEffectWarnings(effect: RuleEffectOperation): string[] {
+  const warnings: string[] = [];
+  if ((effect.type === 'addDamageDice' || effect.type === 'dealDamage') && !effect.dice.trim()) {
+    warnings.push('Damage dice are required.');
+  }
+  if ((effect.type === 'dealDamage' || effect.type === 'addDamageDice') && effect.dice && !/^\d+d\d+([+-]\d+)?$/i.test(effect.dice.trim())) {
+    warnings.push('Damage dice should look like 1d6 or 2d8+3.');
+  }
+  if (effect.type === 'multiplyDamage' && effect.factor < 0) {
+    warnings.push('Damage multiplier should not be negative.');
+  }
+  if (effect.type === 'multiplyMovementCost' && effect.factor <= 0) {
+    warnings.push('Movement cost multiplier must be greater than 0.');
+  }
+  if ((effect.type === 'applyCondition' || effect.type === 'removeCondition') && !effect.conditionId.trim()) {
+    warnings.push('Condition ID is required.');
+  }
+  if ((effect.type === 'spendResource' || effect.type === 'restoreResource') && !effect.resourceId.trim()) {
+    warnings.push('Resource is required.');
+  }
+  if ((effect.type === 'addTag' || effect.type === 'removeTag') && !effect.tag.trim()) {
+    warnings.push('Tag is required.');
+  }
+  if (effect.type === 'logMessage' && !effect.message.trim()) {
+    warnings.push('Log message is required.');
+  }
+  return warnings;
 }
 
 export function createAppliedConditionFromTemplate(
@@ -190,6 +371,28 @@ export function saveCustomConditionLibrary(templates: CustomConditionTemplate[])
     return;
   }
   window.localStorage.setItem(CUSTOM_CONDITION_LIBRARY_KEY, JSON.stringify(templates.map(normalizeCustomConditionTemplate), null, 2));
+}
+
+export function registerCustomConditionTemplates(templates: CustomConditionTemplate[]): void {
+  registeredCustomConditionIds.forEach((id) => unregisterCondition(id));
+  registeredCustomConditionIds.clear();
+
+  templates.map(normalizeCustomConditionTemplate).forEach((template) => {
+    if (coreConditionIds.has(template.id)) {
+      return;
+    }
+
+    registerCondition({
+      id: template.id,
+      name: template.name,
+      description: template.description || template.notes || 'Custom condition.',
+      defaultDurationType: template.defaultDurationType ?? 'permanentUntilRemoved',
+      defaultStackBehavior: template.stackBehavior ?? 'refresh',
+      hooks: {},
+      rules: template.rules
+    });
+    registeredCustomConditionIds.add(template.id);
+  });
 }
 
 function coerceCustomConditionTemplate(value: unknown): CustomConditionTemplate | undefined {
@@ -265,9 +468,12 @@ function normalizeEffect(effect: RuleEffectOperation): RuleEffectOperation | und
     case 'setDamageMinimum':
       return typeof effect.amount === 'number' ? effect : undefined;
     case 'addDamageDice':
+    case 'dealDamage':
       return typeof effect.dice === 'string' && effect.dice.trim() ? effect : undefined;
     case 'multiplyDamage':
       return typeof effect.factor === 'number' ? effect : undefined;
+    case 'multiplyMovementCost':
+      return typeof effect.factor === 'number' && effect.factor > 0 ? effect : undefined;
     case 'applyCondition':
       return typeof effect.conditionId === 'string' && effect.conditionId.trim() ? effect : undefined;
     case 'removeCondition':
@@ -283,6 +489,42 @@ function normalizeEffect(effect: RuleEffectOperation): RuleEffectOperation | und
     default:
       return undefined;
   }
+}
+
+function conditionTemplate(
+  id: string,
+  name: string,
+  description: string,
+  tags: string[],
+  rules: RuleDefinition[],
+  notes = 'Reference template. Duplicate it before editing.'
+): CustomConditionTemplate {
+  return normalizeCustomConditionTemplate({
+    id,
+    name,
+    description,
+    defaultDurationType: 'permanentUntilRemoved',
+    stackBehavior: 'refresh',
+    tags,
+    notes,
+    rules,
+    updatedAt: 'reference'
+  });
+}
+
+function rule(
+  id: string,
+  name: string,
+  trigger: RuleTriggerPoint,
+  selectors: RuleTargetSelector[],
+  filters: RuleFilter[],
+  effects: RuleEffectOperation[]
+): RuleDefinition {
+  return { id, name, enabled: true, trigger, selectors, filters, effects };
+}
+
+function formatSigned(value: number): string {
+  return value >= 0 ? `+${value}` : `${value}`;
 }
 
 function normalizeTags(tags: string[]): string[] {

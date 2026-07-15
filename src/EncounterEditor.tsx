@@ -3,15 +3,20 @@ import { sampleCreatures } from './data/sampleEncounter';
 import { createCombatState } from './engine/combat';
 import { crCalculationTable, estimateCreatureCR, getCrXp } from './engine/cr';
 import {
+  EXAMPLE_CUSTOM_CONDITION_TEMPLATES,
+  REFERENCE_CONDITION_TEMPLATES,
   createBlankCustomConditionTemplate,
   deleteCustomConditionTemplate,
   duplicateCustomConditionTemplate,
   filterCustomConditionTemplates,
   getCustomConditionTemplateWarnings,
+  getRuleEffectPlainEnglish,
+  getRuleEffectWarnings,
   hasMechanicalCustomConditionEffects,
   loadCustomConditionLibrary,
   normalizeCustomConditionTemplate,
   parseCustomConditionTemplates,
+  registerCustomConditionTemplates,
   saveCustomConditionLibrary,
   upsertCustomConditionTemplate
 } from './engine/customConditions';
@@ -72,7 +77,8 @@ const ruleTriggers: RuleTriggerPoint[] = [
   'onTurnStart',
   'onTurnEnd',
   'onActionUsed',
-  'onConditionApplied'
+  'onConditionApplied',
+  'whileActive'
 ];
 const selectorTypes: TargetSelectorType[] = ['self', 'actionTarget', 'source', 'creaturesInArea', 'alliesWithinRange', 'enemiesWithinRange'];
 const filterTypes: RuleFilterType[] = ['actionHasTag', 'targetHasCondition', 'sourceHasCondition', 'hpBelowHalf', 'resourceAvailable', 'oncePerTurn', 'oncePerRound'];
@@ -81,9 +87,11 @@ const effectTypes: EffectOperationType[] = [
   'grantAdvantage',
   'grantDisadvantage',
   'addDamageDice',
+  'dealDamage',
   'multiplyDamage',
   'reduceDamage',
   'setDamageMinimum',
+  'multiplyMovementCost',
   'applyCondition',
   'removeCondition',
   'spendResource',
@@ -180,12 +188,25 @@ export function EncounterEditor({
   const selectedLibraryAction = actionLibrary.find((action) => action.id === selectedLibraryActionId) ?? actionLibrary[0];
   const selectedLibraryFeature = featureLibrary.find((feature) => feature.id === selectedLibraryFeatureId) ?? featureLibrary[0];
   const selectedLibraryResource = resourceLibrary.find((resource) => resource.id === selectedLibraryResourceId) ?? resourceLibrary[0];
-  const selectedCustomCondition = customConditionLibrary.find((template) => template.id === selectedCustomConditionId) ?? customConditionLibrary[0];
+  const referenceConditionLibrary = useMemo(
+    () => [...REFERENCE_CONDITION_TEMPLATES, ...EXAMPLE_CUSTOM_CONDITION_TEMPLATES],
+    []
+  );
+  const selectedReferenceCondition = referenceConditionLibrary.find((template) => getReferenceConditionSelectionId(template) === selectedCustomConditionId);
+  const selectedCustomCondition = customConditionLibrary.find((template) => template.id === selectedCustomConditionId);
+  const selectedConditionTemplate = selectedCustomCondition ?? selectedReferenceCondition ?? customConditionLibrary[0] ?? referenceConditionLibrary[0];
+  const selectedConditionIsReference = Boolean(
+    selectedReferenceCondition || (!selectedCustomCondition && selectedConditionTemplate && referenceConditionLibrary.some((template) => template.id === selectedConditionTemplate.id))
+  );
   const filteredCustomConditions = useMemo(
     () => filterCustomConditionTemplates(customConditionLibrary, customConditionSearch),
     [customConditionLibrary, customConditionSearch]
   );
-  const selectedCustomConditionWarnings = selectedCustomCondition ? getCustomConditionTemplateWarnings(selectedCustomCondition) : [];
+  const filteredReferenceConditions = useMemo(
+    () => filterCustomConditionTemplates(referenceConditionLibrary, customConditionSearch),
+    [referenceConditionLibrary, customConditionSearch]
+  );
+  const selectedCustomConditionWarnings = selectedConditionTemplate ? getCustomConditionTemplateWarnings(selectedConditionTemplate) : [];
   const hydratedBuilder = useMemo(
     () => hydrateEncounterCreatures(builderInstances, creatureLibrary),
     [builderInstances, creatureLibrary]
@@ -231,6 +252,7 @@ export function EncounterEditor({
   }, [resourceLibrary]);
 
   useEffect(() => {
+    registerCustomConditionTemplates(customConditionLibrary);
     saveCustomConditionLibrary(customConditionLibrary);
   }, [customConditionLibrary]);
 
@@ -272,10 +294,15 @@ export function EncounterEditor({
   }, [resourceLibrary, selectedLibraryResourceId]);
 
   useEffect(() => {
-    if (!customConditionLibrary.some((template) => template.id === selectedCustomConditionId)) {
-      setSelectedCustomConditionId(customConditionLibrary[0]?.id ?? '');
+    const customSelectionExists = customConditionLibrary.some((template) => template.id === selectedCustomConditionId);
+    const referenceSelectionExists = referenceConditionLibrary.some(
+      (template) => getReferenceConditionSelectionId(template) === selectedCustomConditionId
+    );
+
+    if (!customSelectionExists && !referenceSelectionExists) {
+      setSelectedCustomConditionId(customConditionLibrary[0]?.id ?? getReferenceConditionSelectionId(referenceConditionLibrary[0]));
     }
-  }, [customConditionLibrary, selectedCustomConditionId]);
+  }, [customConditionLibrary, referenceConditionLibrary, selectedCustomConditionId]);
 
   const occupiedKeys = useMemo(() => new Set(builderCreatures.map((creature) => positionKey(creature.position))), [builderCreatures]);
   const blockedKeys = useMemo(() => new Set(builderGrid.blocked.map(positionKey)), [builderGrid.blocked]);
@@ -519,17 +546,17 @@ export function EncounterEditor({
   }
 
   function duplicateSelectedCustomCondition() {
-    if (!selectedCustomCondition) {
+    if (!selectedConditionTemplate) {
       return;
     }
-    const duplicate = duplicateCustomConditionTemplate(selectedCustomCondition);
+    const duplicate = duplicateCustomConditionTemplate(selectedConditionTemplate);
     setCustomConditionLibrary((current) => [duplicate, ...current]);
     setSelectedCustomConditionId(duplicate.id);
-    setCustomConditionMessage(`${selectedCustomCondition.name} duplicated.`);
+    setCustomConditionMessage(`${selectedConditionTemplate.name} duplicated as an editable custom copy.`);
   }
 
   function deleteSelectedCustomCondition() {
-    if (!selectedCustomCondition) {
+    if (!selectedCustomCondition || selectedConditionIsReference) {
       return;
     }
     setCustomConditionLibrary((current) => deleteCustomConditionTemplate(current, selectedCustomCondition.id));
@@ -537,7 +564,7 @@ export function EncounterEditor({
   }
 
   function updateSelectedCustomCondition(update: Partial<CustomConditionTemplate>) {
-    if (!selectedCustomCondition) {
+    if (!selectedCustomCondition || selectedConditionIsReference) {
       return;
     }
 
@@ -552,7 +579,7 @@ export function EncounterEditor({
   }
 
   function saveSelectedCustomCondition() {
-    if (!selectedCustomCondition) {
+    if (!selectedCustomCondition || selectedConditionIsReference) {
       return;
     }
     const normalized = normalizeCustomConditionTemplate(selectedCustomCondition);
@@ -562,10 +589,10 @@ export function EncounterEditor({
   }
 
   function exportSelectedCustomCondition() {
-    if (!selectedCustomCondition) {
+    if (!selectedConditionTemplate) {
       return;
     }
-    setCustomConditionJson(JSON.stringify(selectedCustomCondition, null, 2));
+    setCustomConditionJson(JSON.stringify(selectedConditionTemplate, null, 2));
     setCustomConditionMessage('Selected custom condition exported below.');
   }
 
@@ -1189,16 +1216,31 @@ export function EncounterEditor({
 
             <details className="editor-section editor-subsection">
               <summary>Custom Conditions</summary>
-              <p className="editor-muted">Reusable homebrew condition templates for combat. Mechanical hooks use the same trigger/effect editor as actions and features.</p>
+              <div className="condition-builder-help">
+                <strong>How custom conditions work</strong>
+                <p>
+                  A custom condition is a reusable status effect you can apply in combat. The name, description, tags, and notes explain the rule to you; only mechanical hooks change engine behavior.
+                </p>
+                <ul>
+                  <li><strong>Tags</strong> are labels for searching and future automation. A tag does nothing by itself unless a hook/filter looks for it.</li>
+                  <li><strong>Mechanical hooks</strong> say when something happens: before an attack roll, at turn start, while active, and so on.</li>
+                  <li><strong>Selectors</strong> choose who receives the effect. For example, source usually means the attacker or acting creature.</li>
+                  <li><strong>Filters</strong> narrow when a hook applies, such as only when the target has this condition.</li>
+                  <li><strong>Description and notes</strong> are rules text for humans. They do not change rolls, damage, movement, or targeting unless matching hooks are configured.</li>
+                </ul>
+                <p>
+                  Common patterns: Burning uses onTurnStart + dealDamage. Slowed uses whileActive + multiplyMovementCost. Marked uses beforeAttackRoll + targetHasCondition + addFlatModifier.
+                </p>
+              </div>
               <div className="editor-button-row">
                 <button onClick={addCustomConditionTemplate}>New Condition</button>
-                <button onClick={duplicateSelectedCustomCondition} disabled={!selectedCustomCondition}>
-                  Duplicate
+                <button onClick={duplicateSelectedCustomCondition} disabled={!selectedConditionTemplate}>
+                  Duplicate as Custom Copy
                 </button>
-                <button onClick={saveSelectedCustomCondition} disabled={!selectedCustomCondition}>
+                <button onClick={saveSelectedCustomCondition} disabled={!selectedCustomCondition || selectedConditionIsReference}>
                   Save Condition
                 </button>
-                <button onClick={deleteSelectedCustomCondition} disabled={!selectedCustomCondition}>
+                <button onClick={deleteSelectedCustomCondition} disabled={!selectedCustomCondition || selectedConditionIsReference}>
                   Delete
                 </button>
               </div>
@@ -1212,9 +1254,22 @@ export function EncounterEditor({
               </label>
               <div className="condition-template-layout">
                 <div className="library-list compact-list">
+                  <span className="library-list-heading">Reference and examples</span>
+                  {filteredReferenceConditions.map((template) => (
+                    <button
+                      className={getReferenceConditionSelectionId(template) === selectedCustomConditionId ? 'selected-action' : ''}
+                      key={`reference-${template.id}`}
+                      onClick={() => setSelectedCustomConditionId(getReferenceConditionSelectionId(template))}
+                    >
+                      <strong>{template.name}</strong>
+                      <span>{template.tags.join(', ') || 'reference'}</span>
+                      <small>{hasMechanicalCustomConditionEffects(template) ? `${template.rules.length} hook(s)` : 'rules text only'}</small>
+                    </button>
+                  ))}
+                  <span className="library-list-heading">Your custom conditions</span>
                   {filteredCustomConditions.map((template) => (
                     <button
-                      className={template.id === selectedCustomCondition?.id ? 'selected-action' : ''}
+                      className={template.id === selectedCustomConditionId ? 'selected-action' : ''}
                       key={template.id}
                       onClick={() => setSelectedCustomConditionId(template.id)}
                     >
@@ -1225,21 +1280,28 @@ export function EncounterEditor({
                   ))}
                   {filteredCustomConditions.length === 0 && <span className="empty-list">No custom conditions match that search.</span>}
                 </div>
-                {selectedCustomCondition ? (
+                {selectedConditionTemplate ? (
                   <div className="condition-template-form">
+                    {selectedConditionIsReference && (
+                      <div className="condition-template-status reference-note">
+                        <strong>Read-only reference template</strong>
+                        <span>Duplicate this template to create an editable custom copy. Reference templates do not overwrite core condition behavior.</span>
+                      </div>
+                    )}
                     <div className="form-grid">
                       <label>
                         Name
-                        <input value={selectedCustomCondition.name} onChange={(event) => updateSelectedCustomCondition({ name: event.target.value })} />
+                        <input disabled={selectedConditionIsReference} value={selectedConditionTemplate.name} onChange={(event) => updateSelectedCustomCondition({ name: event.target.value })} />
                       </label>
                       <label>
                         ID
-                        <input value={selectedCustomCondition.id} onChange={(event) => updateSelectedCustomCondition({ id: toId(event.target.value) })} />
+                        <input disabled={selectedConditionIsReference} value={selectedConditionTemplate.id} onChange={(event) => updateSelectedCustomCondition({ id: toId(event.target.value) })} />
                       </label>
                       <label>
                         Default Duration
                         <select
-                          value={selectedCustomCondition.defaultDurationType ?? 'permanentUntilRemoved'}
+                          disabled={selectedConditionIsReference}
+                          value={selectedConditionTemplate.defaultDurationType ?? 'permanentUntilRemoved'}
                           onChange={(event) => updateSelectedCustomCondition({ defaultDurationType: event.target.value as ConditionDurationType })}
                         >
                           <option value="untilStartOfSourceTurn">untilStartOfSourceTurn</option>
@@ -1250,18 +1312,20 @@ export function EncounterEditor({
                           <option value="permanentUntilRemoved">permanentUntilRemoved</option>
                         </select>
                       </label>
-                      {selectedCustomCondition.defaultDurationType === 'rounds' && (
+                      {selectedConditionTemplate.defaultDurationType === 'rounds' && (
                         <NumberInput
                           label="Default Rounds"
-                          value={selectedCustomCondition.defaultRemainingRounds ?? 1}
+                          value={selectedConditionTemplate.defaultRemainingRounds ?? 1}
                           min={1}
+                          disabled={selectedConditionIsReference}
                           onChange={(value) => updateSelectedCustomCondition({ defaultRemainingRounds: value })}
                         />
                       )}
                       <label>
                         Stack
                         <select
-                          value={selectedCustomCondition.stackBehavior ?? 'refresh'}
+                          disabled={selectedConditionIsReference}
+                          value={selectedConditionTemplate.stackBehavior ?? 'refresh'}
                           onChange={(event) => updateSelectedCustomCondition({ stackBehavior: event.target.value as StackBehavior })}
                         >
                           {stackBehaviors.map((behavior) => (
@@ -1274,31 +1338,33 @@ export function EncounterEditor({
                       <label>
                         Tags
                         <input
-                          value={selectedCustomCondition.tags.join(', ')}
+                          disabled={selectedConditionIsReference}
+                          value={selectedConditionTemplate.tags.join(', ')}
                           placeholder="homebrew, curse, aura"
                           onChange={(event) => updateSelectedCustomCondition({ tags: parseCsv(event.target.value) })}
                         />
                       </label>
                       <label className="wide-field">
                         Description
-                        <textarea value={selectedCustomCondition.description} onChange={(event) => updateSelectedCustomCondition({ description: event.target.value })} />
+                        <textarea disabled={selectedConditionIsReference} value={selectedConditionTemplate.description} onChange={(event) => updateSelectedCustomCondition({ description: event.target.value })} />
                       </label>
                       <label className="wide-field">
                         Notes / Rules Text
-                        <textarea value={selectedCustomCondition.notes ?? ''} onChange={(event) => updateSelectedCustomCondition({ notes: event.target.value })} />
+                        <textarea disabled={selectedConditionIsReference} value={selectedConditionTemplate.notes ?? ''} onChange={(event) => updateSelectedCustomCondition({ notes: event.target.value })} />
                       </label>
                     </div>
                     <div className="condition-template-status">
-                      <strong>{hasMechanicalCustomConditionEffects(selectedCustomCondition) ? 'Mechanical hooks configured' : 'Rules text only'}</strong>
+                      <strong>{hasMechanicalCustomConditionEffects(selectedConditionTemplate) ? 'Mechanical hooks configured' : 'Rules text only'}</strong>
                       {selectedCustomConditionWarnings.map((warning) => (
                         <span key={warning}>{warning}</span>
                       ))}
                     </div>
                     <RuleListEditor
                       title="Mechanical Hooks"
-                      customConditions={customConditionLibrary}
-                      rules={selectedCustomCondition.rules}
+                      customConditions={[...customConditionLibrary, ...referenceConditionLibrary]}
+                      rules={selectedConditionTemplate.rules}
                       resources={creatureDraft.resources ?? []}
+                      readOnly={selectedConditionIsReference}
                       onChange={(rules) => updateSelectedCustomCondition({ rules })}
                     />
                   </div>
@@ -1923,12 +1989,14 @@ function RuleListEditor({
   customConditions,
   rules,
   resources,
+  readOnly = false,
   onChange
 }: {
   title: string;
   customConditions: CustomConditionTemplate[];
   rules: RuleDefinition[];
   resources: Resource[];
+  readOnly?: boolean;
   onChange: (rules: RuleDefinition[]) => void;
 }) {
   function addRule() {
@@ -1947,7 +2015,7 @@ function RuleListEditor({
     <details className="editor-subsection rule-section" open>
       <summary>{title}</summary>
       <div className="editor-button-row">
-        <button onClick={addRule}>Add Hook</button>
+        <button onClick={addRule} disabled={readOnly}>Add Hook</button>
       </div>
       <div className="rule-list">
         {rules.map((rule, index) => (
@@ -1956,6 +2024,7 @@ function RuleListEditor({
             rule={rule}
             customConditions={customConditions}
             resources={resources}
+            readOnly={readOnly}
             onChange={(nextRule) => updateRule(index, nextRule)}
             onDelete={() => deleteRule(index)}
           />
@@ -1970,12 +2039,14 @@ function RuleEditor({
   rule,
   customConditions,
   resources,
+  readOnly = false,
   onChange,
   onDelete
 }: {
   rule: RuleDefinition;
   customConditions: CustomConditionTemplate[];
   resources: Resource[];
+  readOnly?: boolean;
   onChange: (rule: RuleDefinition) => void;
   onDelete: () => void;
 }) {
@@ -1986,20 +2057,20 @@ function RuleEditor({
     <article className="rule-card">
       <div className="rule-card-header">
         <strong>{rule.name || rule.id}</strong>
-        <button onClick={onDelete}>Delete</button>
+        <button onClick={onDelete} disabled={readOnly}>Delete</button>
       </div>
       <div className="form-grid">
         <label>
           Name
-          <input value={rule.name ?? ''} onChange={(event) => onChange({ ...rule, name: event.target.value })} />
+          <input disabled={readOnly} value={rule.name ?? ''} onChange={(event) => onChange({ ...rule, name: event.target.value })} />
         </label>
         <label>
           ID
-          <input value={rule.id} onChange={(event) => onChange({ ...rule, id: toId(event.target.value) })} />
+          <input disabled={readOnly} value={rule.id} onChange={(event) => onChange({ ...rule, id: toId(event.target.value) })} />
         </label>
         <label>
           Trigger
-          <select value={rule.trigger} onChange={(event) => onChange({ ...rule, trigger: event.target.value as RuleTriggerPoint })}>
+          <select disabled={readOnly} value={rule.trigger} onChange={(event) => onChange({ ...rule, trigger: event.target.value as RuleTriggerPoint })}>
             {ruleTriggers.map((trigger) => (
               <option key={trigger} value={trigger}>
                 {trigger}
@@ -2008,7 +2079,7 @@ function RuleEditor({
           </select>
         </label>
         <label className="checkbox-field">
-          <input type="checkbox" checked={rule.enabled !== false} onChange={(event) => onChange({ ...rule, enabled: event.target.checked })} />
+          <input disabled={readOnly} type="checkbox" checked={rule.enabled !== false} onChange={(event) => onChange({ ...rule, enabled: event.target.checked })} />
           Enabled
         </label>
       </div>
@@ -2017,12 +2088,14 @@ function RuleEditor({
         title="Targets"
         addLabel="Add Target"
         emptyText="Defaults to source or action target based on trigger."
+        readOnly={readOnly}
         onAdd={() => onChange({ ...rule, selectors: [...selectors, createBlankSelector()] })}
       >
         {selectors.map((selector, index) => (
           <SelectorEditor
             key={index}
             selector={selector}
+            readOnly={readOnly}
             onChange={(nextSelector) => onChange({ ...rule, selectors: updateArray(selectors, index, nextSelector) })}
             onDelete={() => onChange({ ...rule, selectors: removeArrayItem(selectors, index) })}
           />
@@ -2033,6 +2106,7 @@ function RuleEditor({
         title="Filters"
         addLabel="Add Filter"
         emptyText="No filters. Hook can run whenever the trigger fires."
+        readOnly={readOnly}
         onAdd={() => onChange({ ...rule, filters: [...filters, createBlankFilter()] })}
       >
         {filters.map((filter, index) => (
@@ -2040,6 +2114,7 @@ function RuleEditor({
             key={index}
             filter={filter}
             resources={resources}
+            readOnly={readOnly}
             onChange={(nextFilter) => onChange({ ...rule, filters: updateArray(filters, index, nextFilter) })}
             onDelete={() => onChange({ ...rule, filters: removeArrayItem(filters, index) })}
           />
@@ -2050,6 +2125,7 @@ function RuleEditor({
         title="Effects"
         addLabel="Add Effect"
         emptyText="Add at least one effect."
+        readOnly={readOnly}
         onAdd={() => onChange({ ...rule, effects: [...rule.effects, createBlankEffect()] })}
       >
         {rule.effects.map((effect, index) => (
@@ -2058,6 +2134,7 @@ function RuleEditor({
             effect={effect}
             customConditions={customConditions}
             resources={resources}
+            readOnly={readOnly}
             onChange={(nextEffect) => onChange({ ...rule, effects: updateArray(rule.effects, index, nextEffect) })}
             onDelete={() => onChange({ ...rule, effects: removeArrayItem(rule.effects, index) })}
           />
@@ -2071,12 +2148,14 @@ function RulePartList({
   title,
   addLabel,
   emptyText,
+  readOnly = false,
   onAdd,
   children
 }: {
   title: string;
   addLabel: string;
   emptyText: string;
+  readOnly?: boolean;
   onAdd: () => void;
   children: ReactNode;
 }) {
@@ -2085,7 +2164,7 @@ function RulePartList({
     <div className="rule-part-list">
       <div className="rule-part-header">
         <strong>{title}</strong>
-        <button onClick={onAdd}>{addLabel}</button>
+        <button onClick={onAdd} disabled={readOnly}>{addLabel}</button>
       </div>
       {hasChildren ? children : <span className="empty-list">{emptyText}</span>}
     </div>
@@ -2094,10 +2173,12 @@ function RulePartList({
 
 function SelectorEditor({
   selector,
+  readOnly = false,
   onChange,
   onDelete
 }: {
   selector: RuleTargetSelector;
+  readOnly?: boolean;
   onChange: (selector: RuleTargetSelector) => void;
   onDelete: () => void;
 }) {
@@ -2105,7 +2186,7 @@ function SelectorEditor({
     <div className="rule-row">
       <label>
         Selector
-        <select value={selector.type} onChange={(event) => onChange(createBlankSelector(event.target.value as TargetSelectorType))}>
+        <select disabled={readOnly} value={selector.type} onChange={(event) => onChange(createBlankSelector(event.target.value as TargetSelectorType))}>
           {selectorTypes.map((type) => (
             <option key={type} value={type}>
               {type}
@@ -2114,9 +2195,9 @@ function SelectorEditor({
         </select>
       </label>
       {(selector.type === 'alliesWithinRange' || selector.type === 'enemiesWithinRange') && (
-        <NumberInput label="Range Feet" value={selector.range ?? 10} min={0} onChange={(value) => onChange({ ...selector, range: value })} />
+        <NumberInput disabled={readOnly} label="Range Feet" value={selector.range ?? 10} min={0} onChange={(value) => onChange({ ...selector, range: value })} />
       )}
-      <button onClick={onDelete}>Remove</button>
+      <button onClick={onDelete} disabled={readOnly}>Remove</button>
     </div>
   );
 }
@@ -2124,11 +2205,13 @@ function SelectorEditor({
 function FilterEditor({
   filter,
   resources,
+  readOnly = false,
   onChange,
   onDelete
 }: {
   filter: RuleFilter;
   resources: Resource[];
+  readOnly?: boolean;
   onChange: (filter: RuleFilter) => void;
   onDelete: () => void;
 }) {
@@ -2136,7 +2219,7 @@ function FilterEditor({
     <div className="rule-row">
       <label>
         Filter
-        <select value={filter.type} onChange={(event) => onChange(createBlankFilter(event.target.value as RuleFilterType))}>
+        <select disabled={readOnly} value={filter.type} onChange={(event) => onChange(createBlankFilter(event.target.value as RuleFilterType))}>
           {filterTypes.map((type) => (
             <option key={type} value={type}>
               {type}
@@ -2147,32 +2230,32 @@ function FilterEditor({
       {filter.type === 'actionHasTag' && (
         <label>
           Tag
-          <input value={filter.tag} onChange={(event) => onChange({ ...filter, tag: event.target.value })} />
+          <input disabled={readOnly} value={filter.tag} onChange={(event) => onChange({ ...filter, tag: event.target.value })} />
         </label>
       )}
       {(filter.type === 'targetHasCondition' || filter.type === 'sourceHasCondition') && (
         <label>
           Condition ID
-          <input value={filter.conditionId} onChange={(event) => onChange({ ...filter, conditionId: toId(event.target.value) })} />
+          <input disabled={readOnly} value={filter.conditionId} onChange={(event) => onChange({ ...filter, conditionId: toId(event.target.value) })} />
         </label>
       )}
       {filter.type === 'hpBelowHalf' && (
-        <CreatureReferenceSelect value={filter.target ?? 'actionTarget'} onChange={(target) => onChange({ ...filter, target })} />
+        <CreatureReferenceSelect disabled={readOnly} value={filter.target ?? 'actionTarget'} onChange={(target) => onChange({ ...filter, target })} />
       )}
       {filter.type === 'resourceAvailable' && (
         <>
-          <ResourceSelect label="Resource" value={filter.resourceId} resources={resources} onChange={(resourceId) => onChange({ ...filter, resourceId })} />
-          <NumberInput label="Amount" value={filter.amount ?? 1} min={1} onChange={(amount) => onChange({ ...filter, amount })} />
-          <CreatureReferenceSelect value={filter.target ?? 'source'} onChange={(target) => onChange({ ...filter, target })} />
+          <ResourceSelect disabled={readOnly} label="Resource" value={filter.resourceId} resources={resources} onChange={(resourceId) => onChange({ ...filter, resourceId })} />
+          <NumberInput disabled={readOnly} label="Amount" value={filter.amount ?? 1} min={1} onChange={(amount) => onChange({ ...filter, amount })} />
+          <CreatureReferenceSelect disabled={readOnly} value={filter.target ?? 'source'} onChange={(target) => onChange({ ...filter, target })} />
         </>
       )}
       {(filter.type === 'oncePerTurn' || filter.type === 'oncePerRound') && (
         <label>
           Key
-          <input value={filter.key ?? ''} onChange={(event) => onChange({ ...filter, key: event.target.value || undefined })} />
+          <input disabled={readOnly} value={filter.key ?? ''} onChange={(event) => onChange({ ...filter, key: event.target.value || undefined })} />
         </label>
       )}
-      <button onClick={onDelete}>Remove</button>
+      <button onClick={onDelete} disabled={readOnly}>Remove</button>
     </div>
   );
 }
@@ -2181,20 +2264,26 @@ function EffectEditor({
   effect,
   customConditions,
   resources,
+  readOnly = false,
   onChange,
   onDelete
 }: {
   effect: RuleEffectOperation;
   customConditions: CustomConditionTemplate[];
   resources: Resource[];
+  readOnly?: boolean;
   onChange: (effect: RuleEffectOperation) => void;
   onDelete: () => void;
 }) {
+  const warnings = getRuleEffectWarnings(effect);
+  const matchingTemplate =
+    effect.type === 'applyCondition' ? customConditions.find((template) => template.id === effect.conditionId) : undefined;
+  const isMissingTemplateHooks = effect.type === 'applyCondition' && Boolean(matchingTemplate && !(effect.rules?.length));
   return (
     <div className="rule-row effect-row">
       <label>
         Effect
-        <select value={effect.type} onChange={(event) => onChange(createBlankEffect(event.target.value as EffectOperationType))}>
+        <select disabled={readOnly} value={effect.type} onChange={(event) => onChange(createBlankEffect(event.target.value as EffectOperationType))}>
           {effectTypes.map((type) => (
             <option key={type} value={type}>
               {type}
@@ -2202,8 +2291,18 @@ function EffectEditor({
           ))}
         </select>
       </label>
-      {renderEffectFields(effect, resources, customConditions, onChange)}
-      <button onClick={onDelete}>Remove</button>
+      {renderEffectFields(effect, resources, customConditions, onChange, readOnly)}
+      <p className="rule-effect-help">{getRuleEffectPlainEnglish(effect)}</p>
+      {warnings.map((warning) => (
+        <span className="rule-effect-warning" key={warning}>{warning}</span>
+      ))}
+      {isMissingTemplateHooks && (
+        <span className="rule-effect-warning">
+          This ID matches the custom template "{matchingTemplate?.name}", but this effect does not include that template's hooks yet.
+          Re-select the template or edit the Condition ID to embed its mechanics.
+        </span>
+      )}
+      <button onClick={onDelete} disabled={readOnly}>Remove</button>
     </div>
   );
 }
@@ -2212,24 +2311,28 @@ function renderEffectFields(
   effect: RuleEffectOperation,
   resources: Resource[],
   customConditions: CustomConditionTemplate[],
-  onChange: (effect: RuleEffectOperation) => void
+  onChange: (effect: RuleEffectOperation) => void,
+  readOnly = false
 ) {
   if (effect.type === 'addFlatModifier' || effect.type === 'reduceDamage' || effect.type === 'setDamageMinimum') {
-    return <NumberInput label="Amount" value={effect.amount} onChange={(amount) => onChange({ ...effect, amount })} />;
+    return <NumberInput disabled={readOnly} label="Amount" value={effect.amount} onChange={(amount) => onChange({ ...effect, amount })} />;
+  }
+  if (effect.type === 'multiplyMovementCost') {
+    return <NumberInput disabled={readOnly} label="Cost x" value={effect.factor} min={0.1} onChange={(factor) => onChange({ ...effect, factor })} />;
   }
   if (effect.type === 'multiplyDamage') {
-    return <NumberInput label="Factor" value={effect.factor} min={0} onChange={(factor) => onChange({ ...effect, factor })} />;
+    return <NumberInput disabled={readOnly} label="Factor" value={effect.factor} min={0} onChange={(factor) => onChange({ ...effect, factor })} />;
   }
-  if (effect.type === 'addDamageDice') {
+  if (effect.type === 'addDamageDice' || effect.type === 'dealDamage') {
     return (
       <>
         <label>
           Dice
-          <input value={effect.dice} onChange={(event) => onChange({ ...effect, dice: event.target.value })} />
+          <input disabled={readOnly} value={effect.dice} onChange={(event) => onChange({ ...effect, dice: event.target.value })} />
         </label>
         <label>
           Type
-          <input value={effect.damageType ?? ''} onChange={(event) => onChange({ ...effect, damageType: event.target.value || undefined })} />
+          <input disabled={readOnly} value={effect.damageType ?? ''} onChange={(event) => onChange({ ...effect, damageType: event.target.value || undefined })} />
         </label>
       </>
     );
@@ -2241,6 +2344,7 @@ function renderEffectFields(
           <label>
             Custom Template
             <select
+              disabled={readOnly}
               value={customConditions.some((template) => template.id === effect.conditionId && effect.name === template.name) ? effect.conditionId : ''}
               onChange={(event) => {
                 const template = customConditions.find((candidate) => candidate.id === event.target.value);
@@ -2260,11 +2364,25 @@ function renderEffectFields(
         )}
         <label>
           Condition ID
-          <input value={effect.conditionId} onChange={(event) => onChange({ ...effect, conditionId: toId(event.target.value) })} />
+          <input
+            disabled={readOnly}
+            value={effect.conditionId}
+            onChange={(event) => onChange(updateApplyConditionEffectFromTemplateMatch(effect, customConditions, { conditionId: toId(event.target.value) }))}
+          />
         </label>
         <label>
           Duration
-          <select value={effect.durationType ?? ''} onChange={(event) => onChange({ ...effect, durationType: (event.target.value || undefined) as ConditionDurationType | undefined })}>
+          <select
+            disabled={readOnly}
+            value={effect.durationType ?? ''}
+            onChange={(event) =>
+              onChange(
+                updateApplyConditionEffectFromTemplateMatch(effect, customConditions, {
+                  durationType: (event.target.value || undefined) as ConditionDurationType | undefined
+                })
+              )
+            }
+          >
             <option value="">Default</option>
             <option value="untilStartOfSourceTurn">untilStartOfSourceTurn</option>
             <option value="untilEndOfSourceTurn">untilEndOfSourceTurn</option>
@@ -2274,10 +2392,26 @@ function renderEffectFields(
             <option value="permanentUntilRemoved">permanentUntilRemoved</option>
           </select>
         </label>
-        <NumberInput label="Rounds" value={effect.remainingRounds ?? 1} min={1} onChange={(remainingRounds) => onChange({ ...effect, remainingRounds })} />
+        <NumberInput
+          disabled={readOnly}
+          label="Rounds"
+          value={effect.remainingRounds ?? 1}
+          min={1}
+          onChange={(remainingRounds) => onChange(updateApplyConditionEffectFromTemplateMatch(effect, customConditions, { remainingRounds }))}
+        />
         <label>
           Stack
-          <select value={effect.stackBehavior ?? ''} onChange={(event) => onChange({ ...effect, stackBehavior: (event.target.value || undefined) as StackBehavior | undefined })}>
+          <select
+            disabled={readOnly}
+            value={effect.stackBehavior ?? ''}
+            onChange={(event) =>
+              onChange(
+                updateApplyConditionEffectFromTemplateMatch(effect, customConditions, {
+                  stackBehavior: (event.target.value || undefined) as StackBehavior | undefined
+                })
+              )
+            }
+          >
             <option value="">Default</option>
             {stackBehaviors.map((behavior) => (
               <option key={behavior} value={behavior}>
@@ -2293,15 +2427,15 @@ function renderEffectFields(
     return (
       <label>
         Condition ID
-        <input value={effect.conditionId} onChange={(event) => onChange({ ...effect, conditionId: toId(event.target.value) })} />
+        <input disabled={readOnly} value={effect.conditionId} onChange={(event) => onChange({ ...effect, conditionId: toId(event.target.value) })} />
       </label>
     );
   }
   if (effect.type === 'spendResource' || effect.type === 'restoreResource') {
     return (
       <>
-        <ResourceSelect label="Resource" value={effect.resourceId} resources={resources} onChange={(resourceId) => onChange({ ...effect, resourceId })} />
-        <NumberInput label="Amount" value={effect.amount} min={1} onChange={(amount) => onChange({ ...effect, amount })} />
+        <ResourceSelect disabled={readOnly} label="Resource" value={effect.resourceId} resources={resources} onChange={(resourceId) => onChange({ ...effect, resourceId })} />
+        <NumberInput disabled={readOnly} label="Amount" value={effect.amount} min={1} onChange={(amount) => onChange({ ...effect, amount })} />
       </>
     );
   }
@@ -2309,7 +2443,7 @@ function renderEffectFields(
     return (
       <label>
         Tag
-        <input value={effect.tag} onChange={(event) => onChange({ ...effect, tag: event.target.value })} />
+        <input disabled={readOnly} value={effect.tag} onChange={(event) => onChange({ ...effect, tag: event.target.value })} />
       </label>
     );
   }
@@ -2317,7 +2451,7 @@ function renderEffectFields(
     return (
       <label className="wide-field">
         Message
-        <input value={effect.message} onChange={(event) => onChange({ ...effect, message: event.target.value })} />
+        <input disabled={readOnly} value={effect.message} onChange={(event) => onChange({ ...effect, message: event.target.value })} />
       </label>
     );
   }
@@ -2328,7 +2462,7 @@ function renderEffectFields(
 function createApplyConditionEffectFromTemplate(
   template: CustomConditionTemplate,
   previous: Extract<RuleEffectOperation, { type: 'applyCondition' }>
-): RuleEffectOperation {
+): Extract<RuleEffectOperation, { type: 'applyCondition' }> {
   const normalized = normalizeCustomConditionTemplate(template);
   return {
     ...previous,
@@ -2345,17 +2479,41 @@ function createApplyConditionEffectFromTemplate(
   };
 }
 
+function updateApplyConditionEffectFromTemplateMatch(
+  effect: Extract<RuleEffectOperation, { type: 'applyCondition' }>,
+  customConditions: CustomConditionTemplate[],
+  update: Partial<Extract<RuleEffectOperation, { type: 'applyCondition' }>>
+): Extract<RuleEffectOperation, { type: 'applyCondition' }> {
+  const next = { ...effect, ...update, type: 'applyCondition' as const };
+  const template = customConditions.find((candidate) => candidate.id === next.conditionId);
+  if (!template) {
+    return next;
+  }
+
+  const hydrated = createApplyConditionEffectFromTemplate(template, next);
+  return {
+    ...hydrated,
+    durationType: next.durationType,
+    remainingRounds: next.remainingRounds,
+    stackBehavior: next.stackBehavior,
+    stackCount: next.stackCount,
+    intensity: next.intensity
+  };
+}
+
 function CreatureReferenceSelect({
   value,
+  disabled = false,
   onChange
 }: {
   value: 'self' | 'source' | 'actionTarget';
+  disabled?: boolean;
   onChange: (value: 'self' | 'source' | 'actionTarget') => void;
 }) {
   return (
     <label>
       Target
-      <select value={value} onChange={(event) => onChange(event.target.value as 'self' | 'source' | 'actionTarget')}>
+      <select disabled={disabled} value={value} onChange={(event) => onChange(event.target.value as 'self' | 'source' | 'actionTarget')}>
         <option value="self">self</option>
         <option value="source">source</option>
         <option value="actionTarget">actionTarget</option>
@@ -2368,17 +2526,19 @@ function ResourceSelect({
   label,
   value,
   resources,
+  disabled = false,
   onChange
 }: {
   label: string;
   value: string;
   resources: Resource[];
+  disabled?: boolean;
   onChange: (value: string) => void;
 }) {
   return (
     <label>
       {label}
-      <select value={value} onChange={(event) => onChange(event.target.value)}>
+      <select disabled={disabled} value={value} onChange={(event) => onChange(event.target.value)}>
         <option value="">Select resource</option>
         {resources.map((resource) => (
           <option key={resource.id} value={resource.id}>
@@ -2395,18 +2555,20 @@ function NumberInput({
   value,
   min,
   max,
+  disabled = false,
   onChange
 }: {
   label: string;
   value: number;
   min?: number;
   max?: number;
+  disabled?: boolean;
   onChange: (value: number) => void;
 }) {
   return (
     <label>
       {label}
-      <input max={max} min={min} type="number" value={Number.isFinite(value) ? value : 0} onChange={(event) => onChange(Number(event.target.value))} />
+      <input disabled={disabled} max={max} min={min} type="number" value={Number.isFinite(value) ? value : 0} onChange={(event) => onChange(Number(event.target.value))} />
     </label>
   );
 }
@@ -3142,7 +3304,13 @@ function createBlankEffect(type: EffectOperationType = 'addFlatModifier', update
   if (type === 'addDamageDice') {
     return { dice: '1d6', ...update, type } as RuleEffectOperation;
   }
+  if (type === 'dealDamage') {
+    return { dice: '1d6', damageType: 'fire', ...update, type } as RuleEffectOperation;
+  }
   if (type === 'multiplyDamage') {
+    return { factor: 2, ...update, type } as RuleEffectOperation;
+  }
+  if (type === 'multiplyMovementCost') {
     return { factor: 2, ...update, type } as RuleEffectOperation;
   }
   if (type === 'reduceDamage' || type === 'setDamageMinimum') {
@@ -3164,6 +3332,10 @@ function createBlankEffect(type: EffectOperationType = 'addFlatModifier', update
     return { message: '{source} uses {action}.', ...update, type } as RuleEffectOperation;
   }
   return { type: 'addFlatModifier', amount: 1 };
+}
+
+function getReferenceConditionSelectionId(template: CustomConditionTemplate): string {
+  return `reference:${template.id}`;
 }
 
 function cleanStatModifiers(modifiers: StatModifiers): StatModifiers | undefined {

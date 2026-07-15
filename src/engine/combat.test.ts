@@ -25,7 +25,7 @@ import {
   setFlankingEnabled
 } from './combat';
 import { collectAbilityCheckModifiers, createAppliedCondition, getConditionLabel, hasCondition, resolveRollMode } from './conditions';
-import { createAppliedConditionFromTemplate, normalizeCustomConditionTemplate } from './customConditions';
+import { createAppliedConditionFromTemplate, normalizeCustomConditionTemplate, registerCustomConditionTemplates } from './customConditions';
 import { getAvailableActions, getEffectiveAC, getEffectiveSpeed, getUnavailableActionReason } from './features';
 import { getMovementOption, getReachableMovementSquares } from './movement';
 import { formatBaseEffectiveNumber, getConditionTag, getHpPercent } from './presentation';
@@ -1995,6 +1995,154 @@ describe('combat engine', () => {
     };
     const disadvantaged = performAttackAction(bravoTurn, 'strike', 'a', sequence([0.99, 0.05]));
     expect(disadvantaged.log.some((entry) => entry.message.includes('Ash Bound'))).toBe(true);
+  });
+
+  it('keeps one-round rule-applied custom condition hooks through the next affected turn', () => {
+    const bindingStrike: ActionDefinition = {
+      ...baseCreature.actions[0],
+      id: 'binding-strike',
+      name: 'Binding Strike',
+      rules: [
+        {
+          id: 'bind-on-hit',
+          trigger: 'afterDamage',
+          selectors: [{ type: 'actionTarget' }],
+          effects: [
+            {
+              type: 'applyCondition',
+              conditionId: 'ash-bound',
+              name: 'Ash Bound',
+              durationType: 'rounds',
+              remainingRounds: 1,
+              rules: [
+                {
+                  id: 'ash-attack',
+                  trigger: 'beforeAttackRoll',
+                  selectors: [{ type: 'self' }],
+                  effects: [{ type: 'grantDisadvantage', note: 'Ash Bound' }]
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    };
+    const state = rollInitiative(
+      createCombatState([
+        creature({ id: 'a', name: 'Alpha', actions: [bindingStrike], position: { x: 0, y: 0 } }),
+        creature({ id: 'b', name: 'Bravo', team: 'enemies', hp: 20, maxHp: 20, position: { x: 1, y: 0 } })
+      ]),
+      sequence([0.1, 0.9])
+    );
+
+    const alphaTurn = endTurn(state);
+    const bound = performAttackAction(alphaTurn, 'binding-strike', 'b', sequence([0.5, 0]));
+    const bravoTurn = endTurn(bound);
+
+    expect(hasCondition(findCreatureForTest(bravoTurn, 'b'), 'ash-bound')).toBe(true);
+
+    const disadvantaged = performAttackAction(bravoTurn, 'strike', 'a', sequence([0.99, 0.05]));
+    expect(disadvantaged.log.some((entry) => entry.message.includes('Ash Bound'))).toBe(true);
+  });
+
+  it('keeps non-permanent rule-applied custom condition hooks until target turn expiry', () => {
+    const breakingStrike: ActionDefinition = {
+      ...baseCreature.actions[0],
+      id: 'breaking-strike',
+      name: 'Breaking Strike',
+      rules: [
+        {
+          id: 'break-on-hit',
+          trigger: 'afterDamage',
+          selectors: [{ type: 'actionTarget' }],
+          effects: [
+            {
+              type: 'applyCondition',
+              conditionId: 'break',
+              name: 'Break',
+              durationType: 'untilEndOfTargetTurn',
+              rules: [
+                {
+                  id: 'break-attack',
+                  trigger: 'beforeAttackRoll',
+                  selectors: [{ type: 'self' }],
+                  effects: [{ type: 'grantDisadvantage', note: 'Break' }]
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    };
+    const state = rollInitiative(
+      createCombatState([
+        creature({ id: 'a', name: 'Alpha', actions: [breakingStrike], position: { x: 0, y: 0 } }),
+        creature({ id: 'b', name: 'Bravo', team: 'enemies', hp: 20, maxHp: 20, position: { x: 1, y: 0 } })
+      ]),
+      sequence([0.9, 0.1])
+    );
+
+    const broken = performAttackAction(state, 'breaking-strike', 'b', sequence([0.5, 0]));
+    const bravoTurn = endTurn(broken);
+
+    expect(hasCondition(findCreatureForTest(bravoTurn, 'b'), 'break')).toBe(true);
+
+    const disadvantaged = performAttackAction(bravoTurn, 'strike', 'a', sequence([0.99, 0.05]));
+    expect(disadvantaged.log.some((entry) => entry.message.includes('Break'))).toBe(true);
+  });
+
+  it('uses registered custom condition hooks when an action applies a custom condition by id', () => {
+    try {
+      registerCustomConditionTemplates([
+        normalizeCustomConditionTemplate({
+          id: 'break',
+          name: 'Break',
+          rules: [
+            {
+              id: 'break-attack',
+              trigger: 'beforeAttackRoll',
+              selectors: [{ type: 'self' }],
+              effects: [{ type: 'grantDisadvantage', note: 'Break' }]
+            }
+          ]
+        })
+      ]);
+      const breakingStrike: ActionDefinition = {
+        ...baseCreature.actions[0],
+        id: 'breaking-strike',
+        name: 'Breaking Strike',
+        rules: [
+          {
+            id: 'break-on-hit',
+            trigger: 'afterDamage',
+            selectors: [{ type: 'actionTarget' }],
+            effects: [
+              {
+                type: 'applyCondition',
+                conditionId: 'break',
+                name: 'Break',
+                durationType: 'untilEndOfTargetTurn'
+              }
+            ]
+          }
+        ]
+      };
+      const state = rollInitiative(
+        createCombatState([
+          creature({ id: 'a', name: 'Alpha', actions: [breakingStrike], position: { x: 0, y: 0 } }),
+          creature({ id: 'b', name: 'Bravo', team: 'enemies', hp: 20, maxHp: 20, position: { x: 1, y: 0 } })
+        ]),
+        sequence([0.9, 0.1])
+      );
+
+      const broken = performAttackAction(state, 'breaking-strike', 'b', sequence([0.5, 0]));
+      const bravoTurn = endTurn(broken);
+      const disadvantaged = performAttackAction(bravoTurn, 'strike', 'a', sequence([0.99, 0.05]));
+
+      expect(disadvantaged.log.some((entry) => entry.message.includes('Break'))).toBe(true);
+    } finally {
+      registerCustomConditionTemplates([]);
+    }
   });
 
   it('lets resource-spending rule effects prevent repeated use', () => {
