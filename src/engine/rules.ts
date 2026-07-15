@@ -367,7 +367,7 @@ function getTriggeredRules(state: CombatState, event: RuleEventContext): RuleSou
       const definition = getConditionDefinition(condition.id);
       [...(definition.rules ?? []), ...(condition.rules ?? [])].forEach((rule) => {
         if (rule.trigger === event.trigger && rule.enabled !== false) {
-          entries.push({ owner: creature, rule, label: definition.name });
+          entries.push({ owner: creature, rule, label: condition.name ?? definition.name });
         }
       });
     });

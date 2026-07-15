@@ -2,6 +2,19 @@ import { useEffect, useMemo, useState, type ReactNode } from 'react';
 import { sampleCreatures } from './data/sampleEncounter';
 import { createCombatState } from './engine/combat';
 import { crCalculationTable, estimateCreatureCR, getCrXp } from './engine/cr';
+import {
+  createBlankCustomConditionTemplate,
+  deleteCustomConditionTemplate,
+  duplicateCustomConditionTemplate,
+  filterCustomConditionTemplates,
+  getCustomConditionTemplateWarnings,
+  hasMechanicalCustomConditionEffects,
+  loadCustomConditionLibrary,
+  normalizeCustomConditionTemplate,
+  parseCustomConditionTemplates,
+  saveCustomConditionLibrary,
+  upsertCustomConditionTemplate
+} from './engine/customConditions';
 import { MAX_GRID_SIZE, normalizeGridDefinition } from './engine/grid';
 import { parseCombatStateJson } from './engine/serialization';
 import { getTileHeight, getTilePosition, positionKey, sameTilePosition } from './engine/shapes';
@@ -14,6 +27,7 @@ import type {
   CombatState,
   ConditionDurationType,
   Creature,
+  CustomConditionTemplate,
   FeatureDefinition,
   GridDefinition,
   GridPosition,
@@ -126,6 +140,7 @@ export function EncounterEditor({
   const [actionLibrary, setActionLibrary] = useState<ActionDefinition[]>(loadActionLibrary);
   const [featureLibrary, setFeatureLibrary] = useState<FeatureDefinition[]>(loadFeatureLibrary);
   const [resourceLibrary, setResourceLibrary] = useState<Resource[]>(loadResourceLibrary);
+  const [customConditionLibrary, setCustomConditionLibrary] = useState<CustomConditionTemplate[]>(loadCustomConditionLibrary);
   const [selectedCreatureId, setSelectedCreatureId] = useState<string>(() => creatureLibrary[0]?.id ?? '');
   const [creatureDraft, setCreatureDraft] = useState<Creature>(() => cloneCreature(creatureLibrary[0] ?? createBlankCreature()));
   const [selectedActionId, setSelectedActionId] = useState<string>(() => creatureDraft.actions[0]?.id ?? '');
@@ -134,9 +149,13 @@ export function EncounterEditor({
   const [selectedLibraryActionId, setSelectedLibraryActionId] = useState<string>(() => actionLibrary[0]?.id ?? '');
   const [selectedLibraryFeatureId, setSelectedLibraryFeatureId] = useState<string>(() => featureLibrary[0]?.id ?? '');
   const [selectedLibraryResourceId, setSelectedLibraryResourceId] = useState<string>(() => resourceLibrary[0]?.id ?? '');
+  const [selectedCustomConditionId, setSelectedCustomConditionId] = useState<string>(() => customConditionLibrary[0]?.id ?? '');
   const [partLibraryMessage, setPartLibraryMessage] = useState<string | undefined>();
   const [creatureJson, setCreatureJson] = useState('');
   const [creatureJsonMessage, setCreatureJsonMessage] = useState<string | undefined>();
+  const [customConditionJson, setCustomConditionJson] = useState('');
+  const [customConditionMessage, setCustomConditionMessage] = useState<string | undefined>();
+  const [customConditionSearch, setCustomConditionSearch] = useState('');
   const [encounterJson, setEncounterJson] = useState('');
   const [encounterJsonMessage, setEncounterJsonMessage] = useState<string | undefined>();
   const [editorMode, setEditorMode] = useState<EditorMode>('creatures');
@@ -161,6 +180,12 @@ export function EncounterEditor({
   const selectedLibraryAction = actionLibrary.find((action) => action.id === selectedLibraryActionId) ?? actionLibrary[0];
   const selectedLibraryFeature = featureLibrary.find((feature) => feature.id === selectedLibraryFeatureId) ?? featureLibrary[0];
   const selectedLibraryResource = resourceLibrary.find((resource) => resource.id === selectedLibraryResourceId) ?? resourceLibrary[0];
+  const selectedCustomCondition = customConditionLibrary.find((template) => template.id === selectedCustomConditionId) ?? customConditionLibrary[0];
+  const filteredCustomConditions = useMemo(
+    () => filterCustomConditionTemplates(customConditionLibrary, customConditionSearch),
+    [customConditionLibrary, customConditionSearch]
+  );
+  const selectedCustomConditionWarnings = selectedCustomCondition ? getCustomConditionTemplateWarnings(selectedCustomCondition) : [];
   const hydratedBuilder = useMemo(
     () => hydrateEncounterCreatures(builderInstances, creatureLibrary),
     [builderInstances, creatureLibrary]
@@ -206,6 +231,10 @@ export function EncounterEditor({
   }, [resourceLibrary]);
 
   useEffect(() => {
+    saveCustomConditionLibrary(customConditionLibrary);
+  }, [customConditionLibrary]);
+
+  useEffect(() => {
     const selected = creatureLibrary.find((creature) => creature.id === selectedCreatureId);
     if (!selected) {
       return;
@@ -241,6 +270,12 @@ export function EncounterEditor({
       setSelectedLibraryResourceId(resourceLibrary[0]?.id ?? '');
     }
   }, [resourceLibrary, selectedLibraryResourceId]);
+
+  useEffect(() => {
+    if (!customConditionLibrary.some((template) => template.id === selectedCustomConditionId)) {
+      setSelectedCustomConditionId(customConditionLibrary[0]?.id ?? '');
+    }
+  }, [customConditionLibrary, selectedCustomConditionId]);
 
   const occupiedKeys = useMemo(() => new Set(builderCreatures.map((creature) => positionKey(creature.position))), [builderCreatures]);
   const blockedKeys = useMemo(() => new Set(builderGrid.blocked.map(positionKey)), [builderGrid.blocked]);
@@ -474,6 +509,82 @@ export function EncounterEditor({
 
     setResourceLibrary((current) => current.filter((resource) => resource.id !== selectedLibraryResource.id));
     setPartLibraryMessage(`${selectedLibraryResource.name} removed from the resource library.`);
+  }
+
+  function addCustomConditionTemplate() {
+    const template = createBlankCustomConditionTemplate();
+    setCustomConditionLibrary((current) => [template, ...current]);
+    setSelectedCustomConditionId(template.id);
+    setCustomConditionMessage('Custom condition created.');
+  }
+
+  function duplicateSelectedCustomCondition() {
+    if (!selectedCustomCondition) {
+      return;
+    }
+    const duplicate = duplicateCustomConditionTemplate(selectedCustomCondition);
+    setCustomConditionLibrary((current) => [duplicate, ...current]);
+    setSelectedCustomConditionId(duplicate.id);
+    setCustomConditionMessage(`${selectedCustomCondition.name} duplicated.`);
+  }
+
+  function deleteSelectedCustomCondition() {
+    if (!selectedCustomCondition) {
+      return;
+    }
+    setCustomConditionLibrary((current) => deleteCustomConditionTemplate(current, selectedCustomCondition.id));
+    setCustomConditionMessage(`${selectedCustomCondition.name} deleted.`);
+  }
+
+  function updateSelectedCustomCondition(update: Partial<CustomConditionTemplate>) {
+    if (!selectedCustomCondition) {
+      return;
+    }
+
+    const previousId = selectedCustomCondition.id;
+    const next = normalizeCustomConditionTemplate({ ...selectedCustomCondition, ...update });
+    setCustomConditionLibrary((current) =>
+      current.map((template) => (template.id === previousId ? next : template))
+    );
+    if (next.id !== previousId || selectedCustomConditionId !== next.id) {
+      setSelectedCustomConditionId(next.id);
+    }
+  }
+
+  function saveSelectedCustomCondition() {
+    if (!selectedCustomCondition) {
+      return;
+    }
+    const normalized = normalizeCustomConditionTemplate(selectedCustomCondition);
+    setCustomConditionLibrary((current) => upsertCustomConditionTemplate(current, normalized));
+    setSelectedCustomConditionId(normalized.id);
+    setCustomConditionMessage(`${normalized.name} saved to the custom condition library.`);
+  }
+
+  function exportSelectedCustomCondition() {
+    if (!selectedCustomCondition) {
+      return;
+    }
+    setCustomConditionJson(JSON.stringify(selectedCustomCondition, null, 2));
+    setCustomConditionMessage('Selected custom condition exported below.');
+  }
+
+  function exportCustomConditionLibrary() {
+    setCustomConditionJson(JSON.stringify({ customConditions: customConditionLibrary }, null, 2));
+    setCustomConditionMessage('Custom condition library exported below.');
+  }
+
+  function importCustomConditionJson() {
+    const parsed = parseCustomConditionTemplates(customConditionJson);
+    if (!parsed.ok) {
+      setCustomConditionMessage(parsed.error);
+      return;
+    }
+    setCustomConditionLibrary((current) =>
+      parsed.templates.reduce((next, template) => upsertCustomConditionTemplate(next, template), current)
+    );
+    setSelectedCustomConditionId(parsed.templates[0]?.id ?? selectedCustomConditionId);
+    setCustomConditionMessage(`${parsed.templates.length} custom condition${parsed.templates.length === 1 ? '' : 's'} imported.`);
   }
 
   function addFeature() {
@@ -1071,6 +1182,138 @@ export function EncounterEditor({
                     </tbody>
                   </table>
                 </div>
+              </details>
+            </details>
+
+            <details className="editor-section editor-subsection">
+              <summary>Custom Conditions</summary>
+              <p className="editor-muted">Reusable homebrew condition templates for combat. Mechanical hooks use the same trigger/effect editor as actions and features.</p>
+              <div className="editor-button-row">
+                <button onClick={addCustomConditionTemplate}>New Condition</button>
+                <button onClick={duplicateSelectedCustomCondition} disabled={!selectedCustomCondition}>
+                  Duplicate
+                </button>
+                <button onClick={saveSelectedCustomCondition} disabled={!selectedCustomCondition}>
+                  Save Condition
+                </button>
+                <button onClick={deleteSelectedCustomCondition} disabled={!selectedCustomCondition}>
+                  Delete
+                </button>
+              </div>
+              <label className="editor-search">
+                Search custom conditions
+                <input
+                  value={customConditionSearch}
+                  placeholder="Name, tag, rules text, or hook"
+                  onChange={(event) => setCustomConditionSearch(event.target.value)}
+                />
+              </label>
+              <div className="condition-template-layout">
+                <div className="library-list compact-list">
+                  {filteredCustomConditions.map((template) => (
+                    <button
+                      className={template.id === selectedCustomCondition?.id ? 'selected-action' : ''}
+                      key={template.id}
+                      onClick={() => setSelectedCustomConditionId(template.id)}
+                    >
+                      <strong>{template.name}</strong>
+                      <span>{template.tags.join(', ') || 'no tags'}</span>
+                      <small>{hasMechanicalCustomConditionEffects(template) ? `${template.rules.length} hook(s)` : 'rules text only'}</small>
+                    </button>
+                  ))}
+                  {filteredCustomConditions.length === 0 && <span className="empty-list">No custom conditions match that search.</span>}
+                </div>
+                {selectedCustomCondition ? (
+                  <div className="condition-template-form">
+                    <div className="form-grid">
+                      <label>
+                        Name
+                        <input value={selectedCustomCondition.name} onChange={(event) => updateSelectedCustomCondition({ name: event.target.value })} />
+                      </label>
+                      <label>
+                        ID
+                        <input value={selectedCustomCondition.id} onChange={(event) => updateSelectedCustomCondition({ id: toId(event.target.value) })} />
+                      </label>
+                      <label>
+                        Default Duration
+                        <select
+                          value={selectedCustomCondition.defaultDurationType ?? 'permanentUntilRemoved'}
+                          onChange={(event) => updateSelectedCustomCondition({ defaultDurationType: event.target.value as ConditionDurationType })}
+                        >
+                          <option value="untilStartOfSourceTurn">untilStartOfSourceTurn</option>
+                          <option value="untilEndOfSourceTurn">untilEndOfSourceTurn</option>
+                          <option value="untilStartOfTargetTurn">untilStartOfTargetTurn</option>
+                          <option value="untilEndOfTargetTurn">untilEndOfTargetTurn</option>
+                          <option value="rounds">rounds</option>
+                          <option value="permanentUntilRemoved">permanentUntilRemoved</option>
+                        </select>
+                      </label>
+                      {selectedCustomCondition.defaultDurationType === 'rounds' && (
+                        <NumberInput
+                          label="Default Rounds"
+                          value={selectedCustomCondition.defaultRemainingRounds ?? 1}
+                          min={1}
+                          onChange={(value) => updateSelectedCustomCondition({ defaultRemainingRounds: value })}
+                        />
+                      )}
+                      <label>
+                        Stack
+                        <select
+                          value={selectedCustomCondition.stackBehavior ?? 'refresh'}
+                          onChange={(event) => updateSelectedCustomCondition({ stackBehavior: event.target.value as StackBehavior })}
+                        >
+                          {stackBehaviors.map((behavior) => (
+                            <option key={behavior} value={behavior}>
+                              {behavior}
+                            </option>
+                          ))}
+                        </select>
+                      </label>
+                      <label>
+                        Tags
+                        <input
+                          value={selectedCustomCondition.tags.join(', ')}
+                          placeholder="homebrew, curse, aura"
+                          onChange={(event) => updateSelectedCustomCondition({ tags: parseCsv(event.target.value) })}
+                        />
+                      </label>
+                      <label className="wide-field">
+                        Description
+                        <textarea value={selectedCustomCondition.description} onChange={(event) => updateSelectedCustomCondition({ description: event.target.value })} />
+                      </label>
+                      <label className="wide-field">
+                        Notes / Rules Text
+                        <textarea value={selectedCustomCondition.notes ?? ''} onChange={(event) => updateSelectedCustomCondition({ notes: event.target.value })} />
+                      </label>
+                    </div>
+                    <div className="condition-template-status">
+                      <strong>{hasMechanicalCustomConditionEffects(selectedCustomCondition) ? 'Mechanical hooks configured' : 'Rules text only'}</strong>
+                      {selectedCustomConditionWarnings.map((warning) => (
+                        <span key={warning}>{warning}</span>
+                      ))}
+                    </div>
+                    <RuleListEditor
+                      title="Mechanical Hooks"
+                      rules={selectedCustomCondition.rules}
+                      resources={creatureDraft.resources ?? []}
+                      onChange={(rules) => updateSelectedCustomCondition({ rules })}
+                    />
+                  </div>
+                ) : (
+                  <span className="empty-list">Create a custom condition to begin.</span>
+                )}
+              </div>
+              <details className="editor-subsection">
+                <summary>Custom Condition JSON</summary>
+                <div className="editor-button-row">
+                  <button onClick={exportSelectedCustomCondition} disabled={!selectedCustomCondition}>
+                    Export Selected
+                  </button>
+                  <button onClick={exportCustomConditionLibrary}>Export Library</button>
+                  <button onClick={importCustomConditionJson}>Import JSON</button>
+                </div>
+                {customConditionMessage && <p className="editor-message">{customConditionMessage}</p>}
+                <textarea value={customConditionJson} onChange={(event) => setCustomConditionJson(event.target.value)} spellCheck={false} />
               </details>
             </details>
 

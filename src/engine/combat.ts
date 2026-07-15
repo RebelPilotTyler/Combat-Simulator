@@ -13,7 +13,8 @@ import type {
   Ability,
   Skill,
   RollMode,
-  MultiattackStep
+  MultiattackStep,
+  CombatRulesSettings
 } from './types';
 import { getShapeSquares, getTilePosition, isBlocked, isInBounds, samePosition } from './shapes';
 import { getMovementOption, getMovementOptionForPath, isOccupied } from './movement';
@@ -114,6 +115,10 @@ export interface AttackDebugStats {
   targetAc: number;
 }
 
+export const DEFAULT_RULES_SETTINGS: CombatRulesSettings = {
+  flanking: { enabled: false, benefit: 'advantage' }
+};
+
 export function createCombatState(
   creatures: Creature[],
   width = 10,
@@ -133,9 +138,23 @@ export function createCombatState(
     turnState: createTurnState(undefined),
     turnResources: Object.fromEntries(normalizedCreatures.map((creature) => [creature.id, createTurnState(creature)])),
     pendingReactions: [],
+    rulesSettings: cloneJson(DEFAULT_RULES_SETTINGS),
     ruleMemory: {},
     log: []
   };
+}
+
+export function setFlankingEnabled(state: CombatState, enabled: boolean): CombatState {
+  const next = normalizeState(cloneState(state));
+  next.rulesSettings = {
+    ...next.rulesSettings,
+    flanking: {
+      enabled,
+      benefit: next.rulesSettings?.flanking?.benefit ?? 'advantage'
+    }
+  };
+  addLog(next, 'system', `Flanking ${enabled ? 'enabled' : 'disabled'}.`);
+  return next;
 }
 
 export function rollInitiative(state: CombatState, random: RandomSource = Math.random): CombatState {
@@ -530,9 +549,7 @@ export function resolvePendingReaction(
 
   next.activeCreatureId = reactor.id;
   next.turnState = getResource(next, reactor.id);
-  target.position = pending.from;
-  const resolved = performAttackAction(next, action.id, target.id, random);
-  findCreature(resolved, target.id).position = pending.to;
+  const resolved = performAttackAction(next, action.id, target.id, random, {}, { targetPositionOverride: pending.from });
   findCreature(resolved, reactor.id).actions.find((candidate) => candidate.id === action.id)!.actionCost = originalCost;
   resolved.activeCreatureId = originalActiveId;
   syncActiveTurnState(resolved);
@@ -662,7 +679,8 @@ export function performAttackAction(
   actionId: string,
   targetId: string,
   random: RandomSource = Math.random,
-  hooks: CombatHooks = {}
+  hooks: CombatHooks = {},
+  options: { targetPositionOverride?: GridPosition } = {}
 ): CombatState {
   const next = ensureTurnState(normalizeState(cloneState(state)));
   const attacker = getActiveCreature(next);
@@ -674,12 +692,13 @@ export function performAttackAction(
     throw new Error(`${action.name} is not an attack action.`);
   }
 
-  if (!isInActionRange(action, attacker.position, target.position)) {
+  const targetPosition = options.targetPositionOverride ?? target.position;
+  if (!isInActionRange(action, attacker.position, targetPosition)) {
     addLog(next, 'system', `${target.name} is out of range for ${action.name}.`);
     return next;
   }
 
-  if ((actionKind === 'rangedAttack' || action.tags.includes('ranged')) && !hasLineOfSight(next, attacker.position, target.position)) {
+  if ((actionKind === 'rangedAttack' || action.tags.includes('ranged')) && !hasLineOfSight(next, attacker.position, targetPosition)) {
     addLog(next, 'system', `${attacker.name} does not have line of sight to ${target.name}.`);
     return next;
   }
@@ -708,7 +727,7 @@ export function performAttackAction(
   }
 
   runActionUsedRules(next, attacker, action, [target]);
-  resolveAttackAction(next, attacker.id, action, target.id, random, hooks);
+  resolveAttackAction(next, attacker.id, action, target.id, random, hooks, { targetPositionOverride: options.targetPositionOverride });
   return next;
 }
 
@@ -803,7 +822,7 @@ function resolveAttackAction(
   targetId: string,
   random: RandomSource,
   hooks: CombatHooks,
-  options: { consumeHitResources?: boolean } = {}
+  options: { consumeHitResources?: boolean; targetPositionOverride?: GridPosition } = {}
 ): void {
   const attacker = findCreature(next, attackerId);
   const target = findCreature(next, targetId);
@@ -814,12 +833,13 @@ function resolveAttackAction(
     return;
   }
 
-  if (!isInActionRange(action, attacker.position, target.position)) {
+  const targetPosition = options.targetPositionOverride ?? target.position;
+  if (!isInActionRange(action, attacker.position, targetPosition)) {
     addLog(next, 'system', `${target.name} is out of range for ${action.name}.`);
     return;
   }
 
-  if ((actionKind === 'rangedAttack' || action.tags.includes('ranged')) && !hasLineOfSight(next, attacker.position, target.position)) {
+  if ((actionKind === 'rangedAttack' || action.tags.includes('ranged')) && !hasLineOfSight(next, attacker.position, targetPosition)) {
     addLog(next, 'system', `${attacker.name} does not have line of sight to ${target.name}.`);
     return;
   }
@@ -830,9 +850,15 @@ function resolveAttackAction(
     attacker,
     target,
     action,
-    getDistanceFeet(attacker.position, target.position)
+    getDistanceFeet(attacker.position, targetPosition)
   );
   attackModifier = mergeRollModifiers(attackModifier, collectBeforeAttackRollRuleModifiers(next, { attacker, target, action }));
+  if (isFlankingAttack(next, attacker, target, action)) {
+    attackModifier = mergeRollModifiers(attackModifier, {
+      advantage: true,
+      notes: ['flanking']
+    });
+  }
   if ((actionKind === 'rangedAttack' || action.tags.includes('ranged')) && getHostileCreaturesWithinReach(next, attacker).length > 0) {
     attackModifier = mergeRollModifiers(attackModifier, {
       disadvantage: true,
@@ -953,7 +979,8 @@ export function getAttackDebugStats(
       action,
       getDistanceFeet(attacker.position, target.position)
     ),
-    collectBeforeAttackRollRuleModifiers(normalized, { attacker, target, action })
+    collectBeforeAttackRollRuleModifiers(normalized, { attacker, target, action }),
+    isFlankingAttack(normalized, attacker, target, action) ? { advantage: true, notes: ['flanking'] } : undefined
   );
   const rollMode = resolveRollMode(attackModifier);
   const attackBonus = getEffectiveAttackBonus(action, attacker, normalized) + (attackModifier.flatModifier ?? 0);
@@ -1017,6 +1044,51 @@ export function getActionShapeSquares(
   return getShapeSquares(action.shape ?? { type: 'single' }, origin, state.grid, direction);
 }
 
+function isFlankingAttack(state: CombatState, attacker: Creature, target: Creature, action: ActionDefinition): boolean {
+  if (!state.rulesSettings?.flanking?.enabled) {
+    return false;
+  }
+
+  const actionKind = getRulesKind(action);
+  if (actionKind !== 'meleeAttack' && !action.tags.includes('melee')) {
+    return false;
+  }
+
+  if (!isInActionRange(action, attacker.position, target.position) || isBlocked(attacker.position, state.grid)) {
+    return false;
+  }
+
+  const attackerVector = {
+    x: Math.sign(attacker.position.x - target.position.x),
+    y: Math.sign(attacker.position.y - target.position.y)
+  };
+  if (attackerVector.x === 0 && attackerVector.y === 0) {
+    return false;
+  }
+
+  return state.creatures.some((ally) => {
+    if (
+      ally.id === attacker.id ||
+      ally.id === target.id ||
+      ally.team !== attacker.team ||
+      isDefeated(ally) ||
+      isBlocked(ally.position, state.grid)
+    ) {
+      return false;
+    }
+
+    const allyVector = {
+      x: Math.sign(ally.position.x - target.position.x),
+      y: Math.sign(ally.position.y - target.position.y)
+    };
+    return (
+      allyVector.x === -attackerVector.x &&
+      allyVector.y === -attackerVector.y &&
+      getHostileCreaturesWithinReach(state, ally).some((hostile) => hostile.id === target.id)
+    );
+  });
+}
+
 export function getActiveCreature(state: CombatState): Creature {
   if (!state.activeCreatureId) {
     throw new Error('No active creature. Roll initiative first.');
@@ -1035,11 +1107,16 @@ export function applyCondition(
   conditionId: string,
   options: {
     sourceCreatureId?: string;
+    name?: string;
+    description?: string;
+    tags?: string[];
     durationType?: ConditionDurationType;
     remainingRounds?: number;
     stackBehavior?: StackBehavior;
     stackCount?: number;
     intensity?: number;
+    metadata?: Record<string, string | number | boolean | undefined>;
+    rules?: ActionDefinition['rules'];
   } = {}
 ): CombatState {
   const next = normalizeState(cloneState(state));
@@ -1053,8 +1130,9 @@ export function applyCondition(
 export function removeCondition(state: CombatState, targetId: string, conditionId: string): CombatState {
   const next = normalizeState(cloneState(state));
   const target = findCreature(next, targetId);
+  const existing = target.conditions.find((condition) => condition.id === conditionId);
   if (removeConditionFromCreature(target, conditionId)) {
-    addLog(next, 'condition', `${getConditionDefinition(conditionId).name} removed from ${target.name}.`);
+    addLog(next, 'condition', `${existing?.name ?? getConditionDefinition(conditionId).name} removed from ${target.name}.`);
   }
 
   return next;
@@ -1596,6 +1674,7 @@ function normalizeState(state: CombatState): CombatState {
     };
   });
   state.pendingReactions = state.pendingReactions ?? [];
+  state.rulesSettings = normalizeRulesSettings(state.rulesSettings);
   state.ruleMemory = state.ruleMemory ?? {};
   if (!state.turnState) {
     state.turnState = createTurnState(state.activeCreatureId ? findCreature(state, state.activeCreatureId) : undefined, state);
@@ -1613,6 +1692,17 @@ function normalizeCreatures(creatures: Creature[], grid?: CombatState['grid']): 
     skillBonuses: creature.skillBonuses ?? {},
     actions: creature.actions.map(normalizeActionDefinition)
   }));
+}
+
+function normalizeRulesSettings(settings: CombatRulesSettings | undefined): CombatRulesSettings {
+  return {
+    ...cloneJson(DEFAULT_RULES_SETTINGS),
+    ...(settings ?? {}),
+    flanking: {
+      ...DEFAULT_RULES_SETTINGS.flanking!,
+      ...(settings?.flanking ?? {})
+    }
+  };
 }
 
 function normalizeActionDefinition(action: ActionDefinition): ActionDefinition {
@@ -1668,4 +1758,8 @@ function addLog(state: CombatState, type: CombatLogEntry['type'], message: strin
 
 function cloneState(state: CombatState): CombatState {
   return JSON.parse(JSON.stringify(state)) as CombatState;
+}
+
+function cloneJson<T>(value: T): T {
+  return JSON.parse(JSON.stringify(value)) as T;
 }

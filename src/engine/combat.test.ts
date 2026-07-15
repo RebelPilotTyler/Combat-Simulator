@@ -20,9 +20,11 @@ import {
   resetAllResources,
   resolvePendingReaction,
   removeCondition,
-  rollInitiative
+  rollInitiative,
+  setFlankingEnabled
 } from './combat';
-import { collectAbilityCheckModifiers, createAppliedCondition, hasCondition, resolveRollMode } from './conditions';
+import { collectAbilityCheckModifiers, createAppliedCondition, getConditionLabel, hasCondition, resolveRollMode } from './conditions';
+import { createAppliedConditionFromTemplate, normalizeCustomConditionTemplate } from './customConditions';
 import { getAvailableActions, getEffectiveAC, getEffectiveSpeed, getUnavailableActionReason } from './features';
 import { getMovementOption, getReachableMovementSquares } from './movement';
 import { formatBaseEffectiveNumber, getConditionTag, getHpPercent } from './presentation';
@@ -756,6 +758,44 @@ describe('combat engine', () => {
     });
   });
 
+  it('does not trigger opportunity attacks while moving through spaces that remain within reach', () => {
+    const state = rollInitiative(
+      createCombatState([
+        creature({ id: 'a', name: 'Alpha', position: { x: 0, y: 1 } }),
+        creature({ id: 'b', name: 'Bravo', team: 'enemies', position: { x: 1, y: 1 } })
+      ]),
+      sequence([0.9, 0.1])
+    );
+    const moved = moveActiveCreature(state, [
+      { x: 0, y: 1 },
+      { x: 0, y: 0 },
+      { x: 1, y: 0 },
+      { x: 2, y: 0 }
+    ]);
+
+    expect(moved.creatures.find((candidate) => candidate.id === 'a')?.position).toEqual({ x: 2, y: 0, z: 0 });
+    expect(moved.pendingReactions).toHaveLength(0);
+  });
+
+  it('resolves opportunity attacks without repositioning the moving target', () => {
+    const moved = moveActiveCreature(
+      rollInitiative(
+        createCombatState([
+          creature({ id: 'a', name: 'Alpha', hp: 20, maxHp: 20, position: { x: 1, y: 0 } }),
+          creature({ id: 'b', name: 'Bravo', team: 'enemies', position: { x: 0, y: 0 } })
+        ]),
+        sequence([0.9, 0.1])
+      ),
+      { x: 3, y: 0 }
+    );
+
+    const resolved = resolvePendingReaction(moved, moved.pendingReactions[0].id, true, sequence([0.9, 0.49]));
+
+    expect(resolved.creatures.find((candidate) => candidate.id === 'a')?.position).toEqual({ x: 3, y: 0, z: 0 });
+    expect(resolved.creatures.find((candidate) => candidate.id === 'a')?.hp).toBe(15);
+    expect(resolved.log.some((entry) => entry.type === 'attack' && entry.message.includes('Strike'))).toBe(true);
+  });
+
   it('Disengage and incapacitated enemies prevent opportunity attacks', () => {
     const disengaged = applyCondition(
       rollInitiative(
@@ -798,6 +838,142 @@ describe('combat engine', () => {
     expect(used.turnResources.b.reactionUsed).toBe(true);
     const candidates = getOpportunityAttackCandidates(used, used.creatures[0], { x: 1, y: 0 }, { x: 3, y: 0 });
     expect(candidates).toHaveLength(0);
+  });
+
+  it('forced movement from shove does not create opportunity attack prompts', () => {
+    const state = rollInitiative(
+      createCombatState([
+        creature({ id: 'a', name: 'Alpha', position: { x: 0, y: 0 }, skillBonuses: { athletics: 5 } }),
+        creature({ id: 'b', name: 'Bravo', team: 'enemies', position: { x: 1, y: 0 }, skillBonuses: { acrobatics: 1 } }),
+        creature({ id: 'c', name: 'Charlie', team: 'players', position: { x: 1, y: 1 } })
+      ]),
+      sequence([0.9, 0.1, 0.2])
+    );
+
+    const shoved = performShoveAction(state, 'b', 'push', sequence([0.9, 0.1]));
+
+    expect(shoved.creatures.find((candidate) => candidate.id === 'b')?.position).toEqual({ x: 2, y: 0, z: 0 });
+    expect(shoved.pendingReactions).toHaveLength(0);
+  });
+
+  it('custom conditions keep metadata, tags, duration, and rule effects through serialization', () => {
+    const state = applyCondition(createCombatState([creature({ id: 'a', name: 'Alpha' }), creature({ id: 'b', name: 'Bravo', position: { x: 1, y: 0 } })]), 'a', 'moon-sick', {
+      name: 'Moon Sick',
+      description: 'Homebrew lunar fever.',
+      tags: ['moon', 'curse'],
+      durationType: 'rounds',
+      remainingRounds: 2,
+      rules: [
+        {
+          id: 'moon-sick-attacks',
+          name: 'Moon Sick Attacks',
+          trigger: 'beforeAttackRoll',
+          selectors: [{ type: 'self' }],
+          effects: [{ type: 'grantDisadvantage', note: 'Moon Sick' }]
+        }
+      ]
+    });
+    const parsed = parseCombatStateJson(serializeCombatState(state));
+    if (!parsed.state) {
+      throw new Error('Expected parsed combat state');
+    }
+    const condition = parsed.state.creatures[0].conditions[0];
+
+    expect(getConditionLabel(condition)).toBe('Moon Sick (2 rounds)');
+    expect(getConditionTag(condition)).toBe('MOO');
+    expect(condition.description).toBe('Homebrew lunar fever.');
+    expect(condition.rules).toHaveLength(1);
+
+    const withTurn = rollInitiative(parsed.state, sequence([0.9, 0.1]));
+    const result = performAttackAction(withTurn, 'strike', 'b', sequence([0.99, 0, 0.99]));
+    expect(result.log.some((entry) => entry.message.includes('Moon Sick'))).toBe(true);
+  });
+
+  it('applies and removes a template-created custom condition in combat', () => {
+    const template = normalizeCustomConditionTemplate({
+      id: 'ash-bound',
+      name: 'Ash Bound',
+      description: 'Ash clings to the target.',
+      defaultDurationType: 'rounds',
+      defaultRemainingRounds: 3,
+      tags: ['homebrew', 'terrain'],
+      notes: 'Manual reminder: speed may be restricted by terrain.'
+    });
+    const appliedCondition = createAppliedConditionFromTemplate(template, 'a');
+    const state = createCombatState([creature({ id: 'a', name: 'Alpha' }), creature({ id: 'b', name: 'Bravo' })]);
+
+    const applied = applyCondition(state, 'b', appliedCondition.id, {
+      sourceCreatureId: appliedCondition.sourceCreatureId,
+      name: appliedCondition.name,
+      description: appliedCondition.description,
+      tags: appliedCondition.tags,
+      durationType: appliedCondition.durationType,
+      remainingRounds: appliedCondition.remainingRounds,
+      stackBehavior: appliedCondition.stackBehavior,
+      metadata: appliedCondition.metadata,
+      rules: appliedCondition.rules
+    });
+
+    const target = applied.creatures.find((candidate) => candidate.id === 'b')!;
+    expect(getConditionLabel(target.conditions[0])).toBe('Ash Bound (3 rounds)');
+    expect(target.conditions[0].metadata?.notes).toContain('speed may be restricted');
+
+    const removed = removeCondition(applied, 'b', 'ash-bound');
+    expect(hasCondition(removed.creatures.find((candidate) => candidate.id === 'b')!, 'ash-bound')).toBe(false);
+  });
+
+  it('flanking is optional and grants melee advantage from opposite sides', () => {
+    const base = rollInitiative(
+      createCombatState([
+        creature({ id: 'a', name: 'Alpha', team: 'players', position: { x: 0, y: 1 } }),
+        creature({ id: 'c', name: 'Charlie', team: 'players', position: { x: 2, y: 1 } }),
+        creature({ id: 'b', name: 'Bravo', team: 'enemies', hp: 10, ac: 18, position: { x: 1, y: 1 } })
+      ]),
+      sequence([0.9, 0.1, 0.2])
+    );
+
+    const inactive = performAttackAction(base, 'strike', 'b', sequence([0, 0.49]));
+    expect(inactive.creatures.find((candidate) => candidate.id === 'b')?.hp).toBe(10);
+    expect(inactive.log.some((entry) => entry.message.includes('flanking'))).toBe(false);
+
+    const active = performAttackAction(setFlankingEnabled(base, true), 'strike', 'b', sequence([0, 0.8, 0.49]));
+    expect(active.creatures.find((candidate) => candidate.id === 'b')?.hp).toBe(5);
+    expect(active.log.some((entry) => entry.message.includes('flanking'))).toBe(true);
+  });
+
+  it('flanking requires allied opposite positioning and ignores blocked flankers', () => {
+    const wrongTeam = setFlankingEnabled(
+      rollInitiative(
+        createCombatState([
+          creature({ id: 'a', name: 'Alpha', team: 'players', position: { x: 0, y: 1 } }),
+          creature({ id: 'c', name: 'Charlie', team: 'enemies', position: { x: 2, y: 1 } }),
+          creature({ id: 'b', name: 'Bravo', team: 'enemies', hp: 10, ac: 18, position: { x: 1, y: 1 } })
+        ]),
+        sequence([0.9, 0.1, 0.2])
+      ),
+      true
+    );
+    const sameTeamResult = performAttackAction(wrongTeam, 'strike', 'b', sequence([0, 0.8, 0.49]));
+    expect(sameTeamResult.creatures.find((candidate) => candidate.id === 'b')?.hp).toBe(10);
+
+    const blocked = setFlankingEnabled(
+      rollInitiative(
+        createCombatState(
+          [
+            creature({ id: 'a', name: 'Alpha', team: 'players', position: { x: 0, y: 1 } }),
+            creature({ id: 'c', name: 'Charlie', team: 'players', position: { x: 2, y: 1 } }),
+            creature({ id: 'b', name: 'Bravo', team: 'enemies', hp: 10, ac: 18, position: { x: 1, y: 1 } })
+          ],
+          4,
+          3,
+          [{ x: 2, y: 1 }]
+        ),
+        sequence([0.9, 0.1, 0.2])
+      ),
+      true
+    );
+    const blockedResult = performAttackAction(blocked, 'strike', 'b', sequence([0, 0.8, 0.49]));
+    expect(blockedResult.creatures.find((candidate) => candidate.id === 'b')?.hp).toBe(10);
   });
 
   it('ranged attacks have disadvantage when threatened but not by unconscious enemies', () => {

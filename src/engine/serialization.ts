@@ -1,4 +1,5 @@
 import { normalizeConditions } from './conditions';
+import { DEFAULT_RULES_SETTINGS } from './combat';
 import { clampGridPosition, normalizeGridDefinition } from './grid';
 import { getTilePosition } from './shapes';
 import type { CombatState, Creature } from './types';
@@ -99,6 +100,14 @@ export function normalizeImportedCombatState(state: CombatState): CombatState {
     },
     turnResources: state.turnResources ?? {},
     pendingReactions: state.pendingReactions ?? [],
+    rulesSettings: {
+      ...DEFAULT_RULES_SETTINGS,
+      ...(state.rulesSettings ?? {}),
+      flanking: {
+        ...DEFAULT_RULES_SETTINGS.flanking!,
+        ...(state.rulesSettings?.flanking ?? {})
+      }
+    },
     ruleMemory: state.ruleMemory ?? {},
     log: state.log ?? []
   };

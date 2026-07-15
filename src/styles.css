@@ -1068,6 +1068,12 @@ summary:focus-visible {
   gap: 5px;
 }
 
+.condition-template-hint {
+  color: var(--text-muted);
+  font-size: 12px;
+  margin: 0;
+}
+
 .log-panel {
   grid-column: 1;
   grid-row: 2;
@@ -1262,7 +1268,8 @@ summary:focus-visible {
 
 .action-editor-layout,
 .resource-editor-layout,
-.feature-editor-layout {
+.feature-editor-layout,
+.condition-template-layout {
   display: grid;
   gap: 8px;
   grid-template-columns: 180px minmax(0, 1fr);
@@ -1273,9 +1280,24 @@ summary:focus-visible {
 }
 
 .action-form,
-.feature-form {
+.feature-form,
+.condition-template-form {
   display: grid;
   gap: 8px;
+}
+
+.condition-template-status {
+  background: var(--warning-bg);
+  border: 1px solid var(--warning-border);
+  border-radius: var(--radius-sm);
+  display: grid;
+  gap: 3px;
+  padding: 6px;
+}
+
+.condition-template-status span {
+  color: var(--text-muted);
+  font-size: 12px;
 }
 
 .editor-subsection {
@@ -1764,7 +1786,8 @@ summary:focus-visible {
   .editor-panel-header,
   .action-editor-layout,
   .resource-editor-layout,
-  .feature-editor-layout {
+  .feature-editor-layout,
+  .condition-template-layout {
     grid-template-columns: 1fr;
   }
 }

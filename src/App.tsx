@@ -40,12 +40,18 @@ import {
   removeCondition,
   resolvePendingReaction,
   rollInitiative,
+  setFlankingEnabled,
   type BasicActionName,
   type HelpMode,
   type SearchMode,
   type ShoveOutcome
 } from './engine/combat';
 import { ALL_CONDITION_IDS, getConditionDefinition, getConditionLabel } from './engine/conditions';
+import {
+  createAppliedConditionFromTemplate,
+  hasMechanicalCustomConditionEffects,
+  loadCustomConditionLibrary
+} from './engine/customConditions';
 import {
   getAvailableActions,
   getEffectiveAC,
@@ -70,7 +76,7 @@ import {
   sameTilePosition
 } from './engine/shapes';
 import { getDistanceFeet, getLineSquares, hasLineOfSight } from './engine/targeting';
-import type { Ability, ActionDefinition, CardinalDirection, CombatState, Creature, GridPosition, ShapeDefinition, TurnState } from './engine/types';
+import type { Ability, ActionDefinition, CardinalDirection, CombatState, Creature, CustomConditionTemplate, GridPosition, ShapeDefinition, TurnState } from './engine/types';
 import { getVisibleGridCells, getVisibleGridWindow, type GridWindow } from './ui/gridWindow';
 import { getActionForNumberHotkey, getNumberHotkeyIndex, isTypingShortcutTarget, moveGridCursor } from './ui/keyboard';
 
@@ -115,6 +121,7 @@ export function App() {
   const [areaOrigin, setAreaOrigin] = useState<GridPosition | undefined>();
   const [selectionMode, setSelectionMode] = useState<SelectionMode>('move');
   const [conditionToApply, setConditionToApply] = useState<string>('poisoned');
+  const [customConditionLibrary, setCustomConditionLibrary] = useState<CustomConditionTemplate[]>(loadCustomConditionLibrary);
   const [basicTargetId, setBasicTargetId] = useState<string | undefined>();
   const [basicNote, setBasicNote] = useState('');
   const [readyActionId, setReadyActionId] = useState<string | undefined>();
@@ -199,6 +206,13 @@ export function App() {
       ? getTargetsForAction(combat, activeCreature, selectedAction, selectedTargetId, areaOrigin, direction)
       : [];
   const selectedTarget = selectedTargetId ? findCreature(combat, selectedTargetId) : undefined;
+  const selectedCustomConditionTemplate = useMemo(
+    () =>
+      conditionToApply.startsWith('custom:')
+        ? customConditionLibrary.find((template) => template.id === conditionToApply.slice('custom:'.length))
+        : undefined,
+    [conditionToApply, customConditionLibrary]
+  );
   const selectedAttackDebug =
     selectedAction && selectedTarget && activeCreature && isAttackAction(selectedAction)
       ? getAttackDebugStats(combat, selectedAction.id, selectedTarget.id, 0)
@@ -215,6 +229,12 @@ export function App() {
   useEffect(() => {
     saveUiSettings(uiSettings);
   }, [uiSettings]);
+
+  useEffect(() => {
+    if (activeView === 'combat') {
+      setCustomConditionLibrary(loadCustomConditionLibrary());
+    }
+  }, [activeView]);
 
   useEffect(() => {
     if (activeView !== 'combat') {
@@ -651,6 +671,34 @@ export function App() {
 
   function updateUiSettings(update: Partial<UiSettings>) {
     setUiSettings((current) => ({ ...current, ...update }));
+  }
+
+  function applySelectedConditionToCreature(creature: Creature) {
+    setCombat((current) => {
+      if (conditionToApply.startsWith('custom:')) {
+        const templateId = conditionToApply.slice('custom:'.length);
+        const template = customConditionLibrary.find((candidate) => candidate.id === templateId);
+        if (!template) {
+          return current;
+        }
+        const applied = createAppliedConditionFromTemplate(template, activeCreature?.id);
+        return applyCondition(current, creature.id, applied.id, {
+          sourceCreatureId: activeCreature?.id,
+          name: applied.name,
+          description: applied.description,
+          tags: applied.tags,
+          durationType: applied.durationType,
+          remainingRounds: applied.remainingRounds,
+          stackBehavior: applied.stackBehavior,
+          metadata: applied.metadata,
+          rules: applied.rules
+        });
+      }
+
+      return applyCondition(current, creature.id, conditionToApply, {
+        sourceCreatureId: activeCreature?.id
+      });
+    });
   }
 
   function toggleMapTools() {
@@ -1274,22 +1322,32 @@ export function App() {
               <label>
                 Apply condition
                 <select value={conditionToApply} onChange={(event) => setConditionToApply(event.target.value)}>
-                  {ALL_CONDITION_IDS.map((conditionId) => (
-                    <option key={conditionId} value={conditionId}>
-                      {getConditionDefinition(conditionId).name}
-                    </option>
-                  ))}
+                  <optgroup label="Built-in Conditions">
+                    {ALL_CONDITION_IDS.map((conditionId) => (
+                      <option key={conditionId} value={conditionId}>
+                        {getConditionDefinition(conditionId).name}
+                      </option>
+                    ))}
+                  </optgroup>
+                  {customConditionLibrary.length > 0 && (
+                    <optgroup label="Custom Conditions">
+                      {customConditionLibrary.map((template) => (
+                        <option key={template.id} value={`custom:${template.id}`}>
+                          {template.name} ({hasMechanicalCustomConditionEffects(template) ? 'mechanical' : 'rules text'})
+                        </option>
+                      ))}
+                    </optgroup>
+                  )}
                 </select>
               </label>
-              <button
-                onClick={() =>
-                  setCombat((current) =>
-                    applyCondition(current, selectedCreature.id, conditionToApply, {
-                      sourceCreatureId: activeCreature?.id
-                    })
-                  )
-                }
-              >
+              {selectedCustomConditionTemplate && (
+                <p className="condition-template-hint">
+                  Custom: {hasMechanicalCustomConditionEffects(selectedCustomConditionTemplate)
+                    ? `${selectedCustomConditionTemplate.rules.length} mechanical hook(s)`
+                    : 'rules text only'}
+                </p>
+              )}
+              <button onClick={() => applySelectedConditionToCreature(selectedCreature)}>
                 Apply
               </button>
               <div className="condition-list">
@@ -1352,8 +1410,14 @@ export function App() {
       {showHelp && <KeyboardHelpOverlay onClose={() => setShowHelp(false)} />}
       {settingsOpen && (
         <SettingsDialog
+          flankingEnabled={combat.rulesSettings?.flanking?.enabled ?? false}
           settings={uiSettings}
           onChange={updateUiSettings}
+          onRulesChange={(update) => {
+            if (update.flankingEnabled !== undefined) {
+              setCombat((current) => setFlankingEnabled(current, update.flankingEnabled!));
+            }
+          }}
           onClose={() => setSettingsOpen(false)}
         />
       )}
@@ -2347,12 +2411,16 @@ function KeyboardHelpOverlay({ onClose }: { onClose: () => void }) {
 }
 
 function SettingsDialog({
+  flankingEnabled,
   settings,
   onChange,
+  onRulesChange,
   onClose
 }: {
+  flankingEnabled: boolean;
   settings: UiSettings;
   onChange: (update: Partial<UiSettings>) => void;
+  onRulesChange: (update: { flankingEnabled?: boolean }) => void;
   onClose: () => void;
 }) {
   return (
@@ -2439,6 +2507,20 @@ function SettingsDialog({
                 onChange={(event) => onChange({ showGridCoordinates: event.target.checked })}
               />
               Show grid coordinates
+            </label>
+          </div>
+        </section>
+
+        <section className="settings-section">
+          <h3>Combat Rules</h3>
+          <div className="settings-toggles">
+            <label>
+              <input
+                type="checkbox"
+                checked={flankingEnabled}
+                onChange={(event) => onRulesChange({ flankingEnabled: event.target.checked })}
+              />
+              Enable flanking advantage for melee attacks
             </label>
           </div>
         </section>

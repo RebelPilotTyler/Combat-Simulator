@@ -97,4 +97,11 @@ describe('3D movement', () => {
 
     expect(reachableKeys(state)).toContain('1,0,4');
   });
+
+  it('uses fly speed for the active turn movement budget when it is the fastest mode', () => {
+    const state = rollInitiative(createCombatState([{ ...creature, speed: 10, flySpeed: 40 }]), () => 0.9);
+
+    expect(state.turnState.remainingMovement).toBe(40);
+    expect(getReachableMovementSquares(state, 'climber').some((option) => option.costFeet > 10)).toBe(true);
+  });
 });

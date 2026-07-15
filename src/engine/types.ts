@@ -137,6 +137,9 @@ export interface RollModifier {
 
 export interface AppliedCondition {
   id: ConditionId;
+  name?: string;
+  description?: string;
+  tags?: string[];
   sourceCreatureId?: string;
   durationType: ConditionDurationType;
   remainingRounds?: number;
@@ -215,6 +218,19 @@ export interface ConditionDefinition {
   defaultStackBehavior: StackBehavior;
   hooks: ConditionEffectHooks;
   rules?: RuleDefinition[];
+}
+
+export interface CustomConditionTemplate {
+  id: string;
+  name: string;
+  description: string;
+  defaultDurationType?: ConditionDurationType;
+  defaultRemainingRounds?: number;
+  stackBehavior?: StackBehavior;
+  tags: string[];
+  notes?: string;
+  rules: RuleDefinition[];
+  updatedAt?: string;
 }
 
 export interface AbilityScores {
@@ -441,6 +457,13 @@ export interface PendingReaction {
   description: string;
 }
 
+export interface CombatRulesSettings {
+  flanking?: {
+    enabled: boolean;
+    benefit: 'advantage';
+  };
+}
+
 export interface CombatState {
   creatures: Creature[];
   grid: GridDefinition;
@@ -451,6 +474,7 @@ export interface CombatState {
   turnState: TurnState;
   turnResources: Record<string, TurnResourceState>;
   pendingReactions: PendingReaction[];
+  rulesSettings?: CombatRulesSettings;
   ruleMemory?: Record<string, { turnKey?: string; round?: number }>;
   log: CombatLogEntry[];
 }

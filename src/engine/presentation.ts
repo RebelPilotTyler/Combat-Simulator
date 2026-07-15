@@ -31,6 +31,9 @@ export function getHpPercent(creature: Pick<Creature, 'hp' | 'maxHp'>): number {
 }
 
 export function getConditionTag(condition: AppliedCondition): string {
+  if (condition.tags?.[0]) {
+    return condition.tags[0].slice(0, 3).toUpperCase();
+  }
   return CONDITION_TAGS[condition.id] ?? condition.id.slice(0, 3).toUpperCase();
 }
 

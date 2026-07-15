@@ -8,6 +8,7 @@ import type {
   ConditionDurationType,
   Creature,
   RollModifier,
+  RuleDefinition,
   SavingThrowModifierContext,
   StackBehavior
 } from './types';
@@ -321,29 +322,51 @@ export function createAppliedCondition(
   conditionId: string,
   options: {
     sourceCreatureId?: string;
+    name?: string;
+    description?: string;
+    tags?: string[];
     durationType?: ConditionDurationType;
     remainingRounds?: number;
     stackBehavior?: StackBehavior;
     stackCount?: number;
     intensity?: number;
     metadata?: Record<string, string | number | boolean | undefined>;
+    rules?: RuleDefinition[];
   } = {}
 ): AppliedCondition {
   const definition = getConditionDefinition(conditionId);
   return {
     id: conditionId,
+    name: options.name,
+    description: options.description,
+    tags: options.tags,
     sourceCreatureId: options.sourceCreatureId,
     durationType: options.durationType ?? definition.defaultDurationType,
     remainingRounds: options.remainingRounds,
     stackBehavior: options.stackBehavior ?? definition.defaultStackBehavior,
     stackCount: options.stackCount ?? 1,
     intensity: options.intensity ?? 1,
-    metadata: options.metadata
+    metadata: options.metadata,
+    rules: options.rules
   };
 }
 
 export function normalizeConditions(conditions: Array<AppliedCondition | string> | undefined): AppliedCondition[] {
-  return (conditions ?? []).map((condition) => (typeof condition === 'string' ? createAppliedCondition(condition) : condition));
+  return (conditions ?? []).map((condition) => {
+    if (typeof condition === 'string') {
+      return createAppliedCondition(condition);
+    }
+    const definition = getConditionDefinition(condition.id);
+    return {
+      ...condition,
+      durationType: condition.durationType ?? definition.defaultDurationType,
+      stackBehavior: condition.stackBehavior ?? definition.defaultStackBehavior,
+      stackCount: condition.stackCount ?? 1,
+      intensity: condition.intensity ?? 1,
+      tags: condition.tags ?? [],
+      rules: condition.rules ?? []
+    };
+  });
 }
 
 export function hasCondition(creature: Creature, conditionId: string): boolean {
@@ -358,7 +381,7 @@ export function getConditionLabel(condition: AppliedCondition): string {
     condition.durationType === 'rounds' && condition.remainingRounds !== undefined
       ? ` (${condition.remainingRounds} rounds)`
       : '';
-  return `${definition.name}${stack}${duration}`;
+  return `${condition.name ?? definition.name}${stack}${duration}`;
 }
 
 export function applyConditionToCreature(
@@ -390,10 +413,14 @@ export function applyConditionToCreature(
   }
 
   existing.sourceCreatureId = applied.sourceCreatureId;
+  existing.name = applied.name;
+  existing.description = applied.description;
+  existing.tags = applied.tags;
   existing.durationType = applied.durationType;
   existing.remainingRounds = applied.remainingRounds;
   existing.stackBehavior = applied.stackBehavior;
   existing.metadata = applied.metadata;
+  existing.rules = applied.rules;
   return 'refreshed';
 }
 
