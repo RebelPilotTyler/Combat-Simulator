@@ -1,4 +1,16 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import {
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type CSSProperties,
+  type Dispatch,
+  type MouseEvent,
+  type PointerEvent,
+  type RefObject,
+  type SetStateAction,
+  type WheelEvent
+} from 'react';
 import { EncounterEditor } from './EncounterEditor';
 import { createSampleEncounter } from './data/sampleEncounter';
 import {
@@ -34,19 +46,42 @@ import {
   type ShoveOutcome
 } from './engine/combat';
 import { ALL_CONDITION_IDS, getConditionDefinition, getConditionLabel } from './engine/conditions';
-import { getAvailableActions, getEffectiveAC, getEffectiveAttackBonus, getEffectiveSpeed, getUnavailableActionReason } from './engine/features';
+import {
+  getAvailableActions,
+  getEffectiveAC,
+  getEffectiveAttackBonus,
+  getEffectiveClimbSpeed,
+  getEffectiveFlySpeed,
+  getEffectiveSpeed,
+  getUnavailableActionReason
+} from './engine/features';
 import { getReachableMovementSquares } from './engine/movement';
 import { formatBaseEffectiveBonus, formatBaseEffectiveNumber, getConditionTags, getHpPercent } from './engine/presentation';
 import { parseCombatStateJson, serializeCombatState } from './engine/serialization';
-import { getShapeSquares, isInBounds, positionKey, samePosition } from './engine/shapes';
+import {
+  getElevation,
+  getShapeSquares,
+  getTileHeight,
+  getTilePosition,
+  isInBounds,
+  position3DKey,
+  positionKey,
+  samePosition,
+  sameTilePosition
+} from './engine/shapes';
 import { getDistanceFeet, getLineSquares, hasLineOfSight } from './engine/targeting';
 import type { Ability, ActionDefinition, CardinalDirection, CombatState, Creature, GridPosition, ShapeDefinition, TurnState } from './engine/types';
+import { getVisibleGridCells, getVisibleGridWindow, type GridWindow } from './ui/gridWindow';
 import { getActionForNumberHotkey, getNumberHotkeyIndex, isTypingShortcutTarget, moveGridCursor } from './ui/keyboard';
 
 const directions: CardinalDirection[] = ['north', 'east', 'south', 'west'];
 type SelectionMode = 'move' | 'target';
 type AppView = 'combat' | 'editor';
+type BattlemapView = '2d' | '3d';
 type MapTool = 'select' | 'distance' | 'lineOfSight' | 'radius' | 'line' | 'cone';
+type HudPanel = 'roster' | 'actions' | 'log' | 'data';
+type HudPanelState = Partial<Record<HudPanel, boolean>>;
+type HudPanelOffset = Partial<Record<HudPanel, { x: number; y: number }>>;
 type UiTheme = 'slate' | 'parchment' | 'midnight';
 type TextScale = 'compact' | 'normal' | 'large';
 type UiDensity = 'comfortable' | 'compact';
@@ -60,6 +95,11 @@ interface UiSettings {
   showAdvancedTools: boolean;
   showMapTools: boolean;
   showGridCoordinates: boolean;
+  invertCameraOrbitX: boolean;
+  invertCameraOrbitY: boolean;
+  invertCameraPanX: boolean;
+  invertCameraPanY: boolean;
+  invertCameraZoom: boolean;
 }
 
 const UI_SETTINGS_KEY = 'dnd5e-combat.uiSettings.v1';
@@ -86,6 +126,14 @@ export function App() {
   const [hpAmount, setHpAmount] = useState(5);
   const [attackDebugStats, setAttackDebugStats] = useState<ReturnType<typeof getAttackDebugStats> | undefined>();
   const [direction, setDirection] = useState<CardinalDirection>('east');
+  const [battlemapView, setBattlemapView] = useState<BattlemapView>('2d');
+  const [openHudPanels, setOpenHudPanels] = useState<HudPanelState>({});
+  const [hudPanelOffsets, setHudPanelOffsets] = useState<HudPanelOffset>({});
+  const [cameraYaw, setCameraYaw] = useState(-35);
+  const [cameraPitch, setCameraPitch] = useState(58);
+  const [cameraZoom, setCameraZoom] = useState(1);
+  const [cameraPanX, setCameraPanX] = useState(0);
+  const [cameraPanY, setCameraPanY] = useState(0);
   const [mapTool, setMapTool] = useState<MapTool>('select');
   const [mapToolStart, setMapToolStart] = useState<GridPosition | undefined>();
   const [mapToolEnd, setMapToolEnd] = useState<GridPosition | undefined>();
@@ -106,6 +154,14 @@ export function App() {
   const targetPanelRef = useRef<HTMLDivElement>(null);
   const debugDetailsRef = useRef<HTMLDetailsElement>(null);
   const toolsDetailsRef = useRef<HTMLDetailsElement>(null);
+  const hudDragRef = useRef<{
+    panel: HudPanel;
+    pointerId: number;
+    startX: number;
+    startY: number;
+    originX: number;
+    originY: number;
+  } | undefined>(undefined);
 
   const activeCreature = combat.activeCreatureId ? findCreature(combat, combat.activeCreatureId) : undefined;
   const selectedCreature = selectedCreatureId ? findCreature(combat, selectedCreatureId) : undefined;
@@ -126,7 +182,7 @@ export function App() {
     return getActionShapeSquares(combat, selectedAction, origin, direction);
   }, [activeCreature, areaOrigin, combat, direction, movementOptions, selectedAction, selectionMode]);
 
-  const highlightedKeys = new Set(highlightedSquares.map(positionKey));
+  const highlightedKeys = useMemo(() => new Set(highlightedSquares.map(positionKey)), [highlightedSquares]);
   const mapToolSquares = useMemo(
     () =>
       uiSettings.showMapTools
@@ -134,8 +190,10 @@ export function App() {
         : [],
     [combat, mapTool, mapToolDirection, mapToolEnd, mapToolLengthFeet, mapToolRadiusFeet, mapToolStart, uiSettings.showMapTools]
   );
-  const mapToolKeys = new Set(mapToolSquares.map(positionKey));
-  const movementKeys = new Set(movementOptions.map((option) => positionKey(option.position)));
+  const mapToolKeys = useMemo(() => new Set(mapToolSquares.map(positionKey)), [mapToolSquares]);
+  const visibleMapToolKeys = useMemo(() => (uiSettings.showMapTools ? mapToolKeys : new Set<string>()), [mapToolKeys, uiSettings.showMapTools]);
+  const movementKeys = useMemo(() => new Set(movementOptions.map((option) => position3DKey(option.position))), [movementOptions]);
+  const movementOptionByKey = useMemo(() => new Map(movementOptions.map((option) => [position3DKey(option.position), option])), [movementOptions]);
   const targetsInArea =
     activeCreature && selectedAction
       ? getTargetsForAction(combat, activeCreature, selectedAction, selectedTargetId, areaOrigin, direction)
@@ -223,7 +281,8 @@ export function App() {
       } else if (key === '?' || key === 'h') {
         setShowHelp(true);
       } else if (['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'].includes(event.key)) {
-        setGridCursor((current) => moveGridCursor(current, event.key, combat.grid.width, combat.grid.height));
+        const movementKey = battlemapView === '3d' ? getCameraRelativeArrowKey(event.key, cameraYaw) : event.key;
+        setGridCursor((current) => getTilePosition(moveGridCursor(current, movementKey, combat.grid.width, combat.grid.height), combat.grid));
       } else if (event.key === 'Enter') {
         handleGridConfirm();
       }
@@ -236,6 +295,8 @@ export function App() {
     activeView,
     activeActions,
     activeCreature,
+    battlemapView,
+    cameraYaw,
     combat,
     gridCursor,
     selectedAction,
@@ -278,10 +339,13 @@ export function App() {
       return;
     }
 
-    const creature = combat.creatures.find((candidate) => samePosition(candidate.position, gridCursor));
+    const creature = combat.creatures.find((candidate) => sameTilePosition(candidate.position, gridCursor));
 
-    if (selectionMode === 'move' && activeCreature && movementKeys.has(positionKey(gridCursor))) {
-      setCombat((current) => moveActiveCreature(current, gridCursor));
+    if (selectionMode === 'move' && activeCreature && movementKeys.has(position3DKey(gridCursor))) {
+      const movementOption = movementOptionByKey.get(position3DKey(gridCursor));
+      if (movementOption) {
+        setCombat((current) => moveActiveCreature(current, movementOption.path));
+      }
       setSelectedCreatureId(activeCreature.id);
       return;
     }
@@ -340,13 +404,16 @@ export function App() {
       return;
     }
 
-    if (selectionMode === 'move' && activeCreature && movementKeys.has(positionKey(position))) {
-      setCombat((current) => moveActiveCreature(current, position));
+    if (selectionMode === 'move' && activeCreature && movementKeys.has(position3DKey(position))) {
+      const movementOption = movementOptionByKey.get(position3DKey(position));
+      if (movementOption) {
+        setCombat((current) => moveActiveCreature(current, movementOption.path));
+      }
       setSelectedCreatureId(activeCreature.id);
       return;
     }
 
-    const creature = combat.creatures.find((candidate) => samePosition(candidate.position, position));
+    const creature = combat.creatures.find((candidate) => sameTilePosition(candidate.position, position));
     if (creature) {
       setSelectedCreatureId(creature.id);
       setBasicTargetId(creature.id);
@@ -595,6 +662,94 @@ export function App() {
     }
   }
 
+  function toggleHudPanel(panel: HudPanel) {
+    setOpenHudPanels((current) => ({
+      ...current,
+      [panel]: !current[panel]
+    }));
+  }
+
+  function closeHudPanel(panel: HudPanel) {
+    setOpenHudPanels((current) => ({
+      ...current,
+      [panel]: false
+    }));
+  }
+
+  function getHudPanelStyle(panel: HudPanel): CSSProperties | undefined {
+    const offset = hudPanelOffsets[panel];
+    if (!offset) {
+      return undefined;
+    }
+
+    return { transform: `translate(${offset.x}px, ${offset.y}px)` };
+  }
+
+  function handleHudDragStart(panel: HudPanel, event: PointerEvent<HTMLDivElement>) {
+    if (event.button !== 0) {
+      return;
+    }
+
+    const offset = hudPanelOffsets[panel] ?? { x: 0, y: 0 };
+    hudDragRef.current = {
+      panel,
+      pointerId: event.pointerId,
+      startX: event.clientX,
+      startY: event.clientY,
+      originX: offset.x,
+      originY: offset.y
+    };
+    event.currentTarget.setPointerCapture(event.pointerId);
+    event.preventDefault();
+  }
+
+  function handleHudDragMove(event: PointerEvent<HTMLDivElement>) {
+    const drag = hudDragRef.current;
+    if (!drag || drag.pointerId !== event.pointerId) {
+      return;
+    }
+
+    setHudPanelOffsets((current) => ({
+      ...current,
+      [drag.panel]: {
+        x: drag.originX + event.clientX - drag.startX,
+        y: drag.originY + event.clientY - drag.startY
+      }
+    }));
+  }
+
+  function handleHudDragEnd(event: PointerEvent<HTMLDivElement>) {
+    if (hudDragRef.current?.pointerId === event.pointerId) {
+      hudDragRef.current = undefined;
+      event.currentTarget.releasePointerCapture(event.pointerId);
+    }
+  }
+
+  function renderHudPanelBar(panel: HudPanel, title: string) {
+    return (
+      <div
+        className="hud-panel-bar"
+        onPointerDown={(event) => handleHudDragStart(panel, event)}
+        onPointerMove={handleHudDragMove}
+        onPointerUp={handleHudDragEnd}
+        onPointerCancel={handleHudDragEnd}
+      >
+        <span>{title}</span>
+        <button
+          className="hud-panel-close"
+          onPointerDown={(event) => event.stopPropagation()}
+          onClick={() => closeHudPanel(panel)}
+          aria-label={`Close ${title.toLowerCase()} panel`}
+        >
+          Close
+        </button>
+      </div>
+    );
+  }
+
+  const is3DView = battlemapView === '3d';
+  const combatLayoutClass = ['cockpit-layout', is3DView ? 'view-3d' : ''].join(' ');
+
   return (
     <main className={['app-shell', `theme-${uiSettings.theme}`, `text-${uiSettings.textScale}`, `density-${uiSettings.density}`].join(' ')}>
       <header className="top-bar">
@@ -617,8 +772,27 @@ export function App() {
       </header>
 
       {activeView === 'combat' ? (
-      <section className="cockpit-layout">
-        <aside className="panel left-rail" tabIndex={0} aria-label="Initiative and creature list">
+      <section className={combatLayoutClass}>
+        {is3DView && (
+          <nav className="hud-tabs" aria-label="3D view panels">
+            <button className={openHudPanels.roster ? 'selected-action' : ''} aria-expanded={Boolean(openHudPanels.roster)} onClick={() => toggleHudPanel('roster')}>
+              Roster
+            </button>
+            <button className={openHudPanels.actions ? 'selected-action' : ''} aria-expanded={Boolean(openHudPanels.actions)} onClick={() => toggleHudPanel('actions')}>
+              Actions
+            </button>
+            <button className={openHudPanels.log ? 'selected-action' : ''} aria-expanded={Boolean(openHudPanels.log)} onClick={() => toggleHudPanel('log')}>
+              Log
+            </button>
+            {uiSettings.showAdvancedTools && (
+              <button className={openHudPanels.data ? 'selected-action' : ''} aria-expanded={Boolean(openHudPanels.data)} onClick={() => toggleHudPanel('data')}>
+                Data
+              </button>
+            )}
+          </nav>
+        )}
+        <aside className={['panel', 'left-rail', openHudPanels.roster ? 'hud-open' : ''].join(' ')} style={getHudPanelStyle('roster')} tabIndex={0} aria-label="Initiative and creature list">
+          {renderHudPanelBar('roster', 'Roster')}
           <div className="round-card">
             <strong>Round {combat.round || '-'}</strong>
             <span>{activeCreature?.name ?? 'No initiative'}</span>
@@ -697,11 +871,22 @@ export function App() {
               <span>
                 {combat.grid.width} x {combat.grid.height}
               </span>
+              <span className="view-toggle" role="group" aria-label="Battlemap view">
+                {(['2d', '3d'] as const).map((view) => (
+                  <button
+                    className={battlemapView === view ? 'selected-action' : ''}
+                    key={view}
+                    onClick={() => setBattlemapView(view)}
+                  >
+                    {view.toUpperCase()} View
+                  </button>
+                ))}
+              </span>
               <label>
                 Cell
                 <input
                   max={64}
-                  min={24}
+                  min={32}
                   step={4}
                   type="range"
                   value={gridCellSize}
@@ -773,66 +958,50 @@ export function App() {
               </>
             )}
           </div>
-          <div
-            aria-label="Battle grid"
-            className="grid-board"
-            ref={gridRef}
-            role="grid"
-            tabIndex={0}
-            title="Grid focused. Use arrow keys to move the cursor and Enter to select."
-            style={{ gridTemplateColumns: `repeat(${combat.grid.width}, ${gridCellSize}px)` }}
-          >
-            {Array.from({ length: combat.grid.height }).flatMap((_, y) =>
-              Array.from({ length: combat.grid.width }).map((_, x) => {
-                const position = { x, y };
-                const creature = combat.creatures.find((candidate) => samePosition(candidate.position, position));
-                const blocked = combat.grid.blocked.some((cell) => samePosition(cell, position));
-                const movement = selectionMode === 'move' && movementKeys.has(positionKey(position));
-                const highlighted = highlightedKeys.has(positionKey(position));
-                const toolHighlighted = uiSettings.showMapTools && mapToolKeys.has(positionKey(position));
-                const active = creature?.id === combat.activeCreatureId;
-                const selected = creature?.id === selectedCreatureId;
-                const cursor = samePosition(gridCursor, position);
-                const toolStart = uiSettings.showMapTools && mapToolStart ? samePosition(mapToolStart, position) : false;
-                const toolEnd = uiSettings.showMapTools && mapToolEnd ? samePosition(mapToolEnd, position) : false;
-
-                return (
-                  <button
-                    aria-label={`Grid ${x},${y}${creature ? ` ${creature.name}` : ''}${blocked ? ' blocked' : ''}`}
-                    className={[
-                      'grid-cell',
-                      blocked ? 'blocked' : '',
-                      highlighted ? 'highlighted' : '',
-                      toolHighlighted ? 'tool-highlighted' : '',
-                      movement ? 'movement-cell' : '',
-                      active ? 'active-cell' : '',
-                      selected ? 'selected-cell' : '',
-                      toolStart ? 'tool-start-cell' : '',
-                      toolEnd ? 'tool-end-cell' : '',
-                      cursor ? 'keyboard-cursor' : ''
-                    ].join(' ')}
-                    key={positionKey(position)}
-                    onClick={() => handleCellClick(position)}
-                    style={{ height: gridCellSize, width: gridCellSize }}
-                  >
-                    {uiSettings.showGridCoordinates && <span className="coord">{x},{y}</span>}
-                    {creature && (
-                      <span className="token-stack" title={`${creature.name} HP ${creature.hp}/${creature.maxHp} ${getConditionLabels(creature)}`}>
-                        <span className={`token ${creature.team} ${isDefeated(creature) ? 'defeated' : ''}`}>
-                          {getCreatureShortLabel(creature)}
-                        </span>
-                        <HpBar creature={creature} compact />
-                        <ConditionTags creature={creature} compact />
-                      </span>
-                    )}
-                  </button>
-                );
-              })
-            )}
-          </div>
+          {battlemapView === '2d' ? (
+            <Battlefield2DView
+              combat={combat}
+              gridCellSize={gridCellSize}
+              gridCursor={gridCursor}
+              highlightedKeys={highlightedKeys}
+              mapToolEnd={mapToolEnd}
+              mapToolKeys={visibleMapToolKeys}
+              mapToolStart={mapToolStart}
+              movementKeys={movementKeys}
+              onCellClick={handleCellClick}
+              selectedCreatureId={selectedCreatureId}
+              selectionMode={selectionMode}
+              showGridCoordinates={uiSettings.showGridCoordinates}
+              viewportRef={gridRef}
+            />
+          ) : (
+            <Battlefield3DView
+              cameraPitch={cameraPitch}
+              cameraPanX={cameraPanX}
+              cameraPanY={cameraPanY}
+              cameraYaw={cameraYaw}
+              cameraZoom={cameraZoom}
+              combat={combat}
+              gridCursor={gridCursor}
+              gridCellSize={gridCellSize}
+              highlightedKeys={highlightedKeys}
+              mapToolKeys={visibleMapToolKeys}
+              movementKeys={movementKeys}
+              onCellClick={handleCellClick}
+              selectedCreatureId={selectedCreatureId}
+              settings={uiSettings}
+              setCameraPanX={setCameraPanX}
+              setCameraPanY={setCameraPanY}
+              setCameraPitch={setCameraPitch}
+              setCameraYaw={setCameraYaw}
+              setCameraZoom={setCameraZoom}
+              viewportRef={gridRef}
+            />
+          )}
         </section>
 
-        <aside className="panel side-panel" tabIndex={0} aria-label="Active creature and actions">
+        <aside className={['panel', 'side-panel', openHudPanels.actions ? 'hud-open' : ''].join(' ')} style={getHudPanelStyle('actions')} tabIndex={0} aria-label="Active creature and actions">
+          {renderHudPanelBar('actions', 'Actions')}
           <h2>Active Creature</h2>
           {activeCreature ? (
             <>
@@ -1138,7 +1307,8 @@ export function App() {
           )}
         </aside>
 
-        <section className="panel log-panel">
+        <section className={['panel', 'log-panel', openHudPanels.log ? 'hud-open' : ''].join(' ')} style={getHudPanelStyle('log')}>
+          {renderHudPanelBar('log', 'Log')}
           <h2>Combat Log</h2>
           <ol className="combat-log" ref={logRef} tabIndex={0} aria-label="Combat log">
             {combat.log.map((entry) => (
@@ -1150,7 +1320,8 @@ export function App() {
         </section>
 
         {uiSettings.showAdvancedTools && (
-        <section className="panel json-panel">
+        <section className={['panel', 'json-panel', openHudPanels.data ? 'hud-open' : ''].join(' ')} style={getHudPanelStyle('data')}>
+          {renderHudPanelBar('data', 'Data')}
           <details
             className="compact-details"
             open={toolsOpen}
@@ -1190,9 +1361,731 @@ export function App() {
   );
 }
 
+const GRID_CELL_GAP = 2;
+const GRID_OVERSCAN_CELLS = 3;
+const MAX_FULL_3D_TILES = 900;
+const CULLED_3D_TILE_RADIUS = 17;
+
+function Battlefield2DView({
+  combat,
+  gridCursor,
+  gridCellSize,
+  highlightedKeys,
+  mapToolEnd,
+  mapToolKeys,
+  mapToolStart,
+  movementKeys,
+  onCellClick,
+  selectedCreatureId,
+  selectionMode,
+  showGridCoordinates,
+  viewportRef
+}: {
+  combat: CombatState;
+  gridCursor: GridPosition;
+  gridCellSize: number;
+  highlightedKeys: Set<string>;
+  mapToolEnd?: GridPosition;
+  mapToolKeys: Set<string>;
+  mapToolStart?: GridPosition;
+  movementKeys: Set<string>;
+  onCellClick: (position: GridPosition) => void;
+  selectedCreatureId?: string;
+  selectionMode: SelectionMode;
+  showGridCoordinates: boolean;
+  viewportRef: RefObject<HTMLDivElement | null>;
+}) {
+  const cellSize = Math.max(32, gridCellSize);
+  const stride = cellSize + GRID_CELL_GAP;
+  const boardWidth = combat.grid.width * cellSize + Math.max(0, combat.grid.width - 1) * GRID_CELL_GAP;
+  const boardHeight = combat.grid.height * cellSize + Math.max(0, combat.grid.height - 1) * GRID_CELL_GAP;
+  const [visibleWindow, setVisibleWindow] = useState<GridWindow>(() =>
+    getVisibleGridWindow({
+      width: combat.grid.width,
+      height: combat.grid.height,
+      cellSize,
+      gap: GRID_CELL_GAP,
+      scrollLeft: 0,
+      scrollTop: 0,
+      viewportWidth: 920,
+      viewportHeight: 620,
+      overscan: GRID_OVERSCAN_CELLS
+    })
+  );
+
+  useEffect(() => {
+    const viewport = viewportRef.current;
+    if (!viewport) {
+      return;
+    }
+
+    let frame = 0;
+    const updateWindow = () => {
+      cancelAnimationFrame(frame);
+      frame = requestAnimationFrame(() => {
+        setVisibleWindow(
+          getVisibleGridWindow({
+            width: combat.grid.width,
+            height: combat.grid.height,
+            cellSize,
+            gap: GRID_CELL_GAP,
+            scrollLeft: viewport.scrollLeft,
+            scrollTop: viewport.scrollTop,
+            viewportWidth: viewport.clientWidth,
+            viewportHeight: viewport.clientHeight,
+            overscan: GRID_OVERSCAN_CELLS
+          })
+        );
+      });
+    };
+
+    updateWindow();
+    viewport.addEventListener('scroll', updateWindow, { passive: true });
+    window.addEventListener('resize', updateWindow);
+    const resizeObserver = typeof ResizeObserver === 'undefined' ? undefined : new ResizeObserver(updateWindow);
+    resizeObserver?.observe(viewport);
+
+    return () => {
+      cancelAnimationFrame(frame);
+      viewport.removeEventListener('scroll', updateWindow);
+      window.removeEventListener('resize', updateWindow);
+      resizeObserver?.disconnect();
+    };
+  }, [cellSize, combat.grid.height, combat.grid.width, viewportRef]);
+
+  const visibleCells = useMemo(() => getVisibleGridCells(visibleWindow), [visibleWindow]);
+  const creatureByTile = useMemo(
+    () => new Map(combat.creatures.map((creature) => [positionKey(creature.position), creature])),
+    [combat.creatures]
+  );
+  const blockedKeys = useMemo(() => new Set(combat.grid.blocked.map(positionKey)), [combat.grid.blocked]);
+
+  return (
+    <div
+      aria-label="Battle grid"
+      className="grid-board-viewport"
+      ref={viewportRef}
+      role="grid"
+      tabIndex={0}
+      title="Grid focused. Use arrow keys to move the cursor and Enter to select."
+    >
+      <div className="grid-board virtual-grid-board" style={{ height: boardHeight, width: boardWidth }}>
+        {visibleCells.map(({ x, y }) => {
+          const position = getTilePosition({ x, y }, combat.grid);
+          const key = positionKey(position);
+          const creature = creatureByTile.get(key);
+          const blocked = blockedKeys.has(key);
+          const movement = selectionMode === 'move' && movementKeys.has(position3DKey(position));
+          const highlighted = highlightedKeys.has(key);
+          const toolHighlighted = mapToolKeys.has(key);
+          const active = creature?.id === combat.activeCreatureId;
+          const selected = creature?.id === selectedCreatureId;
+          const cursor = samePosition(gridCursor, position);
+          const toolStart = mapToolStart ? samePosition(mapToolStart, position) : false;
+          const toolEnd = mapToolEnd ? samePosition(mapToolEnd, position) : false;
+          const tileHeight = getTileHeight(position, combat.grid);
+
+          return (
+            <button
+              aria-label={`Grid ${x},${y}${creature ? ` ${creature.name}` : ''}${blocked ? ' blocked' : ''}`}
+              className={[
+                'grid-cell',
+                blocked ? 'blocked' : '',
+                highlighted ? 'highlighted' : '',
+                toolHighlighted ? 'tool-highlighted' : '',
+                movement ? 'movement-cell' : '',
+                active ? 'active-cell' : '',
+                selected ? 'selected-cell' : '',
+                toolStart ? 'tool-start-cell' : '',
+                toolEnd ? 'tool-end-cell' : '',
+                cursor ? 'keyboard-cursor' : ''
+              ].join(' ')}
+              key={key}
+              onClick={() => onCellClick(position)}
+              style={{ height: cellSize, left: x * stride, top: y * stride, width: cellSize }}
+            >
+              {showGridCoordinates && <span className="coord">{x},{y}</span>}
+              {tileHeight !== 0 && <span className="height-marker">z{tileHeight}</span>}
+              {creature && (
+                <span className="token-stack" title={`${creature.name} at ${formatPosition(creature.position)} HP ${creature.hp}/${creature.maxHp} ${getConditionLabels(creature)}`}>
+                  <span className={`token ${creature.team} ${isDefeated(creature) ? 'defeated' : ''}`}>
+                    {getCreatureShortLabel(creature)}
+                  </span>
+                  <HpBar creature={creature} compact />
+                  <ConditionTags creature={creature} compact />
+                </span>
+              )}
+            </button>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+function Battlefield3DView({
+  combat,
+  gridCursor,
+  gridCellSize,
+  highlightedKeys,
+  mapToolKeys,
+  movementKeys,
+  onCellClick,
+  selectedCreatureId,
+  settings,
+  cameraYaw,
+  cameraPitch,
+  cameraZoom,
+  cameraPanX,
+  cameraPanY,
+  setCameraYaw,
+  setCameraPitch,
+  setCameraZoom,
+  setCameraPanX,
+  setCameraPanY,
+  viewportRef
+}: {
+  combat: CombatState;
+  gridCursor: GridPosition;
+  gridCellSize: number;
+  highlightedKeys: Set<string>;
+  mapToolKeys: Set<string>;
+  movementKeys: Set<string>;
+  onCellClick: (position: GridPosition) => void;
+  selectedCreatureId?: string;
+  settings: UiSettings;
+  cameraYaw: number;
+  cameraPitch: number;
+  cameraZoom: number;
+  cameraPanX: number;
+  cameraPanY: number;
+  setCameraYaw: Dispatch<SetStateAction<number>>;
+  setCameraPitch: Dispatch<SetStateAction<number>>;
+  setCameraZoom: Dispatch<SetStateAction<number>>;
+  setCameraPanX: Dispatch<SetStateAction<number>>;
+  setCameraPanY: Dispatch<SetStateAction<number>>;
+  viewportRef: RefObject<HTMLDivElement | null>;
+}) {
+  const cellSize = Math.max(30, Math.min(58, gridCellSize));
+  const boardWidth = combat.grid.width * cellSize;
+  const boardHeight = combat.grid.height * cellSize;
+  const maxElevation = Math.max(
+    0,
+    ...(combat.grid.heights ?? []).map((position) => getElevation(position)),
+    ...combat.creatures.map((creature) => getElevation(creature.position))
+  );
+  const svgWidth = Math.max(860, boardWidth * 1.75 + 220);
+  const svgHeight = Math.max(500, boardHeight * 1.35 + maxElevation * 48 + 180);
+  const unitSize = cellSize * 1.16 * cameraZoom;
+  const yawRadians = (cameraYaw * Math.PI) / 180;
+  const pitchRadians = (cameraPitch * Math.PI) / 180;
+  const pitchScale = Math.max(0.38, Math.sin(pitchRadians));
+  const zScale = 0.72;
+  const viewportStyle = {
+    minHeight: Math.max(500, svgHeight * 0.72)
+  };
+  const dragState = useRef<{ x: number; y: number; mode: 'orbit' | 'pan' } | undefined>(undefined);
+  const blockedTileKeys = useMemo(() => new Set(combat.grid.blocked.map(positionKey)), [combat.grid.blocked]);
+  const tileCoordinates = useMemo(() => {
+    const coordinates = get3DTileCoordinates({
+      gridWidth: combat.grid.width,
+      gridHeight: combat.grid.height,
+      focus: gridCursor,
+      creatures: combat.creatures,
+      highlightedKeys,
+      mapToolKeys,
+      movementKeys
+    });
+    return coordinates.sort((a, b) => getProjectedDepth(a.x + 0.5, a.y + 0.5) - getProjectedDepth(b.x + 0.5, b.y + 0.5));
+  }, [
+    cameraYaw,
+    combat.creatures,
+    combat.grid.height,
+    combat.grid.width,
+    gridCursor,
+    highlightedKeys,
+    mapToolKeys,
+    movementKeys,
+  ]);
+
+  function handlePointerDown(event: PointerEvent<HTMLDivElement>) {
+    dragState.current = {
+      x: event.clientX,
+      y: event.clientY,
+      mode: event.shiftKey || event.button === 1 ? 'pan' : 'orbit'
+    };
+    event.currentTarget.setPointerCapture(event.pointerId);
+  }
+
+  function handlePointerMove(event: PointerEvent<HTMLDivElement>) {
+    if (!dragState.current) {
+      return;
+    }
+
+    const dx = event.clientX - dragState.current.x;
+    const dy = event.clientY - dragState.current.y;
+    dragState.current = { ...dragState.current, x: event.clientX, y: event.clientY };
+
+    if (dragState.current.mode === 'pan') {
+      setCameraPanX((current) => current + (settings.invertCameraPanX ? -dx : dx));
+      setCameraPanY((current) => current + (settings.invertCameraPanY ? -dy : dy));
+      return;
+    }
+
+    setCameraYaw((current) => clampNumber(current + (settings.invertCameraOrbitX ? -dx : dx) * 0.5, -360, 360));
+    setCameraPitch((current) => clampNumber(current + (settings.invertCameraOrbitY ? dy : -dy) * 0.35, 8, 88));
+  }
+
+  function handlePointerUp(event: PointerEvent<HTMLDivElement>) {
+    dragState.current = undefined;
+    event.currentTarget.releasePointerCapture(event.pointerId);
+  }
+
+  function handleWheel(event: WheelEvent<HTMLDivElement>) {
+    event.preventDefault();
+    setCameraZoom((current) =>
+      clampNumber(Number((current + (settings.invertCameraZoom ? event.deltaY : -event.deltaY) * 0.001).toFixed(2)), 0.35, 2.5)
+    );
+  }
+
+  function projectPoint(x: number, y: number, z: number) {
+    const centeredX = x - combat.grid.width / 2;
+    const centeredY = y - combat.grid.height / 2;
+    const rotatedX = centeredX * Math.cos(yawRadians) - centeredY * Math.sin(yawRadians);
+    const rotatedY = centeredX * Math.sin(yawRadians) + centeredY * Math.cos(yawRadians);
+
+    return {
+      x: svgWidth / 2 + rotatedX * unitSize + cameraPanX,
+      y: svgHeight / 2 + rotatedY * unitSize * pitchScale - z * unitSize * zScale + cameraPanY,
+      depth: rotatedY + z * 0.35
+    };
+  }
+
+  function getProjectedDepth(x: number, y: number): number {
+    const centeredX = x - combat.grid.width / 2;
+    const centeredY = y - combat.grid.height / 2;
+    return centeredX * Math.sin(yawRadians) + centeredY * Math.cos(yawRadians);
+  }
+
+  function projectTileCorners(x: number, y: number, z: number) {
+    const inset = 0.045;
+    return {
+      northWest: projectPoint(x + inset, y + inset, z),
+      northEast: projectPoint(x + 1 - inset, y + inset, z),
+      southEast: projectPoint(x + 1 - inset, y + 1 - inset, z),
+      southWest: projectPoint(x + inset, y + 1 - inset, z)
+    };
+  }
+
+  function formatPolygon(points: Array<{ x: number; y: number }>): string {
+    return points.map((point) => `${point.x.toFixed(1)},${point.y.toFixed(1)}`).join(' ');
+  }
+
+  function renderPrism(
+    x: number,
+    y: number,
+    bottom: number,
+    top: number,
+    palette: { top: string; north: string; south: string; east: string; west: string; stroke: string },
+    key: string,
+    options: { topStroke?: string; topStrokeWidth?: number; includeTop?: boolean } = {}
+  ) {
+    if (top <= bottom) {
+      return null;
+    }
+
+    const bottomCorners = projectTileCorners(x, y, bottom);
+    const topCorners = projectTileCorners(x, y, top);
+    const faces = [
+      {
+        key: 'north',
+        fill: palette.north,
+        points: [bottomCorners.northWest, bottomCorners.northEast, topCorners.northEast, topCorners.northWest]
+      },
+      {
+        key: 'east',
+        fill: palette.east,
+        points: [bottomCorners.northEast, bottomCorners.southEast, topCorners.southEast, topCorners.northEast]
+      },
+      {
+        key: 'south',
+        fill: palette.south,
+        points: [bottomCorners.southWest, bottomCorners.southEast, topCorners.southEast, topCorners.southWest]
+      },
+      {
+        key: 'west',
+        fill: palette.west,
+        points: [bottomCorners.northWest, bottomCorners.southWest, topCorners.southWest, topCorners.northWest]
+      }
+    ];
+
+    return (
+      <g key={key}>
+        {faces.map((face) => (
+          <polygon
+            fill={face.fill}
+            key={`${key}-${face.key}`}
+            points={formatPolygon(face.points)}
+            stroke={palette.stroke}
+            strokeWidth={1}
+          />
+        ))}
+        {options.includeTop !== false && (
+          <polygon
+            fill={palette.top}
+            points={formatPolygon([topCorners.northWest, topCorners.northEast, topCorners.southEast, topCorners.southWest])}
+            stroke={options.topStroke ?? palette.stroke}
+            strokeWidth={options.topStrokeWidth ?? 1}
+          />
+        )}
+      </g>
+    );
+  }
+
+  function renderTileTop(
+    x: number,
+    y: number,
+    z: number,
+    fill: string,
+    stroke: string,
+    strokeWidth: number,
+    key: string
+  ) {
+    const corners = projectTileCorners(x, y, z);
+    return (
+      <polygon
+        fill={fill}
+        key={key}
+        points={formatPolygon([corners.northWest, corners.northEast, corners.southEast, corners.southWest])}
+        stroke={stroke}
+        strokeWidth={strokeWidth}
+      />
+    );
+  }
+
+  function getTileStroke({
+    highlighted,
+    movement,
+    toolHighlighted,
+    cursor
+  }: {
+    highlighted: boolean;
+    movement: boolean;
+    toolHighlighted: boolean;
+    cursor: boolean;
+  }) {
+    if (cursor) {
+      return { stroke: '#111827', width: 4 };
+    }
+    if (toolHighlighted) {
+      return { stroke: '#2563eb', width: 4 };
+    }
+    if (highlighted) {
+      return { stroke: '#c47f00', width: 4 };
+    }
+    if (movement) {
+      return { stroke: '#2f9e44', width: 3 };
+    }
+    return { stroke: 'rgba(36, 45, 34, 0.46)', width: 1 };
+  }
+
+  function handleTileClick(event: MouseEvent<SVGGElement>, position: GridPosition) {
+    event.stopPropagation();
+    onCellClick(position);
+  }
+
+  function renderTile(tile: { x: number; y: number }) {
+    const { x, y } = tile;
+    const position = getTilePosition({ x, y }, combat.grid);
+    const tileHeight = getTileHeight(position, combat.grid);
+    const blocked = blockedTileKeys.has(positionKey(position));
+    const highlighted = highlightedKeys.has(positionKey(position));
+    const movement = movementKeys.has(position3DKey(position));
+    const toolHighlighted = mapToolKeys.has(positionKey(position));
+    const cursor = samePosition(gridCursor, position);
+    const stroke = getTileStroke({ highlighted, movement, toolHighlighted, cursor });
+    const terrainPalette = {
+      top: movement ? '#a8df99' : highlighted ? '#f7e59b' : '#d9decf',
+      north: '#b2baa7',
+      south: '#8f9a82',
+      east: '#a3ad96',
+      west: '#7d8974',
+      stroke: 'rgba(42, 51, 38, 0.55)'
+    };
+    const obstacleTop = Math.max(tileHeight + 3, 3);
+    const obstaclePalette = {
+      top: '#333d49',
+      north: '#29323d',
+      south: '#18202a',
+      east: '#222b35',
+      west: '#121922',
+      stroke: 'rgba(5, 8, 13, 0.72)'
+    };
+
+    return (
+      <g className="battlefield-3d-tile" key={`tile-svg-${x}-${y}`} onClick={(event) => handleTileClick(event, position)}>
+        {tileHeight > 0
+          ? renderPrism(x, y, 0, tileHeight, terrainPalette, `terrain-${x}-${y}`, {
+              topStroke: stroke.stroke,
+              topStrokeWidth: stroke.width
+            })
+          : renderTileTop(x, y, 0, terrainPalette.top, stroke.stroke, stroke.width, `flat-${x}-${y}`)}
+        {blocked && renderPrism(x, y, tileHeight, obstacleTop, obstaclePalette, `obstacle-${x}-${y}`, { topStroke: '#0d1118', topStrokeWidth: 1.5 })}
+        {settings.showGridCoordinates && (
+          <text className="battlefield-3d-grid-label" x={projectPoint(x + 0.1, y + 0.22, blocked ? obstacleTop : tileHeight).x} y={projectPoint(x + 0.1, y + 0.22, blocked ? obstacleTop : tileHeight).y}>
+            {x},{y}{tileHeight !== 0 ? ` z${tileHeight}` : ''}
+          </text>
+        )}
+      </g>
+    );
+  }
+
+  const sortedCreatures = [...combat.creatures].sort(
+    (a, b) => getProjectedDepth(a.position.x + 0.5, a.position.y + 0.5) - getProjectedDepth(b.position.x + 0.5, b.position.y + 0.5)
+  );
+
+  return (
+    <div
+      className="battlefield-3d-viewport"
+      ref={viewportRef}
+      style={viewportStyle}
+      aria-label="Experimental 3D battlefield view"
+      role="grid"
+      tabIndex={0}
+      title="3D grid focused. Use arrow keys to move the cursor and Enter to select."
+      onPointerDown={handlePointerDown}
+      onPointerMove={handlePointerMove}
+      onPointerUp={handlePointerUp}
+      onPointerCancel={handlePointerUp}
+      onWheel={handleWheel}
+    >
+      <svg className="battlefield-3d-svg" viewBox={`0 0 ${svgWidth} ${svgHeight}`} role="img" aria-label="Projected 3D battlefield">
+        <rect className="battlefield-3d-sky" height={svgHeight} width={svgWidth} x={0} y={0} />
+        {tileCoordinates.map(renderTile)}
+        {sortedCreatures.map((creature) => {
+          const center = projectPoint(creature.position.x + 0.5, creature.position.y + 0.5, getElevation(creature.position) + 0.28);
+          const base = projectPoint(creature.position.x + 0.5, creature.position.y + 0.5, getElevation(creature.position));
+          const selected = creature.id === selectedCreatureId;
+          const active = creature.id === combat.activeCreatureId;
+
+          return (
+            <g className={isDefeated(creature) ? 'creature-3d defeated' : 'creature-3d'} key={`creature-svg-${creature.id}`}>
+              <ellipse className="creature-3d-shadow" cx={base.x + 4} cy={base.y + 7} rx={cellSize * 0.27} ry={cellSize * 0.11} />
+              <ellipse
+                className="creature-3d-side"
+                cx={center.x}
+                cy={center.y + 7}
+                fill={darkenTeamColor(creature.team)}
+                rx={cellSize * 0.3}
+                ry={cellSize * 0.12}
+              />
+              <ellipse
+                className={selected || active ? 'creature-3d-top emphasized' : 'creature-3d-top'}
+                cx={center.x}
+                cy={center.y}
+                fill={getTeamColor(creature.team)}
+                rx={cellSize * 0.31}
+                ry={cellSize * 0.14}
+              />
+              <text className="creature-3d-label" x={center.x} y={center.y - 17}>
+                {getCreatureShortLabel(creature)}
+              </text>
+            </g>
+          );
+        })}
+      </svg>
+      <details
+        className="camera-controls-3d"
+        onPointerDown={(event) => event.stopPropagation()}
+        onWheel={(event) => event.stopPropagation()}
+      >
+        <summary>Camera</summary>
+        <label>
+          Yaw
+          <input
+            max={360}
+            min={-360}
+            step={5}
+            type="range"
+            value={cameraYaw}
+            onChange={(event) => setCameraYaw(Number(event.target.value))}
+          />
+        </label>
+        <label>
+          Pitch
+          <input
+            max={88}
+            min={8}
+            step={5}
+            type="range"
+            value={cameraPitch}
+            onChange={(event) => setCameraPitch(Number(event.target.value))}
+          />
+        </label>
+        <label>
+          Zoom
+          <input
+            max={2.5}
+            min={0.35}
+            step={0.1}
+            type="range"
+            value={cameraZoom}
+            onChange={(event) => setCameraZoom(Number(event.target.value))}
+          />
+        </label>
+        <button
+          onClick={() => {
+            setCameraYaw(-35);
+            setCameraPitch(58);
+            setCameraZoom(1);
+            setCameraPanX(0);
+            setCameraPanY(0);
+          }}
+        >
+          Reset
+        </button>
+      </details>
+      <div className="battlefield-3d-legend">
+        <span><b>z1</b> = 5 ft</span>
+        <span>Dark tiles are blocked</span>
+        <span>Drag orbit, Shift-drag pan, wheel zoom</span>
+      </div>
+    </div>
+  );
+}
+
+function get3DTileCoordinates({
+  gridWidth,
+  gridHeight,
+  focus,
+  creatures,
+  highlightedKeys,
+  mapToolKeys,
+  movementKeys
+}: {
+  gridWidth: number;
+  gridHeight: number;
+  focus: GridPosition;
+  creatures: Creature[];
+  highlightedKeys: Set<string>;
+  mapToolKeys: Set<string>;
+  movementKeys: Set<string>;
+}): Array<{ x: number; y: number }> {
+  const seen = new Set<string>();
+  const coordinates: Array<{ x: number; y: number }> = [];
+  const addTile = (x: number, y: number) => {
+    if (x < 0 || y < 0 || x >= gridWidth || y >= gridHeight) {
+      return;
+    }
+    const key = `${x},${y}`;
+    if (seen.has(key)) {
+      return;
+    }
+    seen.add(key);
+    coordinates.push({ x, y });
+  };
+
+  if (gridWidth * gridHeight <= MAX_FULL_3D_TILES) {
+    for (let y = 0; y < gridHeight; y += 1) {
+      for (let x = 0; x < gridWidth; x += 1) {
+        addTile(x, y);
+      }
+    }
+    return coordinates;
+  }
+
+  const centerX = Math.round(focus.x);
+  const centerY = Math.round(focus.y);
+  for (let y = centerY - CULLED_3D_TILE_RADIUS; y <= centerY + CULLED_3D_TILE_RADIUS; y += 1) {
+    for (let x = centerX - CULLED_3D_TILE_RADIUS; x <= centerX + CULLED_3D_TILE_RADIUS; x += 1) {
+      addTile(x, y);
+    }
+  }
+
+  addTile(centerX, centerY);
+  creatures.forEach((creature) => addTile(creature.position.x, creature.position.y));
+  highlightedKeys.forEach((key) => addTileFromKey(key, addTile));
+  mapToolKeys.forEach((key) => addTileFromKey(key, addTile));
+  movementKeys.forEach((key) => addTileFromKey(key, addTile));
+
+  return coordinates;
+}
+
+function addTileFromKey(key: string, addTile: (x: number, y: number) => void) {
+  const [x, y] = key.split(',').map(Number);
+  if (Number.isFinite(x) && Number.isFinite(y)) {
+    addTile(x, y);
+  }
+}
+
+function clampNumber(value: number, min: number, max: number): number {
+  return Math.min(max, Math.max(min, value));
+}
+
+function getCameraRelativeArrowKey(key: string, yawDegrees: number): string {
+  const desiredScreenVectors: Record<string, { x: number; y: number }> = {
+    ArrowUp: { x: 0, y: -1 },
+    ArrowDown: { x: 0, y: 1 },
+    ArrowLeft: { x: -1, y: 0 },
+    ArrowRight: { x: 1, y: 0 }
+  };
+  const desired = desiredScreenVectors[key];
+  if (!desired) {
+    return key;
+  }
+
+  const yawRadians = (yawDegrees * Math.PI) / 180;
+  const candidates = [
+    { key: 'ArrowRight', x: 1, y: 0 },
+    { key: 'ArrowLeft', x: -1, y: 0 },
+    { key: 'ArrowDown', x: 0, y: 1 },
+    { key: 'ArrowUp', x: 0, y: -1 }
+  ];
+
+  let best = candidates[0];
+  let bestScore = Number.NEGATIVE_INFINITY;
+  for (const candidate of candidates) {
+    const screenX = candidate.x * Math.cos(yawRadians) - candidate.y * Math.sin(yawRadians);
+    const screenY = candidate.x * Math.sin(yawRadians) + candidate.y * Math.cos(yawRadians);
+    const score = screenX * desired.x + screenY * desired.y;
+    if (score > bestScore) {
+      best = candidate;
+      bestScore = score;
+    }
+  }
+
+  return best.key;
+}
+
+function getTeamColor(team: Creature['team']): string {
+  if (team === 'players') {
+    return '#2367d1';
+  }
+
+  if (team === 'enemies') {
+    return '#b3261e';
+  }
+
+  return '#666';
+}
+
+function darkenTeamColor(team: Creature['team']): string {
+  if (team === 'players') {
+    return '#17448d';
+  }
+
+  if (team === 'enemies') {
+    return '#751812';
+  }
+
+  return '#3f3f3f';
+}
+
 function CreatureSummary({ creature, state }: { creature: Creature; state: CombatState }) {
   const effectiveAc = getEffectiveAC(creature, state);
   const effectiveSpeed = getEffectiveSpeed(creature, state);
+  const effectiveClimbSpeed = getEffectiveClimbSpeed(creature, state);
+  const effectiveFlySpeed = getEffectiveFlySpeed(creature, state);
 
   return (
     <div className="creature-summary">
@@ -1204,6 +2097,8 @@ function CreatureSummary({ creature, state }: { creature: Creature; state: Comba
       </span>
       <span>AC {formatBaseEffectiveNumber(creature.ac, effectiveAc)}</span>
       <span>Speed {formatBaseEffectiveNumber(creature.speed, effectiveSpeed)}</span>
+      {effectiveClimbSpeed > 0 && <span>Climb {formatBaseEffectiveNumber(creature.climbSpeed ?? 0, effectiveClimbSpeed)}</span>}
+      {effectiveFlySpeed > 0 && <span>Fly {formatBaseEffectiveNumber(creature.flySpeed ?? 0, effectiveFlySpeed)}</span>}
       {(creature.resources ?? []).length > 0 && (
         <span>Resources: {(creature.resources ?? []).map((resource) => `${resource.name} ${resource.current}/${resource.max}`).join(', ')}</span>
       )}
@@ -1212,7 +2107,7 @@ function CreatureSummary({ creature, state }: { creature: Creature; state: Comba
       )}
       {creature.readiedAction && <span>Ready: {creature.readiedAction.actionName} when {creature.readiedAction.trigger}</span>}
       <span>
-        Pos {creature.position.x},{creature.position.y}
+        Pos {formatPosition(creature.position)}
       </span>
       <span>
         Conditions: {creature.conditions.length > 0 ? creature.conditions.map((condition) => getConditionLabel(condition)).join(', ') : 'none'}
@@ -1549,6 +2444,52 @@ function SettingsDialog({
         </section>
 
         <section className="settings-section">
+          <h3>3D Camera</h3>
+          <div className="settings-toggles">
+            <label>
+              <input
+                type="checkbox"
+                checked={settings.invertCameraOrbitX}
+                onChange={(event) => onChange({ invertCameraOrbitX: event.target.checked })}
+              />
+              Invert orbit horizontal drag
+            </label>
+            <label>
+              <input
+                type="checkbox"
+                checked={settings.invertCameraOrbitY}
+                onChange={(event) => onChange({ invertCameraOrbitY: event.target.checked })}
+              />
+              Invert orbit vertical drag
+            </label>
+            <label>
+              <input
+                type="checkbox"
+                checked={settings.invertCameraPanX}
+                onChange={(event) => onChange({ invertCameraPanX: event.target.checked })}
+              />
+              Invert pan horizontal drag
+            </label>
+            <label>
+              <input
+                type="checkbox"
+                checked={settings.invertCameraPanY}
+                onChange={(event) => onChange({ invertCameraPanY: event.target.checked })}
+              />
+              Invert pan vertical drag
+            </label>
+            <label>
+              <input
+                type="checkbox"
+                checked={settings.invertCameraZoom}
+                onChange={(event) => onChange({ invertCameraZoom: event.target.checked })}
+              />
+              Invert mouse wheel zoom
+            </label>
+          </div>
+        </section>
+
+        <section className="settings-section">
           <h3>Keyboard Shortcuts</h3>
           <ShortcutReference />
         </section>
@@ -1724,8 +2665,10 @@ function getMapToolResult(
   if (tool === 'distance' || tool === 'lineOfSight') {
     const target = end ?? start;
     const gridDistance = getDistanceFeet(start, target);
-    const straightDistance = Math.round(Math.hypot(target.x - start.x, target.y - start.y) * 5);
-    const blocked = squares.filter((square) => combat.grid.blocked.some((cell) => samePosition(cell, square))).length;
+    const straightDistance = Math.round(
+      Math.hypot(target.x - start.x, target.y - start.y, getElevation(target) - getElevation(start)) * 5
+    );
+    const blocked = squares.filter((square) => combat.grid.blocked.some((cell) => sameTilePosition(cell, square))).length;
     const losText = tool === 'lineOfSight' ? ` LOS ${hasLineOfSight(combat, start, target) ? 'clear' : 'blocked'}.` : '';
     return `${formatPosition(start)} to ${formatPosition(target)}: ${gridDistance} ft grid, ${straightDistance} ft straight.${blocked ? ` ${blocked} blocked square(s) crossed.` : ''}${losText}`;
   }
@@ -1741,7 +2684,7 @@ function feetToSquares(feet: number): number {
 }
 
 function formatPosition(position: GridPosition): string {
-  return `${position.x},${position.y}`;
+  return `${position.x},${position.y},${position.z ?? 0}`;
 }
 
 function formatMapToolLabel(tool: MapTool): string {
@@ -1861,6 +2804,11 @@ function defaultUiSettings(): UiSettings {
     showShortcutHints: true,
     showAdvancedTools: false,
     showMapTools: true,
-    showGridCoordinates: true
+    showGridCoordinates: true,
+    invertCameraOrbitX: false,
+    invertCameraOrbitY: false,
+    invertCameraPanX: false,
+    invertCameraPanY: false,
+    invertCameraZoom: false
   };
 }

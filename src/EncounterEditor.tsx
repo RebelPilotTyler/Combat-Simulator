@@ -1,8 +1,10 @@
 import { useEffect, useMemo, useState, type ReactNode } from 'react';
 import { sampleCreatures } from './data/sampleEncounter';
 import { createCombatState } from './engine/combat';
+import { crCalculationTable, estimateCreatureCR, getCrXp } from './engine/cr';
+import { MAX_GRID_SIZE, normalizeGridDefinition } from './engine/grid';
 import { parseCombatStateJson } from './engine/serialization';
-import { positionKey, samePosition } from './engine/shapes';
+import { getTileHeight, getTilePosition, positionKey, sameTilePosition } from './engine/shapes';
 import type {
   Ability,
   ActionCost,
@@ -77,13 +79,39 @@ const effectTypes: EffectOperationType[] = [
   'logMessage'
 ];
 const stackBehaviors: StackBehavior[] = ['none', 'refresh', 'stackCount', 'stackIntensity'];
+type EditorMode = 'creatures' | 'encounters';
+type EncounterBalanceLeader = 'players' | 'enemies' | 'even' | 'unopposed';
+
+interface EncounterBalanceTeamSummary {
+  team: Team;
+  count: number;
+  xp: number;
+  crLabels: string[];
+}
+
+export interface EncounterBalanceSummary {
+  teams: Record<Team, EncounterBalanceTeamSummary>;
+  leader: EncounterBalanceLeader;
+  ratio: number;
+  message: string;
+}
+
+const encounterBalanceCrOptions = { targetAc: 15, targetSaveBonus: 3 };
 
 export interface SavedEncounter {
   id: string;
   name: string;
   grid: GridDefinition;
-  creatures: Creature[];
+  instances: SavedEncounterCreatureInstance[];
+  creatures?: Creature[];
   updatedAt: string;
+}
+
+export interface SavedEncounterCreatureInstance {
+  id: string;
+  templateId: string;
+  overrides: Partial<Creature>;
+  fallback?: Creature;
 }
 
 export function EncounterEditor({
@@ -111,14 +139,21 @@ export function EncounterEditor({
   const [creatureJsonMessage, setCreatureJsonMessage] = useState<string | undefined>();
   const [encounterJson, setEncounterJson] = useState('');
   const [encounterJsonMessage, setEncounterJsonMessage] = useState<string | undefined>();
+  const [editorMode, setEditorMode] = useState<EditorMode>('creatures');
+  const [creatureSearch, setCreatureSearch] = useState('');
+  const [crTargetAc, setCrTargetAc] = useState(15);
+  const [crTargetSaveBonus, setCrTargetSaveBonus] = useState(3);
+  const [manualDprOverride, setManualDprOverride] = useState('');
+  const [manualFinalCrOverride, setManualFinalCrOverride] = useState('');
 
   const [builderName, setBuilderName] = useState('New Encounter');
   const [builderGrid, setBuilderGrid] = useState<GridDefinition>({ width: 10, height: 10, blocked: [] });
-  const [builderCreatures, setBuilderCreatures] = useState<Creature[]>([]);
+  const [builderInstances, setBuilderInstances] = useState<SavedEncounterCreatureInstance[]>([]);
   const [selectedTemplateId, setSelectedTemplateId] = useState<string>(() => creatureLibrary[0]?.id ?? '');
   const [selectedInstanceId, setSelectedInstanceId] = useState<string | undefined>();
   const [selectedEncounterId, setSelectedEncounterId] = useState<string | undefined>();
-  const [builderTool, setBuilderTool] = useState<'place' | 'move' | 'block'>('place');
+  const [builderTool, setBuilderTool] = useState<'place' | 'move' | 'block' | 'height'>('place');
+  const [builderTileHeight, setBuilderTileHeight] = useState(1);
 
   const selectedAction = creatureDraft.actions.find((action) => action.id === selectedActionId) ?? creatureDraft.actions[0];
   const selectedResource = (creatureDraft.resources ?? []).find((resource) => resource.id === selectedResourceId) ?? creatureDraft.resources?.[0];
@@ -126,8 +161,29 @@ export function EncounterEditor({
   const selectedLibraryAction = actionLibrary.find((action) => action.id === selectedLibraryActionId) ?? actionLibrary[0];
   const selectedLibraryFeature = featureLibrary.find((feature) => feature.id === selectedLibraryFeatureId) ?? featureLibrary[0];
   const selectedLibraryResource = resourceLibrary.find((resource) => resource.id === selectedLibraryResourceId) ?? resourceLibrary[0];
+  const hydratedBuilder = useMemo(
+    () => hydrateEncounterCreatures(builderInstances, creatureLibrary),
+    [builderInstances, creatureLibrary]
+  );
+  const builderCreatures = hydratedBuilder.creatures;
+  const encounterTemplateWarnings = hydratedBuilder.warnings;
+  const encounterBalance = useMemo(() => estimateEncounterBalance(builderCreatures), [builderCreatures]);
   const selectedInstance = builderCreatures.find((creature) => creature.id === selectedInstanceId);
   const selectedTemplate = creatureLibrary.find((creature) => creature.id === selectedTemplateId) ?? creatureLibrary[0];
+  const filteredCreatureLibrary = useMemo(
+    () => filterCreaturesForEditor(creatureLibrary, creatureSearch),
+    [creatureLibrary, creatureSearch]
+  );
+  const crEstimate = useMemo(
+    () =>
+      estimateCreatureCR(creatureDraft, {
+        targetAc: crTargetAc,
+        targetSaveBonus: crTargetSaveBonus,
+        manualDpr: parseOptionalNumber(manualDprOverride),
+        manualFinalCr: manualFinalCrOverride.trim() || undefined
+      }),
+    [creatureDraft, crTargetAc, crTargetSaveBonus, manualDprOverride, manualFinalCrOverride]
+  );
 
   useEffect(() => {
     saveJson(CREATURE_LIBRARY_KEY, creatureLibrary);
@@ -499,7 +555,7 @@ export function EncounterEditor({
   function clearBuilder() {
     setBuilderName('New Encounter');
     setBuilderGrid({ width: 10, height: 10, blocked: [] });
-    setBuilderCreatures([]);
+    setBuilderInstances([]);
     setSelectedInstanceId(undefined);
     setSelectedEncounterId(undefined);
     setEncounterJsonMessage('Builder cleared.');
@@ -508,7 +564,7 @@ export function EncounterEditor({
   function seedBuilderFromCombat() {
     setBuilderName(`Combat Snapshot ${new Date().toLocaleDateString()}`);
     setBuilderGrid(cloneJson(currentCombat.grid));
-    setBuilderCreatures(currentCombat.creatures.map(cloneCreature));
+    setBuilderInstances(currentCombat.creatures.map((creature) => createEncounterInstanceFromCreature(creature, creatureLibrary)));
     setSelectedInstanceId(currentCombat.creatures[0]?.id);
     setSelectedEncounterId(undefined);
     setEncounterJsonMessage('Active combat copied into the builder.');
@@ -517,10 +573,11 @@ export function EncounterEditor({
   function loadSavedEncounter(encounter: SavedEncounter) {
     setBuilderName(encounter.name);
     setBuilderGrid(cloneJson(encounter.grid));
-    setBuilderCreatures(encounter.creatures.map(cloneCreature));
-    setSelectedInstanceId(encounter.creatures[0]?.id);
+    setBuilderInstances(encounter.instances.map(normalizeEncounterInstance));
+    setSelectedInstanceId(encounter.instances[0]?.id);
     setSelectedEncounterId(encounter.id);
-    setEncounterJsonMessage(`${encounter.name} loaded into the builder.`);
+    const warnings = hydrateEncounterCreatures(encounter.instances, creatureLibrary).warnings;
+    setEncounterJsonMessage(`${encounter.name} loaded into the builder.${warnings.length > 0 ? ` ${warnings.length} template warning(s).` : ''}`);
   }
 
   function saveBuilderEncounter() {
@@ -528,12 +585,12 @@ export function EncounterEditor({
       id: selectedEncounterId ?? createId(builderName, 'encounter'),
       name: builderName.trim() || 'Untitled Encounter',
       grid: normalizeGrid(builderGrid),
-      creatures: builderCreatures.map(normalizeCreatureDraft),
+      instances: builderInstances.map(normalizeEncounterInstance),
       updatedAt: new Date().toISOString()
     };
 
     setBuilderGrid(encounter.grid);
-    setBuilderCreatures(encounter.creatures);
+    setBuilderInstances(encounter.instances);
     setSelectedEncounterId(encounter.id);
     setEncounters((current) => upsertById(current, encounter));
     setEncounterJsonMessage(`${encounter.name} saved to localStorage.`);
@@ -551,7 +608,8 @@ export function EncounterEditor({
 
   function loadBuilderIntoCombat() {
     const grid = normalizeGrid(builderGrid);
-    const state = createCombatState(builderCreatures.map(normalizeCreatureDraft), grid.width, grid.height, grid.blocked);
+    const hydrated = hydrateEncounterCreatures(builderInstances, creatureLibrary);
+    const state = createCombatState(hydrated.creatures.map(normalizeCreatureDraft), grid.width, grid.height, grid.blocked, grid.heights ?? []);
     onLoadEncounter(state);
   }
 
@@ -560,7 +618,7 @@ export function EncounterEditor({
       id: selectedEncounterId ?? createId(builderName, 'encounter'),
       name: builderName.trim() || 'Untitled Encounter',
       grid: normalizeGrid(builderGrid),
-      creatures: builderCreatures.map(normalizeCreatureDraft),
+      instances: builderInstances.map(normalizeEncounterInstance),
       updatedAt: new Date().toISOString()
     };
     setEncounterJson(JSON.stringify(encounter, null, 2));
@@ -568,7 +626,7 @@ export function EncounterEditor({
   }
 
   function importEncounterJson() {
-    const imported = parseEncounterImport(encounterJson);
+    const imported = parseEncounterImport(encounterJson, creatureLibrary);
     if (!imported.ok) {
       setEncounterJsonMessage(imported.error);
       return;
@@ -581,7 +639,25 @@ export function EncounterEditor({
   }
 
   function handleBuilderCellClick(position: GridPosition) {
-    const existing = builderCreatures.find((creature) => samePosition(creature.position, position));
+    const tilePosition = getTilePosition(position, builderGrid);
+    const existing = builderCreatures.find((creature) => sameTilePosition(creature.position, tilePosition));
+
+    if (builderTool === 'height') {
+      setBuilderGrid((current) => setTileHeight(current, position, builderTileHeight));
+      const creatureIdsAtTile = builderCreatures
+        .filter((creature) => sameTilePosition(creature.position, position))
+        .map((creature) => creature.id);
+      setBuilderInstances((current) =>
+        current.map((instance) =>
+          creatureIdsAtTile.includes(instance.id)
+            ? mergeEncounterInstanceOverrides(instance, {
+                position: { ...(instance.overrides.position ?? position), z: builderTileHeight }
+              })
+            : instance
+        )
+      );
+      return;
+    }
 
     if (builderTool === 'block') {
       if (existing) {
@@ -591,8 +667,8 @@ export function EncounterEditor({
 
       setBuilderGrid((current) => ({
         ...current,
-        blocked: current.blocked.some((cell) => samePosition(cell, position))
-          ? current.blocked.filter((cell) => !samePosition(cell, position))
+        blocked: current.blocked.some((cell) => sameTilePosition(cell, position))
+          ? current.blocked.filter((cell) => !sameTilePosition(cell, position))
           : [...current.blocked, position]
       }));
       return;
@@ -608,15 +684,17 @@ export function EncounterEditor({
     }
 
     if (builderTool === 'move' && selectedInstanceId) {
-      setBuilderCreatures((current) =>
-        current.map((creature) => (creature.id === selectedInstanceId ? { ...creature, position } : creature))
+      setBuilderInstances((current) =>
+        current.map((instance) =>
+          instance.id === selectedInstanceId ? mergeEncounterInstanceOverrides(instance, { position: tilePosition }) : instance
+        )
       );
       return;
     }
 
     if (builderTool === 'place' && selectedTemplate) {
-      const instance = createCreatureInstance(selectedTemplate, position);
-      setBuilderCreatures((current) => [...current, instance]);
+      const instance = createEncounterInstanceFromTemplate(selectedTemplate, tilePosition);
+      setBuilderInstances((current) => [...current, instance]);
       setSelectedInstanceId(instance.id);
     }
   }
@@ -626,8 +704,8 @@ export function EncounterEditor({
       return;
     }
 
-    setBuilderCreatures((current) =>
-      current.map((creature) => (creature.id === selectedInstanceId ? normalizeCreatureDraft({ ...creature, ...update }) : creature))
+    setBuilderInstances((current) =>
+      current.map((instance) => (instance.id === selectedInstanceId ? mergeEncounterInstanceOverrides(instance, update) : instance))
     );
   }
 
@@ -636,13 +714,23 @@ export function EncounterEditor({
       return;
     }
 
-    const next = builderCreatures.filter((creature) => creature.id !== selectedInstanceId);
-    setBuilderCreatures(next);
+    const next = builderInstances.filter((instance) => instance.id !== selectedInstanceId);
+    setBuilderInstances(next);
     setSelectedInstanceId(next[0]?.id);
   }
 
   return (
     <section className="editor-shell">
+      <nav className="editor-mode-tabs" aria-label="Editor modes">
+        <button className={editorMode === 'creatures' ? 'selected-action' : ''} onClick={() => setEditorMode('creatures')}>
+          Creature Library / Editor
+        </button>
+        <button className={editorMode === 'encounters' ? 'selected-action' : ''} onClick={() => setEditorMode('encounters')}>
+          Encounter Builder / Editor
+        </button>
+      </nav>
+
+      {editorMode === 'creatures' ? (
       <section className="panel editor-library-panel">
         <header className="editor-panel-header">
           <h2>Creature Library</h2>
@@ -654,28 +742,39 @@ export function EncounterEditor({
           </div>
         </header>
 
+        <label className="editor-search">
+          Search creatures
+          <input
+            value={creatureSearch}
+            placeholder="Name, team, action, tag, or stat"
+            onChange={(event) => setCreatureSearch(event.target.value)}
+          />
+        </label>
+
         <div className="editor-list-form">
           <div className="library-list">
-            {creatureLibrary.map((creature) => (
+            {filteredCreatureLibrary.map((creature) => (
               <button
-                className={creature.id === selectedCreatureId ? 'selected-action' : ''}
+                className={['creature-summary-card', creature.id === selectedCreatureId ? 'selected-action' : ''].join(' ')}
                 key={creature.id}
                 onClick={() => setSelectedCreatureId(creature.id)}
               >
                 <strong>{creature.name}</strong>
-                <span>
-                  {creature.team} HP {creature.maxHp} AC {creature.ac}
-                </span>
+                <span>{creature.team}</span>
+                <small>HP {creature.hp}/{creature.maxHp}</small>
+                <small>AC {creature.ac}</small>
+                <small>Speed {creature.speed}</small>
                 <small>{creature.actions.length} action(s)</small>
               </button>
             ))}
+            {filteredCreatureLibrary.length === 0 && <span className="empty-list">No creatures match that search.</span>}
           </div>
 
           <div className="creature-editor">
             {partLibraryMessage && <p className="editor-message">{partLibraryMessage}</p>}
 
-            <section className="editor-section">
-              <h3>Basic Stats</h3>
+            <details className="editor-section editor-subsection" open>
+              <summary>Basic Stats</summary>
               <div className="form-grid">
                 <label>
                   Name
@@ -694,11 +793,12 @@ export function EncounterEditor({
                 <NumberInput label="HP" value={creatureDraft.hp} onChange={(value) => updateDraftCreature({ hp: value })} />
                 <NumberInput label="Max HP" value={creatureDraft.maxHp} onChange={(value) => updateDraftCreature({ maxHp: value })} />
                 <NumberInput label="AC" value={creatureDraft.ac} onChange={(value) => updateDraftCreature({ ac: value })} />
-                <NumberInput label="Speed" value={creatureDraft.speed} onChange={(value) => updateDraftCreature({ speed: value })} />
                 <NumberInput label="Proficiency" value={creatureDraft.proficiencyBonus} onChange={(value) => updateDraftCreature({ proficiencyBonus: value })} />
-                <NumberInput label="Start X" value={creatureDraft.position.x} onChange={(value) => updateDraftCreature({ position: { ...creatureDraft.position, x: value } })} />
-                <NumberInput label="Start Y" value={creatureDraft.position.y} onChange={(value) => updateDraftCreature({ position: { ...creatureDraft.position, y: value } })} />
               </div>
+            </details>
+
+            <details className="editor-section editor-subsection">
+              <summary>Ability Scores</summary>
               <div className="ability-score-grid">
                 {abilities.map((ability) => (
                   <NumberInput
@@ -709,10 +809,34 @@ export function EncounterEditor({
                   />
                 ))}
               </div>
-            </section>
+              <div className="ability-score-grid">
+                {(['athletics', 'acrobatics', 'stealth', 'perception', 'investigation'] as const).map((skill) => (
+                  <label key={skill}>
+                    {skill}
+                    <input
+                      type="number"
+                      value={creatureDraft.skillBonuses?.[skill] ?? ''}
+                      onChange={(event) => updateSkill(skill, event.target.value)}
+                    />
+                  </label>
+                ))}
+              </div>
+            </details>
 
-            <section className="editor-section">
-              <h3>Actions</h3>
+            <details className="editor-section editor-subsection">
+              <summary>Movement / Position Defaults</summary>
+              <div className="form-grid">
+                <NumberInput label="Speed" value={creatureDraft.speed} onChange={(value) => updateDraftCreature({ speed: value })} />
+                <NumberInput label="Climb" value={creatureDraft.climbSpeed ?? 0} onChange={(value) => updateDraftCreature({ climbSpeed: value })} />
+                <NumberInput label="Fly" value={creatureDraft.flySpeed ?? 0} onChange={(value) => updateDraftCreature({ flySpeed: value })} />
+                <NumberInput label="Start X" value={creatureDraft.position.x} onChange={(value) => updateDraftCreature({ position: { ...creatureDraft.position, x: value } })} />
+                <NumberInput label="Start Y" value={creatureDraft.position.y} onChange={(value) => updateDraftCreature({ position: { ...creatureDraft.position, y: value } })} />
+                <NumberInput label="Start Z" value={creatureDraft.position.z ?? 0} onChange={(value) => updateDraftCreature({ position: { ...creatureDraft.position, z: value } })} />
+              </div>
+            </details>
+
+            <details className="editor-section editor-subsection" open>
+              <summary>Actions</summary>
               <div className="editor-button-row">
                 <button onClick={addAction}>Add Action</button>
                 <button onClick={duplicateAction}>Duplicate Action</button>
@@ -733,14 +857,19 @@ export function EncounterEditor({
                 deleteDisabled={!selectedLibraryAction}
                 getSummary={(action) => `${formatEditorActionCost(action.actionCost)} - ${action.kind} - ${action.rules?.length ?? 0} hook(s)`}
               />
-              <div className="action-editor-layout">
-                <div className="library-list compact-list">
-                  {creatureDraft.actions.map((action) => (
-                    <button
-                      className={action.id === selectedAction?.id ? 'selected-action' : ''}
-                      key={action.id}
-                      onClick={() => setSelectedActionId(action.id)}
-                    >
+              <div className="action-card-list">
+                {creatureDraft.actions.map((action) => (
+                  <details
+                    className={['action-edit-card', action.id === selectedAction?.id ? 'selected-action' : ''].join(' ')}
+                    key={action.id}
+                    open={action.id === selectedAction?.id}
+                    onToggle={(event) => {
+                      if (event.currentTarget.open) {
+                        setSelectedActionId(action.id);
+                      }
+                    }}
+                  >
+                    <summary>
                       <strong>{action.name}</strong>
                       <span>
                         {formatEditorActionCost(action.actionCost)} - {action.kind}
@@ -749,21 +878,21 @@ export function EncounterEditor({
                         {action.tags.join(', ') || 'no tags'}
                         {(action.rules?.length ?? 0) > 0 ? ` - ${action.rules?.length} hook(s)` : ''}
                       </small>
-                    </button>
-                  ))}
-                </div>
-                {selectedAction && (
-                  <ActionEditor
-                    action={selectedAction}
-                    resources={creatureDraft.resources ?? []}
-                    onChange={updateAction}
-                  />
-                )}
+                    </summary>
+                    {action.id === selectedAction?.id && (
+                      <ActionEditor
+                        action={selectedAction}
+                        resources={creatureDraft.resources ?? []}
+                        onChange={updateAction}
+                      />
+                    )}
+                  </details>
+                ))}
               </div>
-            </section>
+            </details>
 
-            <section className="editor-section">
-              <h3>Features</h3>
+            <details className="editor-section editor-subsection">
+              <summary>Features / Triggers / Effects</summary>
               <div className="editor-button-row">
                 <button onClick={addFeature}>Add Feature</button>
                 <button onClick={duplicateFeature} disabled={!selectedFeature}>
@@ -809,10 +938,10 @@ export function EncounterEditor({
                   />
                 )}
               </div>
-            </section>
+            </details>
 
-            <section className="editor-section">
-              <h3>Resources and Skills</h3>
+            <details className="editor-section editor-subsection">
+              <summary>Resources / Limited Uses</summary>
               <div className="editor-button-row">
                 <button onClick={addResource}>Add Resource</button>
                 <button onClick={deleteResource} disabled={!selectedResource}>
@@ -873,19 +1002,77 @@ export function EncounterEditor({
                   </div>
                 )}
               </div>
-              <div className="ability-score-grid">
-                {(['athletics', 'acrobatics', 'stealth', 'perception', 'investigation'] as const).map((skill) => (
-                  <label key={skill}>
-                    {skill}
-                    <input
-                      type="number"
-                      value={creatureDraft.skillBonuses?.[skill] ?? ''}
-                      onChange={(event) => updateSkill(skill, event.target.value)}
-                    />
-                  </label>
-                ))}
+            </details>
+
+            <details className="editor-section editor-subsection">
+              <summary>CR / Balance Helper</summary>
+              <p className="editor-muted">Estimated from 5e-style monster creation math. This does not affect saved creature data or combat behavior.</p>
+              <div className="form-grid">
+                <NumberInput label="Target AC" value={crTargetAc} min={1} onChange={setCrTargetAc} />
+                <NumberInput label="Target Save Bonus" value={crTargetSaveBonus} onChange={setCrTargetSaveBonus} />
+                <label>
+                  Manual DPR Override
+                  <input
+                    type="number"
+                    value={manualDprOverride}
+                    placeholder={`${crEstimate.estimatedDpr}`}
+                    onChange={(event) => setManualDprOverride(event.target.value)}
+                  />
+                </label>
+                <label>
+                  Manual Final CR
+                  <input
+                    value={manualFinalCrOverride}
+                    placeholder={crEstimate.finalCr}
+                    onChange={(event) => setManualFinalCrOverride(event.target.value)}
+                  />
+                </label>
               </div>
-            </section>
+              <div className="cr-helper-results">
+                <span><strong>Defensive CR</strong>{crEstimate.defensiveCr}</span>
+                <span><strong>Offensive CR</strong>{crEstimate.offensiveCr}</span>
+                <span><strong>Final Estimated CR</strong>{crEstimate.finalCr}</span>
+                <span><strong>Suggested PB</strong>+{crEstimate.proficiencyBonusSuggestion}</span>
+                <span><strong>Effective HP</strong>{crEstimate.effectiveHp}</span>
+                <span><strong>Estimated DPR</strong>{crEstimate.estimatedDpr}</span>
+              </div>
+              <ul className="cr-helper-notes">
+                {crEstimate.notes.map((note) => (
+                  <li key={note}>{note}</li>
+                ))}
+              </ul>
+              <details className="cr-table-reference">
+                <summary>CR Calculation Table</summary>
+                <div className="cr-table-scroll">
+                  <table className="cr-reference-table">
+                    <thead>
+                      <tr>
+                        <th>CR</th>
+                        <th>HP</th>
+                        <th>AC</th>
+                        <th>DPR</th>
+                        <th>Attack</th>
+                        <th>Save DC</th>
+                        <th>XP</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {crCalculationTable.map((row) => (
+                        <tr key={row.label}>
+                          <td>{row.label}</td>
+                          <td>{row.minHp}-{row.maxHp}</td>
+                          <td>{row.ac}</td>
+                          <td>{row.minDpr}-{row.maxDpr}</td>
+                          <td>+{row.attackBonus}</td>
+                          <td>{row.saveDc}</td>
+                          <td>{row.xp.toLocaleString()}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </details>
+            </details>
 
             <section className="editor-section">
               <h3>Creature JSON</h3>
@@ -900,7 +1087,7 @@ export function EncounterEditor({
           </div>
         </div>
       </section>
-
+      ) : (
       <section className="panel encounter-builder-panel">
         <header className="editor-panel-header">
           <h2>Encounter Builder</h2>
@@ -913,6 +1100,13 @@ export function EncounterEditor({
             </button>
           </div>
         </header>
+        {encounterTemplateWarnings.length > 0 && (
+          <div className="editor-message">
+            {encounterTemplateWarnings.map((warning) => (
+              <span key={warning}>{warning}</span>
+            ))}
+          </div>
+        )}
 
         <div className="encounter-layout">
           <aside className="encounter-side">
@@ -926,7 +1120,7 @@ export function EncounterEditor({
                     onClick={() => loadSavedEncounter(encounter)}
                   >
                     <strong>{encounter.name}</strong>
-                    <span>{encounter.creatures.length} creature(s)</span>
+                    <span>{encounter.instances.length} creature(s)</span>
                     <small>{new Date(encounter.updatedAt).toLocaleString()}</small>
                   </button>
                 ))}
@@ -944,8 +1138,8 @@ export function EncounterEditor({
                   Name
                   <input value={builderName} onChange={(event) => setBuilderName(event.target.value)} />
                 </label>
-                <NumberInput label="Width" value={builderGrid.width} min={1} onChange={(value) => setBuilderGrid((current) => normalizeGrid({ ...current, width: value }))} />
-                <NumberInput label="Height" value={builderGrid.height} min={1} onChange={(value) => setBuilderGrid((current) => normalizeGrid({ ...current, height: value }))} />
+                <NumberInput label="Width" value={builderGrid.width} min={1} max={MAX_GRID_SIZE} onChange={(value) => setBuilderGrid((current) => normalizeGrid({ ...current, width: value }))} />
+                <NumberInput label="Height" value={builderGrid.height} min={1} max={MAX_GRID_SIZE} onChange={(value) => setBuilderGrid((current) => normalizeGrid({ ...current, height: value }))} />
               </div>
               <div className="action-tabs">
                 <button className={builderTool === 'place' ? 'selected-action' : ''} onClick={() => setBuilderTool('place')}>
@@ -957,7 +1151,15 @@ export function EncounterEditor({
                 <button className={builderTool === 'block' ? 'selected-action' : ''} onClick={() => setBuilderTool('block')}>
                   Block
                 </button>
+                <button className={builderTool === 'height' ? 'selected-action' : ''} onClick={() => setBuilderTool('height')}>
+                  Height
+                </button>
               </div>
+              {builderTool === 'height' && (
+                <div className="form-grid">
+                  <NumberInput label="Tile Z" value={builderTileHeight} onChange={setBuilderTileHeight} />
+                </div>
+              )}
               <label>
                 Creature to place
                 <select value={selectedTemplateId} onChange={(event) => setSelectedTemplateId(event.target.value)}>
@@ -968,6 +1170,23 @@ export function EncounterEditor({
                   ))}
                 </select>
               </label>
+            </section>
+
+            <section className="editor-section encounter-balance-card">
+              <h3>Encounter Balance</h3>
+              <strong>{encounterBalance.message}</strong>
+              <div className="encounter-balance-grid">
+                {teams.map((team) => (
+                  <span key={team}>
+                    <strong>{team}</strong>
+                    {encounterBalance.teams[team].xp.toLocaleString()} XP
+                    <small>{encounterBalance.teams[team].count} creature(s)</small>
+                  </span>
+                ))}
+              </div>
+              <p className="editor-muted">
+                Based on estimated final CR converted to XP weight. Neutral creatures are listed but not counted for the player/enemy edge.
+              </p>
             </section>
 
             <section className="editor-section">
@@ -981,7 +1200,7 @@ export function EncounterEditor({
                   >
                     <strong>{creature.name}</strong>
                     <span>
-                      {creature.team} {creature.position.x},{creature.position.y}
+                      {creature.team} {creature.position.x},{creature.position.y},{creature.position.z ?? 0}
                     </span>
                   </button>
                 ))}
@@ -1005,6 +1224,7 @@ export function EncounterEditor({
                   </label>
                   <NumberInput label="X" value={selectedInstance.position.x} onChange={(value) => updateSelectedInstance({ position: { ...selectedInstance.position, x: value } })} />
                   <NumberInput label="Y" value={selectedInstance.position.y} onChange={(value) => updateSelectedInstance({ position: { ...selectedInstance.position, y: value } })} />
+                  <NumberInput label="Z" value={selectedInstance.position.z ?? 0} onChange={(value) => updateSelectedInstance({ position: { ...selectedInstance.position, z: value } })} />
                   <NumberInput label="HP" value={selectedInstance.hp} onChange={(value) => updateSelectedInstance({ hp: value })} />
                   <button onClick={removeSelectedInstance}>Remove From Encounter</button>
                 </div>
@@ -1016,14 +1236,15 @@ export function EncounterEditor({
             <div
               className="builder-grid-board"
               role="grid"
-              style={{ gridTemplateColumns: `repeat(${builderGrid.width}, 40px)` }}
+              style={{ gridTemplateColumns: `repeat(${builderGrid.width}, 52px)` }}
             >
               {Array.from({ length: builderGrid.height }).flatMap((_, y) =>
                 Array.from({ length: builderGrid.width }).map((_, x) => {
-                  const position = { x, y };
+                  const position = getTilePosition({ x, y }, builderGrid);
                   const key = positionKey(position);
-                  const creature = builderCreatures.find((candidate) => samePosition(candidate.position, position));
+                  const creature = builderCreatures.find((candidate) => sameTilePosition(candidate.position, position));
                   const blocked = blockedKeys.has(key);
+                  const tileHeight = getTileHeight(position, builderGrid);
                   return (
                     <button
                       aria-label={`Builder grid ${x},${y}${creature ? ` ${creature.name}` : ''}${blocked ? ' blocked' : ''}`}
@@ -1038,6 +1259,7 @@ export function EncounterEditor({
                       onClick={() => handleBuilderCellClick(position)}
                     >
                       <span className="coord">{x},{y}</span>
+                      {tileHeight !== 0 && <span className="height-marker">z{tileHeight}</span>}
                       {creature && <span className={`token ${creature.team}`}>{getCreatureShortLabel(creature)}</span>}
                     </button>
                   );
@@ -1057,6 +1279,7 @@ export function EncounterEditor({
           <textarea value={encounterJson} onChange={(event) => setEncounterJson(event.target.value)} spellCheck={false} />
         </section>
       </section>
+      )}
     </section>
   );
 }
@@ -1426,6 +1649,8 @@ function FeatureEditor({
         <div className="form-grid">
           <NumberInput label="AC" value={feature.modifiers?.ac ?? 0} onChange={(value) => onChange({ modifiers: cleanStatModifiers({ ...feature.modifiers, ac: value }) })} />
           <NumberInput label="Speed" value={feature.modifiers?.speed ?? 0} onChange={(value) => onChange({ modifiers: cleanStatModifiers({ ...feature.modifiers, speed: value }) })} />
+          <NumberInput label="Climb" value={feature.modifiers?.climbSpeed ?? 0} onChange={(value) => onChange({ modifiers: cleanStatModifiers({ ...feature.modifiers, climbSpeed: value }) })} />
+          <NumberInput label="Fly" value={feature.modifiers?.flySpeed ?? 0} onChange={(value) => onChange({ modifiers: cleanStatModifiers({ ...feature.modifiers, flySpeed: value }) })} />
           <NumberInput label="Attack Bonus" value={feature.modifiers?.attackBonus ?? 0} onChange={(value) => onChange({ modifiers: cleanStatModifiers({ ...feature.modifiers, attackBonus: value }) })} />
           <NumberInput label="Max HP" value={feature.modifiers?.maxHp ?? 0} onChange={(value) => onChange({ modifiers: cleanStatModifiers({ ...feature.modifiers, maxHp: value }) })} />
         </div>
@@ -1863,19 +2088,117 @@ function NumberInput({
   label,
   value,
   min,
+  max,
   onChange
 }: {
   label: string;
   value: number;
   min?: number;
+  max?: number;
   onChange: (value: number) => void;
 }) {
   return (
     <label>
       {label}
-      <input min={min} type="number" value={Number.isFinite(value) ? value : 0} onChange={(event) => onChange(Number(event.target.value))} />
+      <input max={max} min={min} type="number" value={Number.isFinite(value) ? value : 0} onChange={(event) => onChange(Number(event.target.value))} />
     </label>
   );
+}
+
+export function filterCreaturesForEditor(creatures: Creature[], query: string): Creature[] {
+  const terms = query
+    .trim()
+    .toLowerCase()
+    .split(/\s+/)
+    .filter(Boolean);
+
+  if (terms.length === 0) {
+    return creatures;
+  }
+
+  return creatures.filter((creature) => {
+    const haystack = [
+      creature.name,
+      creature.team,
+      `hp ${creature.hp}`,
+      `maxhp ${creature.maxHp}`,
+      `ac ${creature.ac}`,
+      `speed ${creature.speed}`,
+      `actions ${creature.actions.length}`,
+      ...(creature.actions ?? []).flatMap((action) => [action.name, action.kind, action.actionCost, ...action.tags]),
+      ...(creature.resources ?? []).map((resource) => resource.name),
+      ...(creature.features ?? []).map((feature) => feature.name)
+    ]
+      .join(' ')
+      .toLowerCase();
+
+    return terms.every((term) => haystack.includes(term));
+  });
+}
+
+export function estimateEncounterBalance(creatures: Creature[]): EncounterBalanceSummary {
+  const teamsSummary: Record<Team, EncounterBalanceTeamSummary> = {
+    players: { team: 'players', count: 0, xp: 0, crLabels: [] },
+    enemies: { team: 'enemies', count: 0, xp: 0, crLabels: [] },
+    neutral: { team: 'neutral', count: 0, xp: 0, crLabels: [] }
+  };
+
+  creatures.forEach((creature) => {
+    const estimate = estimateCreatureCR(creature, encounterBalanceCrOptions);
+    const teamSummary = teamsSummary[creature.team];
+    teamSummary.count += 1;
+    teamSummary.xp += getCrXp(estimate.finalCr);
+    teamSummary.crLabels.push(estimate.finalCr);
+  });
+
+  const playerXp = teamsSummary.players.xp;
+  const enemyXp = teamsSummary.enemies.xp;
+  const contestTotal = playerXp + enemyXp;
+
+  if (contestTotal === 0) {
+    return {
+      teams: teamsSummary,
+      leader: 'unopposed',
+      ratio: 0,
+      message: 'No player or enemy creatures placed yet.'
+    };
+  }
+
+  if (playerXp === 0 || enemyXp === 0) {
+    const leader = playerXp > enemyXp ? 'players' : 'enemies';
+    return {
+      teams: teamsSummary,
+      leader: 'unopposed',
+      ratio: 0,
+      message: `${capitalizeTeam(leader)} are currently unopposed.`
+    };
+  }
+
+  const strongerTeam: Team = playerXp >= enemyXp ? 'players' : 'enemies';
+  const strongerXp = Math.max(playerXp, enemyXp);
+  const weakerXp = Math.min(playerXp, enemyXp);
+  const ratio = strongerXp / weakerXp;
+
+  if (ratio <= 1.15) {
+    return {
+      teams: teamsSummary,
+      leader: 'even',
+      ratio,
+      message: 'Roughly even by estimated CR weight.'
+    };
+  }
+
+  const edge = ratio <= 1.5 ? 'slight edge' : ratio <= 2 ? 'clear advantage' : 'overwhelming advantage';
+  return {
+    teams: teamsSummary,
+    leader: strongerTeam,
+    ratio,
+    message: `${capitalizeTeam(strongerTeam)} have a ${edge}.`
+  };
+}
+
+function capitalizeTeam(team: Team): string {
+  return team.charAt(0).toUpperCase() + team.slice(1);
 }
 
 function loadCreatureLibrary(): Creature[] {
@@ -1923,7 +2246,7 @@ function parseCreatureImport(text: string): { ok: true; creatures: Creature[] } 
   }
 }
 
-function parseEncounterImport(text: string): { ok: true; encounter: SavedEncounter } | { ok: false; error: string } {
+function parseEncounterImport(text: string, creatureLibrary: Creature[] = []): { ok: true; encounter: SavedEncounter } | { ok: false; error: string } {
   const combatResult = parseCombatStateJson(text);
   if (combatResult.ok && combatResult.state) {
     return {
@@ -1932,7 +2255,7 @@ function parseEncounterImport(text: string): { ok: true; encounter: SavedEncount
         id: createId('imported-combat', 'encounter'),
         name: 'Imported Combat',
         grid: combatResult.state.grid,
-        creatures: combatResult.state.creatures.map(cloneCreature),
+        instances: combatResult.state.creatures.map((creature) => createEncounterInstanceFromCreature(creature, creatureLibrary)),
         updatedAt: new Date().toISOString()
       }
     };
@@ -1951,12 +2274,15 @@ function parseEncounterImport(text: string): { ok: true; encounter: SavedEncount
 }
 
 function coerceEncounter(value: unknown): SavedEncounter | undefined {
-  if (!isRecord(value) || !Array.isArray(value.creatures)) {
+  if (!isRecord(value)) {
     return undefined;
   }
 
-  const creatures = value.creatures.map(coerceCreature).filter(isDefined);
-  if (creatures.length === 0) {
+  const legacyCreatures = Array.isArray(value.creatures) ? value.creatures.map(coerceCreature).filter(isDefined) : [];
+  const instances = Array.isArray(value.instances)
+    ? value.instances.map(coerceEncounterInstance).filter(isDefined)
+    : legacyCreatures.map(createEncounterInstanceFromLegacyCreature);
+  if (instances.length === 0) {
     return undefined;
   }
 
@@ -1964,9 +2290,27 @@ function coerceEncounter(value: unknown): SavedEncounter | undefined {
     id: typeof value.id === 'string' ? value.id : createId(String(value.name ?? 'encounter'), 'encounter'),
     name: typeof value.name === 'string' ? value.name : 'Imported Encounter',
     grid: normalizeGrid(isRecord(value.grid) ? (value.grid as Partial<GridDefinition>) : { width: 10, height: 10, blocked: [] }),
-    creatures,
+    instances,
+    creatures: legacyCreatures.length > 0 ? legacyCreatures : undefined,
     updatedAt: typeof value.updatedAt === 'string' ? value.updatedAt : new Date().toISOString()
   };
+}
+
+function coerceEncounterInstance(value: unknown): SavedEncounterCreatureInstance | undefined {
+  if (!isRecord(value)) {
+    return undefined;
+  }
+
+  const fallback = coerceCreature(value.fallback);
+  const overrides = isRecord(value.overrides) ? cloneJson(value.overrides) as Partial<Creature> : {};
+  const id = typeof value.id === 'string' ? value.id : typeof overrides.id === 'string' ? overrides.id : createId(fallback?.name ?? 'encounter-creature', 'encounter-creature');
+  const templateId = typeof value.templateId === 'string' ? value.templateId : fallback?.id ?? id;
+  return normalizeEncounterInstance({
+    id,
+    templateId,
+    overrides,
+    fallback
+  });
 }
 
 function coerceCreature(value: unknown): Creature | undefined {
@@ -1991,11 +2335,14 @@ function coerceCreature(value: unknown): Creature | undefined {
     abilityScores: coerceAbilityScores(abilityScores, blank.abilityScores),
     proficiencyBonus: numberOr(value.proficiencyBonus, blank.proficiencyBonus),
     speed: numberOr(value.speed, blank.speed),
+    climbSpeed: numberOr(value.climbSpeed, blank.climbSpeed ?? 0),
+    flySpeed: numberOr(value.flySpeed, blank.flySpeed ?? 0),
     position: {
       x: numberOr(position.x, blank.position.x),
-      y: numberOr(position.y, blank.position.y)
+      y: numberOr(position.y, blank.position.y),
+      z: numberOr(position.z, blank.position.z ?? 0)
     },
-    conditions: [],
+    conditions: Array.isArray(value.conditions) ? cloneJson(value.conditions) : [],
     actions: actions.length ? actions : blank.actions,
     resources,
     features: Array.isArray(value.features) ? cloneJson(value.features) : undefined,
@@ -2077,7 +2424,9 @@ function createBlankCreature(): Creature {
     abilityScores: { str: 10, dex: 10, con: 10, int: 10, wis: 10, cha: 10 },
     proficiencyBonus: 2,
     speed: 30,
-    position: { x: 0, y: 0 },
+    climbSpeed: 0,
+    flySpeed: 0,
+    position: { x: 0, y: 0, z: 0 },
     conditions: [],
     actions: [createBlankAction()],
     resources: [],
@@ -2104,14 +2453,166 @@ function createBlankAction(): ActionDefinition {
   };
 }
 
-function createCreatureInstance(template: Creature, position: GridPosition): Creature {
-  return normalizeCreatureDraft({
-    ...cloneCreature(template),
-    id: createId(template.name, 'encounter-creature'),
-    hp: template.maxHp,
-    conditions: [],
-    position
+function createEncounterInstanceFromTemplate(template: Creature, position: GridPosition): SavedEncounterCreatureInstance {
+  const id = createId(template.name, 'encounter-creature');
+  return normalizeEncounterInstance({
+    id,
+    templateId: template.id,
+    overrides: {
+      id,
+      position,
+      conditions: []
+    },
+    fallback: cloneCreature(template)
   });
+}
+
+function createEncounterInstanceFromCreature(creature: Creature, creatureLibrary: Creature[]): SavedEncounterCreatureInstance {
+  const template = findEncounterTemplate(
+    {
+      id: creature.id,
+      templateId: creature.id,
+      overrides: {},
+      fallback: creature
+    },
+    creatureLibrary
+  );
+  const templateId = template?.id ?? creature.id;
+  return normalizeEncounterInstance({
+    id: creature.id,
+    templateId,
+    overrides: getEncounterOverridesFromCreature(creature, template),
+    fallback: cloneCreature(creature)
+  });
+}
+
+function createEncounterInstanceFromLegacyCreature(creature: Creature): SavedEncounterCreatureInstance {
+  return normalizeEncounterInstance({
+    id: creature.id,
+    templateId: creature.id,
+    overrides: getEncounterOverridesFromCreature(creature, creature),
+    fallback: cloneCreature(creature)
+  });
+}
+
+export function hydrateEncounterCreatures(
+  instances: SavedEncounterCreatureInstance[],
+  creatureLibrary: Creature[]
+): { creatures: Creature[]; warnings: string[] } {
+  const warnings: string[] = [];
+  const creatures = instances.map((instance) => {
+    const template = findEncounterTemplate(instance, creatureLibrary);
+    const fallback = instance.fallback ? normalizeCreatureDraft(cloneCreature(instance.fallback)) : undefined;
+    const source = template ?? fallback ?? createMissingTemplateCreature(instance);
+    if (!template) {
+      warnings.push(
+        fallback
+          ? `${fallback.name} is using saved fallback data because template "${instance.templateId}" was not found.`
+          : `Encounter creature "${instance.id}" is missing template "${instance.templateId}".`
+      );
+    }
+
+    const merged = {
+      ...cloneCreature(source),
+      ...cloneJson(instance.overrides),
+      id: instance.id,
+      position: instance.overrides.position ?? source.position,
+      conditions: instance.overrides.conditions ?? [],
+      readiedAction: instance.overrides.readiedAction
+    } as Creature;
+    return normalizeCreatureDraft(merged);
+  });
+
+  return { creatures, warnings };
+}
+
+function findEncounterTemplate(instance: SavedEncounterCreatureInstance, creatureLibrary: Creature[]): Creature | undefined {
+  return (
+    creatureLibrary.find((creature) => creature.id === instance.templateId) ??
+    (instance.fallback ? creatureLibrary.find((creature) => creature.id === instance.fallback?.id) : undefined) ??
+    (instance.fallback ? creatureLibrary.find((creature) => creature.name === instance.fallback?.name) : undefined)
+  );
+}
+
+function createMissingTemplateCreature(instance: SavedEncounterCreatureInstance): Creature {
+  return normalizeCreatureDraft({
+    ...createBlankCreature(),
+    id: instance.id,
+    name: `Missing Template (${instance.templateId})`,
+    position: instance.overrides.position ?? { x: 0, y: 0, z: 0 },
+    conditions: instance.overrides.conditions ?? []
+  });
+}
+
+function normalizeEncounterInstance(instance: SavedEncounterCreatureInstance): SavedEncounterCreatureInstance {
+  const fallback = instance.fallback ? normalizeCreatureDraft(cloneCreature(instance.fallback)) : undefined;
+  const id = toId(instance.id || instance.overrides.id || fallback?.id || 'encounter-creature');
+  return {
+    id,
+    templateId: toId(instance.templateId || fallback?.id || id),
+    overrides: normalizeEncounterOverrides({ ...instance.overrides, id }),
+    fallback
+  };
+}
+
+function mergeEncounterInstanceOverrides(instance: SavedEncounterCreatureInstance, update: Partial<Creature>): SavedEncounterCreatureInstance {
+  return normalizeEncounterInstance({
+    ...instance,
+    overrides: normalizeEncounterOverrides({
+      ...instance.overrides,
+      ...update,
+      position: update.position ? { ...instance.overrides.position, ...update.position } : instance.overrides.position
+    })
+  });
+}
+
+function getEncounterOverridesFromCreature(creature: Creature, template?: Creature): Partial<Creature> {
+  const overrides: Partial<Creature> = {
+    id: creature.id,
+    position: cloneJson(creature.position),
+    conditions: cloneJson(creature.conditions)
+  };
+
+  if (!template || creature.hp !== template.hp) {
+    overrides.hp = creature.hp;
+  }
+  if (!template || creature.name !== template.name) {
+    overrides.name = creature.name;
+  }
+  if (!template || creature.team !== template.team) {
+    overrides.team = creature.team;
+  }
+  if (creature.readiedAction) {
+    overrides.readiedAction = cloneJson(creature.readiedAction);
+  }
+  if (!template && creature.resources) {
+    overrides.resources = cloneJson(creature.resources);
+  }
+  return normalizeEncounterOverrides(overrides);
+}
+
+function normalizeEncounterOverrides(overrides: Partial<Creature>): Partial<Creature> {
+  const normalized = cloneJson(overrides);
+  delete normalized.actions;
+  delete normalized.features;
+  delete normalized.maxHp;
+  delete normalized.ac;
+  delete normalized.abilityScores;
+  delete normalized.proficiencyBonus;
+  delete normalized.speed;
+  delete normalized.climbSpeed;
+  delete normalized.flySpeed;
+  if (normalized.id) {
+    normalized.id = toId(normalized.id);
+  }
+  if (normalized.position) {
+    normalized.position = {
+      x: Math.max(0, numberOr(normalized.position.x, 0)),
+      y: Math.max(0, numberOr(normalized.position.y, 0)),
+      z: numberOr(normalized.position.z, 0)
+    };
+  }
+  return normalized;
 }
 
 function normalizeCreatureDraft(creature: Creature): Creature {
@@ -2125,12 +2626,15 @@ function normalizeCreatureDraft(creature: Creature): Creature {
     ac: Math.max(0, numberOr(creature.ac, 10)),
     proficiencyBonus: numberOr(creature.proficiencyBonus, 2),
     speed: Math.max(0, numberOr(creature.speed, 30)),
+    climbSpeed: Math.max(0, numberOr(creature.climbSpeed, 0)),
+    flySpeed: Math.max(0, numberOr(creature.flySpeed, 0)),
     position: {
       x: Math.max(0, numberOr(creature.position?.x, 0)),
-      y: Math.max(0, numberOr(creature.position?.y, 0))
+      y: Math.max(0, numberOr(creature.position?.y, 0)),
+      z: numberOr(creature.position?.z, 0)
     },
     abilityScores: coerceAbilityScores(creature.abilityScores, createBlankCreature().abilityScores),
-    conditions: [],
+    conditions: Array.isArray(creature.conditions) ? cloneJson(creature.conditions) : [],
     actions: creature.actions.length ? creature.actions.map(normalizeAction) : [createBlankAction()],
     resources: (creature.resources ?? []).map(normalizeResource),
     features: (creature.features ?? []).map(normalizeFeature),
@@ -2205,15 +2709,16 @@ function normalizeEffect(effect: RuleEffectOperation): RuleEffectOperation {
 }
 
 function normalizeGrid(grid: Partial<GridDefinition>): GridDefinition {
-  const width = clamp(Math.round(numberOr(grid.width, 10)), 1, 30);
-  const height = clamp(Math.round(numberOr(grid.height, 10)), 1, 30);
-  return {
-    width,
-    height,
-    blocked: (grid.blocked ?? [])
-      .filter((cell) => cell.x >= 0 && cell.x < width && cell.y >= 0 && cell.y < height)
-      .map((cell) => ({ x: Math.round(cell.x), y: Math.round(cell.y) }))
-  };
+  return normalizeGridDefinition(grid);
+}
+
+function setTileHeight(grid: GridDefinition, position: GridPosition, z: number): GridDefinition {
+  const height = Math.round(numberOr(z, 0));
+  const heights = (grid.heights ?? []).filter((cell) => !sameTilePosition(cell, position));
+  return normalizeGrid({
+    ...grid,
+    heights: height === 0 ? heights : [...heights, { x: position.x, y: position.y, z: height }]
+  });
 }
 
 function inferTags(kind: ActionKind, existing: ActionTag[]): ActionTag[] {
@@ -2325,6 +2830,12 @@ function cleanStatModifiers(modifiers: StatModifiers): StatModifiers | undefined
   if (modifiers.speed) {
     cleaned.speed = modifiers.speed;
   }
+  if (modifiers.climbSpeed) {
+    cleaned.climbSpeed = modifiers.climbSpeed;
+  }
+  if (modifiers.flySpeed) {
+    cleaned.flySpeed = modifiers.flySpeed;
+  }
   if (modifiers.attackBonus) {
     cleaned.attackBonus = modifiers.attackBonus;
   }
@@ -2421,6 +2932,15 @@ function getCreatureShortLabel(creature: Creature): string {
 
 function numberOr(value: unknown, fallback: number): number {
   return typeof value === 'number' && Number.isFinite(value) ? value : fallback;
+}
+
+function parseOptionalNumber(value: string): number | undefined {
+  if (value.trim() === '') {
+    return undefined;
+  }
+
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : undefined;
 }
 
 function clamp(value: number, min: number, max: number): number {

@@ -205,6 +205,169 @@ summary:focus-visible {
   overflow: hidden;
 }
 
+.hud-tabs,
+.hud-panel-bar {
+  display: none;
+}
+
+.cockpit-layout.view-3d {
+  grid-template-columns: 1fr;
+  height: calc(100vh - 78px);
+  position: relative;
+}
+
+.view-3d .layout {
+  grid-column: 1;
+  grid-template-columns: minmax(0, 1fr);
+  grid-template-rows: minmax(0, 1fr);
+  height: 100%;
+  position: relative;
+}
+
+.view-3d .board-panel {
+  grid-column: 1;
+  grid-row: 1;
+  height: 100%;
+  max-height: none;
+  overflow: hidden;
+  padding: 0;
+  position: relative;
+}
+
+.view-3d .map-toolbar {
+  background: color-mix(in srgb, var(--panel) 88%, transparent);
+  backdrop-filter: blur(10px);
+  left: 10px;
+  max-width: min(760px, calc(100% - 180px));
+  position: absolute;
+  top: 10px;
+  z-index: 18;
+}
+
+.view-3d .map-toolbar-row {
+  gap: 5px 7px;
+}
+
+.view-3d .map-toolbar input[type='range'] {
+  width: 82px;
+}
+
+.view-3d .hud-tabs {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  position: absolute;
+  right: 14px;
+  top: 78px;
+  z-index: 24;
+}
+
+.view-3d .hud-tabs button {
+  background: color-mix(in srgb, var(--panel) 86%, transparent);
+  backdrop-filter: blur(10px);
+  box-shadow: var(--shadow-sm);
+  min-width: 74px;
+}
+
+.view-3d .hud-tabs button[aria-expanded='true'] {
+  background: var(--accent-soft);
+  border-color: var(--accent);
+}
+
+.view-3d .left-rail,
+.view-3d .side-panel,
+.view-3d .log-panel,
+.view-3d .json-panel {
+  background: color-mix(in srgb, var(--panel) 92%, transparent);
+  backdrop-filter: blur(12px);
+  box-shadow: var(--shadow-md);
+  display: none;
+  max-height: calc(100% - 24px);
+  max-width: calc(100% - 24px);
+  min-height: 180px;
+  min-width: 260px;
+  overflow: auto;
+  position: absolute;
+  resize: both;
+  z-index: 24;
+}
+
+.view-3d .left-rail.hud-open,
+.view-3d .side-panel.hud-open,
+.view-3d .log-panel.hud-open,
+.view-3d .json-panel.hud-open {
+  display: grid;
+}
+
+.view-3d .left-rail {
+  height: calc(100% - 108px);
+  left: 12px;
+  top: 96px;
+  width: 320px;
+}
+
+.view-3d .side-panel {
+  height: calc(100% - 138px);
+  right: 12px;
+  top: 126px;
+  width: 400px;
+}
+
+.view-3d .log-panel {
+  bottom: 14px;
+  height: 240px;
+  left: 340px;
+  width: clamp(300px, calc(100% - 780px), 520px);
+}
+
+.view-3d .json-panel {
+  height: min(360px, calc(100% - 154px));
+  left: 340px;
+  top: 126px;
+  width: clamp(300px, calc(100% - 780px), 460px);
+}
+
+.view-3d .combat-log {
+  max-height: none;
+}
+
+.view-3d .json-panel textarea {
+  height: min(300px, 42vh);
+}
+
+.view-3d .hud-panel-bar {
+  align-items: center;
+  cursor: grab;
+  display: flex;
+  gap: 8px;
+  justify-content: space-between;
+  margin: -2px -2px 6px;
+  min-height: 30px;
+  padding: 2px;
+  position: sticky;
+  top: 0;
+  touch-action: none;
+  z-index: 3;
+}
+
+.view-3d .hud-panel-bar:active {
+  cursor: grabbing;
+}
+
+.view-3d .hud-panel-bar span {
+  color: var(--text-muted);
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0;
+  text-transform: uppercase;
+}
+
+.view-3d .hud-panel-close {
+  display: inline-flex;
+  min-height: 28px;
+  padding: 3px 8px;
+}
+
 .layout {
   display: grid;
   gap: var(--gap);
@@ -332,8 +495,9 @@ summary:focus-visible {
   gap: var(--gap);
   grid-column: 1;
   grid-row: 1;
+  grid-template-rows: auto minmax(0, 1fr);
   max-height: calc(100vh - 78px);
-  overflow: auto;
+  overflow: hidden;
 }
 
 .map-toolbar {
@@ -342,9 +506,9 @@ summary:focus-visible {
   border-radius: var(--radius-sm);
   box-shadow: var(--shadow-sm);
   display: grid;
-  gap: 6px;
+  gap: 4px;
   left: 0;
-  padding: 7px;
+  padding: 6px;
   position: sticky;
   top: 0;
   z-index: 5;
@@ -365,7 +529,7 @@ summary:focus-visible {
 }
 
 .map-toolbar input[type='range'] {
-  width: 120px;
+  width: 96px;
 }
 
 .map-tool-options input[type='number'] {
@@ -383,6 +547,29 @@ summary:focus-visible {
   display: grid;
   gap: 2px;
   justify-content: start;
+}
+
+.grid-board-viewport {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  min-height: 420px;
+  min-width: 0;
+  overflow: auto;
+  position: relative;
+}
+
+.virtual-grid-board {
+  display: block;
+  position: relative;
+}
+
+.virtual-grid-board .grid-cell {
+  position: absolute;
+}
+
+.view-toggle {
+  display: inline-flex;
+  gap: 4px;
 }
 
 .grid-cell {
@@ -452,6 +639,158 @@ summary:focus-visible {
   top: 1px;
 }
 
+.height-marker {
+  background: var(--accent);
+  border-radius: 2px;
+  color: #fff;
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 1;
+  padding: 2px 3px;
+  position: absolute;
+  right: 2px;
+  top: 2px;
+}
+
+.battlefield-3d-viewport {
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.55), rgba(255, 255, 255, 0.08)),
+    var(--surface-muted);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  cursor: grab;
+  min-height: 460px;
+  overflow: auto;
+  perspective: 920px;
+  position: relative;
+  touch-action: none;
+  user-select: none;
+}
+
+.battlefield-3d-viewport:active {
+  cursor: grabbing;
+}
+
+.view-3d .battlefield-3d-viewport {
+  border: 0;
+  border-radius: var(--radius-md);
+  height: 100%;
+  min-height: calc(100vh - 78px) !important;
+}
+
+.battlefield-3d-svg {
+  display: block;
+  height: 100%;
+  min-height: inherit;
+  width: 100%;
+}
+
+.battlefield-3d-sky {
+  fill: transparent;
+}
+
+.battlefield-3d-grid-label {
+  fill: rgba(26, 32, 44, 0.7);
+  font-size: 9px;
+  font-weight: 700;
+  paint-order: stroke;
+  pointer-events: none;
+  stroke: rgba(255, 255, 255, 0.78);
+  stroke-width: 2px;
+}
+
+.battlefield-3d-tile {
+  cursor: pointer;
+}
+
+.creature-3d-shadow {
+  fill: rgba(0, 0, 0, 0.22);
+}
+
+.creature-3d-side {
+  stroke: rgba(0, 0, 0, 0.46);
+  stroke-width: 1px;
+}
+
+.creature-3d-top {
+  stroke: rgba(0, 0, 0, 0.58);
+  stroke-width: 2px;
+}
+
+.creature-3d-top.emphasized {
+  stroke: #111827;
+  stroke-width: 3px;
+}
+
+.creature-3d-label {
+  fill: #fff;
+  font-size: 12px;
+  font-weight: 800;
+  paint-order: stroke;
+  pointer-events: none;
+  stroke: rgba(13, 18, 28, 0.88);
+  stroke-width: 4px;
+  text-anchor: middle;
+}
+
+.creature-3d {
+  pointer-events: none;
+}
+
+.creature-3d.defeated {
+  opacity: 0.45;
+}
+
+.battlefield-3d-legend {
+  align-items: center;
+  background: rgba(255, 255, 255, 0.76);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  bottom: 8px;
+  color: var(--text-muted);
+  display: flex;
+  flex-wrap: wrap;
+  font-size: 12px;
+  gap: 10px;
+  left: 8px;
+  padding: 5px 7px;
+  position: absolute;
+}
+
+.camera-controls-3d {
+  background: rgba(255, 255, 255, 0.82);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  box-shadow: var(--shadow-sm);
+  color: var(--text);
+  padding: 5px 7px;
+  position: absolute;
+  right: 8px;
+  top: 8px;
+  z-index: 12;
+}
+
+.camera-controls-3d summary {
+  cursor: pointer;
+  font-weight: 700;
+}
+
+.camera-controls-3d[open] {
+  display: grid;
+  gap: 6px;
+}
+
+.camera-controls-3d label {
+  align-items: center;
+  display: grid;
+  gap: 2px;
+  grid-template-columns: 42px 104px;
+}
+
+.camera-controls-3d input[type='range'] {
+  width: 104px;
+}
+
 .token-stack {
   align-items: center;
   display: grid;
@@ -509,7 +848,7 @@ summary:focus-visible {
 
 .compact-hp {
   height: 5px;
-  width: 36px;
+  width: min(36px, calc(100% - 4px));
 }
 
 .condition-tags {
@@ -531,6 +870,10 @@ summary:focus-visible {
   justify-content: center;
   max-height: 22px;
   overflow: hidden;
+}
+
+.grid-cell .compact-tags {
+  max-height: 12px;
 }
 
 .compact-tags span {
@@ -766,9 +1109,20 @@ summary:focus-visible {
 .editor-shell {
   display: grid;
   gap: var(--gap);
-  grid-template-columns: minmax(520px, 1.05fr) minmax(520px, 0.95fr);
+  grid-template-rows: auto minmax(0, 1fr);
   min-height: 0;
   overflow: hidden;
+}
+
+.editor-mode-tabs {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-sm);
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 8px;
 }
 
 .editor-library-panel,
@@ -778,6 +1132,11 @@ summary:focus-visible {
   gap: var(--gap);
   max-height: calc(100vh - 78px);
   overflow: auto;
+}
+
+.editor-search {
+  display: grid;
+  gap: 4px;
 }
 
 .editor-panel-header {
@@ -801,7 +1160,7 @@ summary:focus-visible {
 .editor-list-form {
   display: grid;
   gap: 8px;
-  grid-template-columns: 210px minmax(0, 1fr);
+  grid-template-columns: 280px minmax(0, 1fr);
 }
 
 .library-list {
@@ -818,6 +1177,39 @@ summary:focus-visible {
   min-height: 46px;
   padding: 6px;
   text-align: left;
+}
+
+.creature-summary-card {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.creature-summary-card strong,
+.creature-summary-card span {
+  grid-column: 1 / -1;
+}
+
+.action-card-list {
+  display: grid;
+  gap: 8px;
+}
+
+.action-edit-card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 7px;
+}
+
+.action-edit-card summary {
+  cursor: pointer;
+  display: grid;
+  gap: 2px;
+}
+
+.action-edit-card summary span,
+.action-edit-card summary small {
+  color: var(--text-muted);
+  font-size: 12px;
 }
 
 .library-list span,
@@ -1012,14 +1404,99 @@ summary:focus-visible {
   background: var(--warning-bg);
   border: 1px solid var(--warning-border);
   border-radius: var(--radius-sm);
+  display: grid;
+  gap: 3px;
   margin: 0;
   padding: 6px;
+}
+
+.editor-muted {
+  color: var(--text-muted);
+  margin: 0;
+}
+
+.cr-helper-results {
+  display: grid;
+  gap: 6px;
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+}
+
+.cr-helper-results span {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  display: grid;
+  gap: 2px;
+  padding: 6px;
+}
+
+.cr-helper-results strong {
+  color: var(--text-muted);
+  font-size: 11px;
+  text-transform: uppercase;
+}
+
+.cr-helper-notes {
+  color: var(--text-muted);
+  margin: 0;
+  padding-left: 18px;
+}
+
+.cr-table-reference {
+  background: var(--panel-muted);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 7px;
+}
+
+.cr-table-reference summary {
+  cursor: pointer;
+  font-weight: 700;
+}
+
+.cr-table-reference[open] summary {
+  border-bottom: 1px solid var(--border);
+  margin-bottom: 8px;
+  padding-bottom: 6px;
+}
+
+.cr-table-scroll {
+  max-height: 360px;
+  overflow: auto;
+}
+
+.cr-reference-table {
+  border-collapse: collapse;
+  font-size: 12px;
+  min-width: 520px;
+  width: 100%;
+}
+
+.cr-reference-table th,
+.cr-reference-table td {
+  border-bottom: 1px solid var(--border);
+  padding: 5px 6px;
+  text-align: right;
+  white-space: nowrap;
+}
+
+.cr-reference-table th:first-child,
+.cr-reference-table td:first-child {
+  text-align: left;
+}
+
+.cr-reference-table th {
+  background: var(--surface);
+  color: var(--text-muted);
+  position: sticky;
+  text-transform: uppercase;
+  top: 0;
 }
 
 .encounter-layout {
   display: grid;
   gap: 8px;
-  grid-template-columns: 280px minmax(0, 1fr);
+  grid-template-columns: 340px minmax(0, 1fr);
 }
 
 .encounter-side {
@@ -1028,12 +1505,45 @@ summary:focus-visible {
   gap: 8px;
 }
 
+.encounter-balance-card > strong {
+  color: var(--accent);
+}
+
+.encounter-balance-grid {
+  display: grid;
+  gap: 6px;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.encounter-balance-grid span {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  display: grid;
+  gap: 2px;
+  padding: 6px;
+}
+
+.encounter-balance-grid strong {
+  color: var(--text-muted);
+  font-size: 11px;
+  text-transform: uppercase;
+}
+
+.encounter-balance-grid small {
+  color: var(--text-muted);
+}
+
 .encounter-list {
   max-height: 260px;
 }
 
 .builder-board-section {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
   overflow: auto;
+  padding: 10px;
 }
 
 .builder-grid-board {
@@ -1043,8 +1553,8 @@ summary:focus-visible {
 }
 
 .builder-cell {
-  height: 40px;
-  width: 40px;
+  height: 52px;
+  width: 52px;
 }
 
 .occupied-builder-cell {
@@ -1064,7 +1574,7 @@ summary:focus-visible {
   justify-content: center;
   padding: 16px;
   position: fixed;
-  z-index: 20;
+  z-index: 80;
 }
 
 .help-modal {
@@ -1199,6 +1709,37 @@ summary:focus-visible {
   .top-bar {
     align-items: flex-start;
     flex-direction: column;
+  }
+
+  .cockpit-layout.view-3d {
+    height: calc(100vh - 128px);
+  }
+
+  .view-3d .battlefield-3d-viewport {
+    min-height: calc(100vh - 128px) !important;
+  }
+
+  .view-3d .map-toolbar {
+    max-width: calc(100% - 28px);
+  }
+
+  .view-3d .hud-tabs {
+    flex-direction: row;
+    left: 12px;
+    right: auto;
+    top: auto;
+    bottom: 12px;
+  }
+
+  .view-3d .left-rail,
+  .view-3d .side-panel,
+  .view-3d .log-panel,
+  .view-3d .json-panel {
+    bottom: 58px;
+    left: 12px;
+    right: 12px;
+    top: 112px;
+    width: auto;
   }
 }
 

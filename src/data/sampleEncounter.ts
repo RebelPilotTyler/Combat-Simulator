@@ -389,9 +389,20 @@ export const sampleCreatures: Creature[] = [
 ];
 
 export function createSampleEncounter(): CombatState {
-  return createCombatState(sampleCreatures, 10, 10, [
-    { x: 5, y: 4 },
-    { x: 5, y: 5 },
-    { x: 5, y: 6 }
-  ]);
+  return createCombatState(
+    sampleCreatures,
+    10,
+    10,
+    [
+      { x: 5, y: 4 },
+      { x: 5, y: 5 },
+      { x: 5, y: 6 }
+    ],
+    [
+      { x: 3, y: 3, z: 1 },
+      { x: 3, y: 4, z: 1 },
+      { x: 4, y: 3, z: 2 },
+      { x: 7, y: 5, z: 1 }
+    ]
+  );
 }

@@ -1,9 +1,9 @@
 import type { ActionDefinition, CombatState, Creature, GridPosition } from './types';
 import { canCreatureTakeReaction, hasCondition } from './conditions';
-import { isBlocked, samePosition } from './shapes';
+import { getElevation, getTileHeight, isBlocked, samePosition } from './shapes';
 
 export function getDistanceInSquares(a: GridPosition, b: GridPosition): number {
-  return Math.max(Math.abs(a.x - b.x), Math.abs(a.y - b.y));
+  return Math.max(Math.abs(a.x - b.x), Math.abs(a.y - b.y), Math.abs(getElevation(a) - getElevation(b)));
 }
 
 export function getDistanceFeet(a: GridPosition, b: GridPosition): number {
@@ -83,36 +83,38 @@ export function getOpportunityAttackCandidates(
 export function hasLineOfSight(state: CombatState, from: GridPosition, to: GridPosition): boolean {
   return getLineSquares(from, to)
     .filter((position) => !samePosition(position, from) && !samePosition(position, to))
-    .every((position) => !isBlocked(position, state.grid));
+    .every((position) => !isBlocked(position, state.grid) && !isLineBelowTileTop(state, position));
 }
 
 export function getLineSquares(from: GridPosition, to: GridPosition): GridPosition[] {
   const points: GridPosition[] = [];
-  const dx = Math.abs(to.x - from.x);
-  const dy = Math.abs(to.y - from.y);
-  const sx = from.x < to.x ? 1 : -1;
-  const sy = from.y < to.y ? 1 : -1;
-  let error = dx - dy;
-  let x = from.x;
-  let y = from.y;
+  const dx = to.x - from.x;
+  const dy = to.y - from.y;
+  const dz = getElevation(to) - getElevation(from);
+  const steps = Math.max(Math.abs(dx), Math.abs(dy), Math.abs(dz));
 
-  while (true) {
-    points.push({ x, y });
-    if (x === to.x && y === to.y) {
-      break;
-    }
+  if (steps === 0) {
+    return [{ ...from, z: getElevation(from) }];
+  }
 
-    const doubledError = error * 2;
-    if (doubledError > -dy) {
-      error -= dy;
-      x += sx;
-    }
-
-    if (doubledError < dx) {
-      error += dx;
-      y += sy;
+  const seen = new Set<string>();
+  for (let step = 0; step <= steps; step += 1) {
+    const ratio = step / steps;
+    const point = {
+      x: Math.round(from.x + dx * ratio),
+      y: Math.round(from.y + dy * ratio),
+      z: Math.round(getElevation(from) + dz * ratio)
+    };
+    const key = `${point.x},${point.y},${point.z}`;
+    if (!seen.has(key)) {
+      points.push(point);
+      seen.add(key);
     }
   }
 
   return points;
+}
+
+function isLineBelowTileTop(state: CombatState, position: GridPosition): boolean {
+  return getTileHeight(position, state.grid) > getElevation(position);
 }

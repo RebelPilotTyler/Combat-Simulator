@@ -24,7 +24,7 @@ import {
 } from './combat';
 import { collectAbilityCheckModifiers, createAppliedCondition, hasCondition, resolveRollMode } from './conditions';
 import { getAvailableActions, getEffectiveAC, getEffectiveSpeed, getUnavailableActionReason } from './features';
-import { getReachableMovementSquares } from './movement';
+import { getMovementOption, getReachableMovementSquares } from './movement';
 import { formatBaseEffectiveNumber, getConditionTag, getHpPercent } from './presentation';
 import { parseCombatStateJson, serializeCombatState, validateCombatStateShape } from './serialization';
 import { getOpportunityAttackCandidates } from './targeting';
@@ -206,12 +206,12 @@ describe('combat engine', () => {
     const moved = moveActiveCreature(state, { x: 0, y: 2 });
     const active = moved.creatures.find((candidate) => candidate.id === 'a');
 
-    expect(active?.position).toEqual({ x: 0, y: 2 });
+    expect(active?.position).toEqual({ x: 0, y: 2, z: 0 });
     expect(moved.turnState.remainingMovement).toBe(5);
     expect(moved.log[0].type).toBe('movement');
 
     const rejected = moveActiveCreature(moved, { x: 2, y: 0 });
-    expect(rejected.creatures.find((candidate) => candidate.id === 'a')?.position).toEqual({ x: 0, y: 2 });
+    expect(rejected.creatures.find((candidate) => candidate.id === 'a')?.position).toEqual({ x: 0, y: 2, z: 0 });
   });
 
   it('performs attack actions and applies damage on hit', () => {
@@ -627,7 +627,7 @@ describe('combat engine', () => {
     );
 
     const pushed = performShoveAction(pushState, 'b', 'push', sequence([0.9, 0.1]));
-    expect(pushed.creatures.find((candidate) => candidate.id === 'b')?.position).toEqual({ x: 2, y: 0 });
+    expect(pushed.creatures.find((candidate) => candidate.id === 'b')?.position).toEqual({ x: 2, y: 0, z: 0 });
   });
 
   it('help grants advantage once to an ally attack', () => {
@@ -730,6 +730,30 @@ describe('combat engine', () => {
     expect(candidates.map((candidate) => candidate.id)).toEqual(['b']);
     expect(moved.pendingReactions).toHaveLength(1);
     expect(moved.log.some((entry) => entry.message.includes('Opportunity attack triggered'))).toBe(true);
+  });
+
+  it('checks opportunity attacks along the selected movement path', () => {
+    const state = rollInitiative(
+      createCombatState([
+        creature({ id: 'a', name: 'Alpha', position: { x: 0, y: 0 } }),
+        creature({ id: 'b', name: 'Bravo', team: 'enemies', position: { x: 0, y: 1 } })
+      ]),
+      sequence([0.9, 0.1])
+    );
+    const option = getMovementOption(state, 'a', { x: 2, y: 0 });
+    if (!option) {
+      throw new Error('Expected routed movement option');
+    }
+
+    const moved = moveActiveCreature(state, option.path);
+
+    expect(option.path.map((position) => `${position.x},${position.y}`)).toEqual(['0,0', '1,0', '2,0']);
+    expect(moved.pendingReactions).toHaveLength(1);
+    expect(moved.pendingReactions[0]).toMatchObject({
+      reactorId: 'b',
+      from: { x: 1, y: 0, z: 0 },
+      to: { x: 2, y: 0, z: 0 }
+    });
   });
 
   it('Disengage and incapacitated enemies prevent opportunity attacks', () => {

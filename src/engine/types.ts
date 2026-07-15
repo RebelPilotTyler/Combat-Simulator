@@ -229,6 +229,7 @@ export interface AbilityScores {
 export interface GridPosition {
   x: number;
   y: number;
+  z?: number;
 }
 
 export type CardinalDirection = 'north' | 'east' | 'south' | 'west';
@@ -237,6 +238,7 @@ export interface GridDefinition {
   width: number;
   height: number;
   blocked: GridPosition[];
+  heights?: GridPosition[];
 }
 
 export interface DamageDefinition {
@@ -289,6 +291,8 @@ export interface ResourceCost {
 
 export interface StatModifiers {
   speed?: number;
+  climbSpeed?: number;
+  flySpeed?: number;
   ac?: number;
   attackBonus?: number;
   saveBonus?: Partial<Record<Ability, number>>;
@@ -377,6 +381,8 @@ export interface Creature {
   abilityScores: AbilityScores;
   proficiencyBonus: number;
   speed: number;
+  climbSpeed?: number;
+  flySpeed?: number;
   position: GridPosition;
   conditions: AppliedCondition[];
   actions: ActionDefinition[];

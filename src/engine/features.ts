@@ -21,6 +21,8 @@ export function getFeatureStatModifiers(creature: Creature): StatModifiers {
     const modifiers = feature.modifiers ?? {};
     return {
       speed: (total.speed ?? 0) + (modifiers.speed ?? 0),
+      climbSpeed: (total.climbSpeed ?? 0) + (modifiers.climbSpeed ?? 0),
+      flySpeed: (total.flySpeed ?? 0) + (modifiers.flySpeed ?? 0),
       ac: (total.ac ?? 0) + (modifiers.ac ?? 0),
       attackBonus: (total.attackBonus ?? 0) + (modifiers.attackBonus ?? 0),
       maxHp: (total.maxHp ?? 0) + (modifiers.maxHp ?? 0),
@@ -32,6 +34,18 @@ export function getFeatureStatModifiers(creature: Creature): StatModifiers {
 
 export function getEffectiveSpeed(creature: Creature, _state: CombatState): number {
   return Math.max(0, creature.speed + (getFeatureStatModifiers(creature).speed ?? 0));
+}
+
+export function getEffectiveClimbSpeed(creature: Creature, _state: CombatState): number {
+  return Math.max(0, (creature.climbSpeed ?? 0) + (getFeatureStatModifiers(creature).climbSpeed ?? 0));
+}
+
+export function getEffectiveFlySpeed(creature: Creature, _state: CombatState): number {
+  return Math.max(0, (creature.flySpeed ?? 0) + (getFeatureStatModifiers(creature).flySpeed ?? 0));
+}
+
+export function getEffectiveMovementSpeed(creature: Creature, state: CombatState): number {
+  return Math.max(getEffectiveSpeed(creature, state), getEffectiveClimbSpeed(creature, state), getEffectiveFlySpeed(creature, state));
 }
 
 export function getEffectiveAC(creature: Creature, _state: CombatState): number {

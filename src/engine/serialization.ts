@@ -1,4 +1,6 @@
 import { normalizeConditions } from './conditions';
+import { clampGridPosition, normalizeGridDefinition } from './grid';
+import { getTilePosition } from './shapes';
 import type { CombatState, Creature } from './types';
 
 export interface CombatStateParseResult {
@@ -77,15 +79,13 @@ export function validateCombatStateShape(value: unknown): string | undefined {
 }
 
 export function normalizeImportedCombatState(state: CombatState): CombatState {
-  const creatures = state.creatures.map(normalizeImportedCreature);
+  const grid = normalizeGridDefinition(state.grid);
+  const creatures = state.creatures.map((creature) => normalizeImportedCreature(creature, grid));
 
   return {
     ...state,
     creatures,
-    grid: {
-      ...state.grid,
-      blocked: state.grid.blocked ?? []
-    },
+    grid,
     initiative: state.initiative ?? [],
     round: state.round ?? 0,
     turnIndex: state.turnIndex ?? 0,
@@ -143,9 +143,10 @@ function validateCreatureShape(value: unknown): string | undefined {
   return undefined;
 }
 
-function normalizeImportedCreature(creature: Creature): Creature {
+function normalizeImportedCreature(creature: Creature, grid: CombatState['grid']): Creature {
   return {
     ...creature,
+    position: clampGridPosition(getTilePosition(creature.position, grid), grid),
     conditions: normalizeConditions(creature.conditions),
     actions: creature.actions.map((action) => {
       const kind = action.kind ?? action.type ?? 'custom';

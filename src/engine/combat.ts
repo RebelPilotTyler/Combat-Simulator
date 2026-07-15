@@ -15,8 +15,9 @@ import type {
   RollMode,
   MultiattackStep
 } from './types';
-import { getShapeSquares, isBlocked, isInBounds, samePosition } from './shapes';
-import { getMovementCost, isOccupied } from './movement';
+import { getShapeSquares, getTilePosition, isBlocked, isInBounds, samePosition } from './shapes';
+import { getMovementOption, getMovementOptionForPath, isOccupied } from './movement';
+import { clampGridPosition, normalizeGridDefinition } from './grid';
 import {
   applyConditionToCreature,
   applyBeforeDamageModifiers,
@@ -51,6 +52,7 @@ import {
   getAvailableActions,
   getEffectiveAC,
   getEffectiveAttackBonus,
+  getEffectiveMovementSpeed,
   getEffectiveSaveBonus,
   getEffectiveSpeed,
   getFeatureStatModifiers,
@@ -116,12 +118,14 @@ export function createCombatState(
   creatures: Creature[],
   width = 10,
   height = 10,
-  blocked: GridPosition[] = []
+  blocked: GridPosition[] = [],
+  heights: GridPosition[] = []
 ): CombatState {
-  const normalizedCreatures = normalizeCreatures(creatures);
+  const grid = normalizeGridDefinition({ width, height, blocked, heights });
+  const normalizedCreatures = normalizeCreatures(creatures, grid);
   return {
     creatures: normalizedCreatures,
-    grid: { width, height, blocked },
+    grid,
     initiative: [],
     round: 0,
     turnIndex: 0,
@@ -224,7 +228,7 @@ export function endTurn(state: CombatState, hooks: CombatHooks = {}): CombatStat
   return next;
 }
 
-export function moveActiveCreature(state: CombatState, destination: GridPosition): CombatState {
+export function moveActiveCreature(state: CombatState, movement: GridPosition | GridPosition[]): CombatState {
   const next = ensureTurnState(normalizeState(cloneState(state)));
   const creature = getActiveCreature(next);
   if (!canCreatureMove(next, creature)) {
@@ -232,29 +236,30 @@ export function moveActiveCreature(state: CombatState, destination: GridPosition
     return next;
   }
 
-  const cost = getMovementCost(next, creature.id, destination);
+  const movementOption = Array.isArray(movement)
+    ? getMovementOptionForPath(next, creature.id, movement)
+    : getMovementOption(next, creature.id, movement);
+  const destinationPosition = movementOption?.position ?? getTilePosition(Array.isArray(movement) ? movement[movement.length - 1] ?? creature.position : movement, next.grid);
 
-  if (cost === undefined) {
-    addLog(next, 'system', `${creature.name} cannot move to ${destination.x},${destination.y}.`);
+  if (!movementOption) {
+    addLog(next, 'system', `${creature.name} cannot move to ${formatPosition(destinationPosition)}.`);
     return next;
   }
 
   const from = { ...creature.position };
-  const opportunityCandidates = hasCondition(creature, 'disengaged')
-    ? []
-    : getOpportunityAttackCandidates(next, creature, from, destination);
-  creature.position = destination;
+  const opportunityCandidates = hasCondition(creature, 'disengaged') ? [] : getOpportunityAttackCandidatesForPath(next, creature, movementOption.path);
+  creature.position = destinationPosition;
   const resource = getResource(next, creature.id);
-  resource.remainingMovement -= cost;
+  resource.remainingMovement -= movementOption.costFeet;
   resource.movementRemaining = resource.remainingMovement;
   syncActiveTurnState(next);
   addLog(
     next,
     'movement',
-    `${creature.name} moves from ${from.x},${from.y} to ${destination.x},${destination.y} for ${cost} feet. ${next.turnState.remainingMovement} feet remain.`
+    `${creature.name} moves from ${formatPosition(from)} to ${formatPosition(destinationPosition)} for ${movementOption.costFeet} feet. ${next.turnState.remainingMovement} feet remain.`
   );
-  opportunityCandidates.forEach((enemy) => {
-    const action = findOpportunityAttackAction(enemy);
+  opportunityCandidates.forEach((candidate) => {
+    const action = findOpportunityAttackAction(candidate.creature);
     if (!action) {
       return;
     }
@@ -262,12 +267,12 @@ export function moveActiveCreature(state: CombatState, destination: GridPosition
     const pending = {
       id: `${Date.now()}-${Math.random().toString(36).slice(2)}`,
       trigger: 'opportunityAttack' as const,
-      reactorId: enemy.id,
+      reactorId: candidate.creature.id,
       targetId: creature.id,
       actionId: action.id,
-      from,
-      to: destination,
-      description: `${enemy.name} can make an opportunity attack against ${creature.name}.`
+      from: candidate.from,
+      to: candidate.to,
+      description: `${candidate.creature.name} can make an opportunity attack against ${creature.name}.`
     };
     next.pendingReactions.push(pending);
     addLog(next, 'action', `Opportunity attack triggered: ${pending.description}`);
@@ -607,13 +612,13 @@ export function performShoveAction(
     return next;
   }
 
-  const destination = getPushDestination(attacker.position, target.position);
+  const destination = getTilePosition(getPushDestination(attacker.position, target.position), next.grid);
   if (isInBounds(destination, next.grid) && !isBlocked(destination, next.grid) && !isOccupied(next, destination, target.id)) {
     target.position = destination;
     addLog(
       next,
       'action',
-      `${attacker.name} shoves ${target.name}: ${attackCheck.total} vs ${defenseCheck.total}. ${target.name} is pushed to ${destination.x},${destination.y}.`
+      `${attacker.name} shoves ${target.name}: ${attackCheck.total} vs ${defenseCheck.total}. ${target.name} is pushed to ${formatPosition(destination)}.`
     );
   } else {
     addLog(next, 'action', `${attacker.name} shoves ${target.name}: ${attackCheck.total} vs ${defenseCheck.total}. Push blocked.`);
@@ -1445,7 +1450,11 @@ function findNextLivingInitiativeIndex(state: CombatState): number {
 }
 
 function createTurnState(creature?: Creature, state?: CombatState) {
-  const movement = creature ? (state ? getEffectiveSpeed(creature, state) : Math.max(0, creature.speed + (getFeatureStatModifiers(creature).speed ?? 0))) : 0;
+  const movement = creature
+    ? state
+      ? getEffectiveMovementSpeed(creature, state)
+      : Math.max(0, creature.speed + (getFeatureStatModifiers(creature).speed ?? 0), creature.climbSpeed ?? 0, creature.flySpeed ?? 0)
+    : 0;
   return {
     creatureId: creature?.id,
     remainingMovement: movement,
@@ -1495,6 +1504,30 @@ function syncActiveTurnState(state: CombatState): void {
   }
 }
 
+function getOpportunityAttackCandidatesForPath(
+  state: CombatState,
+  mover: Creature,
+  path: GridPosition[]
+): Array<{ creature: Creature; from: GridPosition; to: GridPosition }> {
+  const candidates: Array<{ creature: Creature; from: GridPosition; to: GridPosition }> = [];
+  const triggeredCreatureIds = new Set<string>();
+
+  for (let index = 1; index < path.length; index += 1) {
+    const from = path[index - 1];
+    const to = path[index];
+    getOpportunityAttackCandidates(state, mover, from, to).forEach((creature) => {
+      if (triggeredCreatureIds.has(creature.id)) {
+        return;
+      }
+
+      triggeredCreatureIds.add(creature.id);
+      candidates.push({ creature, from, to });
+    });
+  }
+
+  return candidates;
+}
+
 function findOpportunityAttackAction(creature: Creature): ActionDefinition | undefined {
   return (
     creature.actions.find((action) => action.tags.includes('opportunity')) ??
@@ -1538,8 +1571,17 @@ function formatSigned(value: number): string {
   return value >= 0 ? `+ ${value}` : `- ${Math.abs(value)}`;
 }
 
+function formatPosition(position: GridPosition): string {
+  return `${position.x},${position.y},${position.z ?? 0}`;
+}
+
 function normalizeState(state: CombatState): CombatState {
-  state.creatures = normalizeCreatures(state.creatures);
+  state.grid = {
+    ...state.grid,
+    blocked: state.grid.blocked ?? [],
+    heights: state.grid.heights ?? []
+  };
+  state.creatures = normalizeCreatures(state.creatures, state.grid);
   state.turnResources = state.turnResources ?? {};
   state.creatures.forEach((creature) => {
     const existing = state.turnResources[creature.id];
@@ -1563,9 +1605,10 @@ function normalizeState(state: CombatState): CombatState {
   return state;
 }
 
-function normalizeCreatures(creatures: Creature[]): Creature[] {
+function normalizeCreatures(creatures: Creature[], grid?: CombatState['grid']): Creature[] {
   return creatures.map((creature) => ({
     ...creature,
+    position: grid ? clampGridPosition(getTilePosition(creature.position, grid), grid) : { ...creature.position, z: creature.position.z ?? 0 },
     conditions: normalizeConditions(creature.conditions),
     skillBonuses: creature.skillBonuses ?? {},
     actions: creature.actions.map(normalizeActionDefinition)
