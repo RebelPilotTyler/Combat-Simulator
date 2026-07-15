@@ -58,6 +58,10 @@ function noAction(): boolean {
   return false;
 }
 
+function autoFailStrengthAndDexteritySaves(context: SavingThrowModifierContext): RollModifier | undefined {
+  return context.ability === 'str' || context.ability === 'dex' ? { autoFail: true } : undefined;
+}
+
 export const CORE_CONDITIONS: Record<CoreConditionId, ConditionDefinition> = {
   blinded: {
     id: 'blinded',
@@ -89,12 +93,13 @@ export const CORE_CONDITIONS: Record<CoreConditionId, ConditionDefinition> = {
   frightened: {
     id: 'frightened',
     name: 'Frightened',
-    description: 'Disadvantage on attacks and checks while the source of fear is relevant.',
+    description: 'Disadvantage on attacks and checks while the source of fear is visible.',
     defaultDurationType: 'permanentUntilRemoved',
     defaultStackBehavior: 'refresh',
     hooks: {
-      beforeAttackRoll: disadvantageOnOwnAttacks,
-      beforeAbilityCheck: () => ({ disadvantage: true })
+      beforeAttackRoll: (context) =>
+        !context.condition.sourceCreatureId && context.conditionBearer.id === context.attacker.id ? { disadvantage: true } : undefined,
+      beforeAbilityCheck: (context) => (!context.condition.sourceCreatureId ? { disadvantage: true } : undefined)
     }
   },
   grappled: {
@@ -142,7 +147,8 @@ export const CORE_CONDITIONS: Record<CoreConditionId, ConditionDefinition> = {
       canMove: noMove,
       canTakeAction: noAction,
       canTakeReaction: noAction,
-      beforeAttackRoll: advantageAgainstBearer
+      beforeAttackRoll: advantageAgainstBearer,
+      beforeSavingThrow: autoFailStrengthAndDexteritySaves
     }
   },
   poisoned: {
@@ -200,7 +206,8 @@ export const CORE_CONDITIONS: Record<CoreConditionId, ConditionDefinition> = {
       canMove: noMove,
       canTakeAction: noAction,
       canTakeReaction: noAction,
-      beforeAttackRoll: advantageAgainstBearer
+      beforeAttackRoll: advantageAgainstBearer,
+      beforeSavingThrow: autoFailStrengthAndDexteritySaves
     }
   },
   unconscious: {
@@ -213,7 +220,8 @@ export const CORE_CONDITIONS: Record<CoreConditionId, ConditionDefinition> = {
       canMove: noMove,
       canTakeAction: noAction,
       canTakeReaction: noAction,
-      beforeAttackRoll: advantageAgainstBearer
+      beforeAttackRoll: advantageAgainstBearer,
+      beforeSavingThrow: autoFailStrengthAndDexteritySaves
     }
   },
   dodging: {
@@ -295,7 +303,7 @@ conditionRegistry.defeated = {
 conditionRegistry.concentrating = {
   id: 'concentrating',
   name: 'Concentrating',
-  description: 'Tracks the spell a creature is concentrating on. Concentration checks are not automated yet.',
+  description: 'Tracks an active concentration effect and triggers Constitution saves after damage.',
   defaultDurationType: 'permanentUntilRemoved',
   defaultStackBehavior: 'refresh',
   hooks: {}
@@ -375,13 +383,17 @@ export function hasCondition(creature: Creature, conditionId: string): boolean {
 
 export function getConditionLabel(condition: AppliedCondition): string {
   const definition = getConditionDefinition(condition.id);
+  const concentrationName =
+    condition.id === 'concentrating' && typeof condition.metadata?.concentrationName === 'string'
+      ? `: ${condition.metadata.concentrationName}`
+      : '';
   const stack =
     condition.stackCount > 1 ? ` x${condition.stackCount}` : condition.intensity > 1 ? ` intensity ${condition.intensity}` : '';
   const duration =
     condition.durationType === 'rounds' && condition.remainingRounds !== undefined
       ? ` (${condition.remainingRounds} rounds)`
       : '';
-  return `${condition.name ?? definition.name}${stack}${duration}`;
+  return `${condition.name ?? definition.name}${concentrationName}${stack}${duration}`;
 }
 
 export function applyConditionToCreature(

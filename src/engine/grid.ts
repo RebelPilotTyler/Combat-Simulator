@@ -22,10 +22,11 @@ export function normalizeGridDefinition(grid: Partial<GridDefinition>): GridDefi
 export function clampGridPosition(position: GridPosition, grid: GridDefinition): GridPosition {
   const x = clamp(Math.round(position.x), 0, Math.max(0, grid.width - 1));
   const y = clamp(Math.round(position.y), 0, Math.max(0, grid.height - 1));
+  const tileHeight = grid.heights?.find((height) => height.x === x && height.y === y)?.z ?? 0;
   return {
     x,
     y,
-    z: position.z ?? grid.heights?.find((height) => height.x === x && height.y === y)?.z ?? 0
+    z: Math.max(tileHeight, Math.round(position.z ?? tileHeight))
   };
 }
 

@@ -25,4 +25,14 @@ describe('normalizeGridDefinition', () => {
 
     expect(clampGridPosition({ x: 99, y: 99 }, grid)).toEqual({ x: 49, y: 49, z: 3 });
   });
+
+  it('raises normalized creature positions to the tile floor', () => {
+    const grid = normalizeGridDefinition({
+      width: 3,
+      height: 3,
+      heights: [{ x: 1, y: 1, z: 4 }]
+    });
+
+    expect(clampGridPosition({ x: 1, y: 1, z: 2 }, grid)).toEqual({ x: 1, y: 1, z: 4 });
+  });
 });

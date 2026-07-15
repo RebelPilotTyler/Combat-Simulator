@@ -290,11 +290,16 @@ function applyRuleEffect(
     selected.forEach((creature) => {
       const condition = createAppliedCondition(effect.conditionId, {
         sourceCreatureId: event.source?.id ?? entry.owner.id,
+        name: effect.name,
+        description: effect.description,
+        tags: effect.tags,
         durationType: effect.durationType,
         remainingRounds: effect.remainingRounds,
         stackBehavior: effect.stackBehavior,
         stackCount: effect.stackCount,
-        intensity: effect.intensity
+        intensity: effect.intensity,
+        metadata: effect.metadata,
+        rules: effect.rules
       });
       const result = applyConditionToCreature(creature, condition);
       logRuleMessage(state, `${getConditionDefinition(effect.conditionId).name} ${result === 'applied' ? 'applied to' : result === 'refreshed' ? 'refreshed on' : 'stacked on'} ${creature.name}.`);

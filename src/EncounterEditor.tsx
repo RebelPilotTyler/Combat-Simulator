@@ -993,6 +993,7 @@ export function EncounterEditor({
                     {action.id === selectedAction?.id && (
                       <ActionEditor
                         action={selectedAction}
+                        customConditions={customConditionLibrary}
                         resources={creatureDraft.resources ?? []}
                         onChange={updateAction}
                       />
@@ -1044,6 +1045,7 @@ export function EncounterEditor({
                 {selectedFeature && (
                   <FeatureEditor
                     feature={selectedFeature}
+                    customConditions={customConditionLibrary}
                     resources={creatureDraft.resources ?? []}
                     onChange={updateFeature}
                   />
@@ -1294,6 +1296,7 @@ export function EncounterEditor({
                     </div>
                     <RuleListEditor
                       title="Mechanical Hooks"
+                      customConditions={customConditionLibrary}
                       rules={selectedCustomCondition.rules}
                       resources={creatureDraft.resources ?? []}
                       onChange={(rules) => updateSelectedCustomCondition({ rules })}
@@ -1588,10 +1591,12 @@ function PartLibraryControls<T extends { id: string; name: string }>({
 
 function ActionEditor({
   action,
+  customConditions,
   resources,
   onChange
 }: {
   action: ActionDefinition;
+  customConditions: CustomConditionTemplate[];
   resources: Resource[];
   onChange: (update: Partial<ActionDefinition>) => void;
 }) {
@@ -1842,6 +1847,7 @@ function ActionEditor({
 
       <RuleListEditor
         title="Action Hooks"
+        customConditions={customConditions}
         rules={action.rules ?? []}
         resources={resources}
         onChange={(rules) => onChange({ rules })}
@@ -1852,10 +1858,12 @@ function ActionEditor({
 
 function FeatureEditor({
   feature,
+  customConditions,
   resources,
   onChange
 }: {
   feature: FeatureDefinition;
+  customConditions: CustomConditionTemplate[];
   resources: Resource[];
   onChange: (update: Partial<FeatureDefinition>) => void;
 }) {
@@ -1901,6 +1909,7 @@ function FeatureEditor({
 
       <RuleListEditor
         title="Feature Hooks"
+        customConditions={customConditions}
         rules={feature.rules ?? []}
         resources={resources}
         onChange={(rules) => onChange({ rules })}
@@ -1911,11 +1920,13 @@ function FeatureEditor({
 
 function RuleListEditor({
   title,
+  customConditions,
   rules,
   resources,
   onChange
 }: {
   title: string;
+  customConditions: CustomConditionTemplate[];
   rules: RuleDefinition[];
   resources: Resource[];
   onChange: (rules: RuleDefinition[]) => void;
@@ -1943,6 +1954,7 @@ function RuleListEditor({
           <RuleEditor
             key={`${rule.id}-${index}`}
             rule={rule}
+            customConditions={customConditions}
             resources={resources}
             onChange={(nextRule) => updateRule(index, nextRule)}
             onDelete={() => deleteRule(index)}
@@ -1956,11 +1968,13 @@ function RuleListEditor({
 
 function RuleEditor({
   rule,
+  customConditions,
   resources,
   onChange,
   onDelete
 }: {
   rule: RuleDefinition;
+  customConditions: CustomConditionTemplate[];
   resources: Resource[];
   onChange: (rule: RuleDefinition) => void;
   onDelete: () => void;
@@ -2042,6 +2056,7 @@ function RuleEditor({
           <EffectEditor
             key={index}
             effect={effect}
+            customConditions={customConditions}
             resources={resources}
             onChange={(nextEffect) => onChange({ ...rule, effects: updateArray(rule.effects, index, nextEffect) })}
             onDelete={() => onChange({ ...rule, effects: removeArrayItem(rule.effects, index) })}
@@ -2164,11 +2179,13 @@ function FilterEditor({
 
 function EffectEditor({
   effect,
+  customConditions,
   resources,
   onChange,
   onDelete
 }: {
   effect: RuleEffectOperation;
+  customConditions: CustomConditionTemplate[];
   resources: Resource[];
   onChange: (effect: RuleEffectOperation) => void;
   onDelete: () => void;
@@ -2185,13 +2202,18 @@ function EffectEditor({
           ))}
         </select>
       </label>
-      {renderEffectFields(effect, resources, onChange)}
+      {renderEffectFields(effect, resources, customConditions, onChange)}
       <button onClick={onDelete}>Remove</button>
     </div>
   );
 }
 
-function renderEffectFields(effect: RuleEffectOperation, resources: Resource[], onChange: (effect: RuleEffectOperation) => void) {
+function renderEffectFields(
+  effect: RuleEffectOperation,
+  resources: Resource[],
+  customConditions: CustomConditionTemplate[],
+  onChange: (effect: RuleEffectOperation) => void
+) {
   if (effect.type === 'addFlatModifier' || effect.type === 'reduceDamage' || effect.type === 'setDamageMinimum') {
     return <NumberInput label="Amount" value={effect.amount} onChange={(amount) => onChange({ ...effect, amount })} />;
   }
@@ -2215,6 +2237,27 @@ function renderEffectFields(effect: RuleEffectOperation, resources: Resource[], 
   if (effect.type === 'applyCondition') {
     return (
       <>
+        {customConditions.length > 0 && (
+          <label>
+            Custom Template
+            <select
+              value={customConditions.some((template) => template.id === effect.conditionId && effect.name === template.name) ? effect.conditionId : ''}
+              onChange={(event) => {
+                const template = customConditions.find((candidate) => candidate.id === event.target.value);
+                if (template) {
+                  onChange(createApplyConditionEffectFromTemplate(template, effect));
+                }
+              }}
+            >
+              <option value="">Manual condition</option>
+              {customConditions.map((template) => (
+                <option key={template.id} value={template.id}>
+                  {template.name}
+                </option>
+              ))}
+            </select>
+          </label>
+        )}
         <label>
           Condition ID
           <input value={effect.conditionId} onChange={(event) => onChange({ ...effect, conditionId: toId(event.target.value) })} />
@@ -2280,6 +2323,26 @@ function renderEffectFields(effect: RuleEffectOperation, resources: Resource[], 
   }
 
   return null;
+}
+
+function createApplyConditionEffectFromTemplate(
+  template: CustomConditionTemplate,
+  previous: Extract<RuleEffectOperation, { type: 'applyCondition' }>
+): RuleEffectOperation {
+  const normalized = normalizeCustomConditionTemplate(template);
+  return {
+    ...previous,
+    type: 'applyCondition',
+    conditionId: normalized.id,
+    name: normalized.name,
+    description: normalized.description,
+    tags: normalized.tags,
+    durationType: normalized.defaultDurationType,
+    remainingRounds: normalized.defaultDurationType === 'rounds' ? normalized.defaultRemainingRounds ?? 1 : undefined,
+    stackBehavior: normalized.stackBehavior,
+    metadata: normalized.notes ? { notes: normalized.notes } : undefined,
+    rules: normalized.rules
+  };
 }
 
 function CreatureReferenceSelect({
@@ -2761,6 +2824,7 @@ export function hydrateEncounterCreatures(
       id: instance.id,
       position: instance.overrides.position ?? source.position,
       conditions: instance.overrides.conditions ?? [],
+      resources: mergeEncounterResourceState(source.resources ?? [], instance.overrides.resources),
       readiedAction: instance.overrides.readiedAction
     } as Creature;
     return normalizeCreatureDraft(merged);
@@ -2828,10 +2892,47 @@ function getEncounterOverridesFromCreature(creature: Creature, template?: Creatu
   if (creature.readiedAction) {
     overrides.readiedAction = cloneJson(creature.readiedAction);
   }
-  if (!template && creature.resources) {
+  if (shouldPersistEncounterResources(creature.resources, template?.resources)) {
     overrides.resources = cloneJson(creature.resources);
   }
   return normalizeEncounterOverrides(overrides);
+}
+
+function shouldPersistEncounterResources(resources: Resource[] | undefined, templateResources: Resource[] | undefined): boolean {
+  if (!resources || resources.length === 0) {
+    return false;
+  }
+
+  if (!templateResources) {
+    return true;
+  }
+
+  if (resources.length !== templateResources.length) {
+    return true;
+  }
+
+  return resources.some((resource) => {
+    const templateResource = templateResources.find((candidate) => candidate.id === resource.id);
+    return !templateResource || templateResource.current !== resource.current;
+  });
+}
+
+function mergeEncounterResourceState(templateResources: Resource[], overrideResources: Resource[] | undefined): Resource[] {
+  if (!overrideResources) {
+    return templateResources;
+  }
+
+  const overrideById = new Map(overrideResources.map((resource) => [resource.id, resource]));
+  const merged = templateResources.map((resource) => {
+    const override = overrideById.get(resource.id);
+    return override ? { ...resource, current: override.current } : resource;
+  });
+
+  const templateIds = new Set(templateResources.map((resource) => resource.id));
+  return [
+    ...merged,
+    ...overrideResources.filter((resource) => !templateIds.has(resource.id))
+  ];
 }
 
 function normalizeEncounterOverrides(overrides: Partial<Creature>): Partial<Creature> {

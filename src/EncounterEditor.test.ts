@@ -129,6 +129,33 @@ describe('hydrateEncounterCreatures', () => {
     expect(hydrated.creatures[0].conditions.map((condition) => condition.id)).toEqual(['prone']);
   });
 
+  it('syncs latest resource definitions while preserving encounter resource current values', () => {
+    const updatedTemplate: Creature = {
+      ...creatures[0],
+      resources: [
+        { id: 'focus', name: 'Arcane Focus', current: 3, max: 3, resetOn: 'longRest' },
+        { id: 'ward', name: 'Ward Charge', current: 1, max: 1, resetOn: 'shortRest' }
+      ]
+    };
+    const instance: SavedEncounterCreatureInstance = {
+      id: 'apprentice-instance-1',
+      templateId: 'ember-apprentice',
+      overrides: {
+        id: 'apprentice-instance-1',
+        position: { x: 3, y: 3, z: 0 },
+        resources: [{ id: 'focus', name: 'Old Focus', current: 0, max: 1, resetOn: 'longRest' }]
+      },
+      fallback: creatures[0]
+    };
+
+    const hydrated = hydrateEncounterCreatures([instance], [updatedTemplate]);
+
+    expect(hydrated.creatures[0].resources).toEqual([
+      { id: 'focus', name: 'Arcane Focus', current: 0, max: 3, resetOn: 'longRest', display: { showOnCreaturePanel: true, mode: 'pips' } },
+      { id: 'ward', name: 'Ward Charge', current: 1, max: 1, resetOn: 'shortRest', display: { showOnCreaturePanel: true, mode: 'pips' } }
+    ]);
+  });
+
   it('falls back visibly when a referenced template is missing', () => {
     const instance: SavedEncounterCreatureInstance = {
       id: 'missing-template-instance',

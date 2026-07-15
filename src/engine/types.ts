@@ -102,11 +102,16 @@ export type RuleEffectOperation =
   | {
       type: 'applyCondition';
       conditionId: ConditionId;
+      name?: string;
+      description?: string;
+      tags?: string[];
       durationType?: ConditionDurationType;
       remainingRounds?: number;
       stackBehavior?: StackBehavior;
       stackCount?: number;
       intensity?: number;
+      metadata?: Record<string, string | number | boolean | undefined>;
+      rules?: RuleDefinition[];
       note?: string;
     }
   | { type: 'removeCondition'; conditionId: ConditionId; note?: string }

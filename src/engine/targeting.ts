@@ -14,13 +14,28 @@ export const getDistanceInFeet = getDistanceFeet;
 
 export function isInActionRange(action: ActionDefinition, attacker: GridPosition, target: GridPosition): boolean {
   const distance = getDistanceFeet(attacker, target);
-  const rangeFeet = action.normalRange ?? action.range * 5;
 
   if (action.type === 'meleeAttack' || action.kind === 'meleeAttack' || action.tags.includes('melee')) {
-    return distance <= (action.reach ?? Math.min(rangeFeet, 5));
+    return distance <= (action.reach ?? Math.min(getNormalRangeFeet(action), 5));
   }
 
-  return distance <= rangeFeet;
+  return distance <= getMaximumRangeFeet(action);
+}
+
+export function isBeyondNormalRange(action: ActionDefinition, attacker: GridPosition, target: GridPosition): boolean {
+  if (action.type === 'meleeAttack' || action.kind === 'meleeAttack' || action.tags.includes('melee')) {
+    return false;
+  }
+
+  return getDistanceFeet(attacker, target) > getNormalRangeFeet(action);
+}
+
+export function getNormalRangeFeet(action: ActionDefinition): number {
+  return action.normalRange && action.normalRange > 0 ? action.normalRange : action.range * 5;
+}
+
+export function getMaximumRangeFeet(action: ActionDefinition): number {
+  return action.longRange && action.longRange > 0 ? action.longRange : getNormalRangeFeet(action);
 }
 
 export function getMeleeReach(creature: Creature): number {

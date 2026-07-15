@@ -1,8 +1,11 @@
 import { normalizeConditions } from './conditions';
 import { DEFAULT_RULES_SETTINGS } from './combat';
+import { getEffectiveMovementSpeed } from './features';
 import { clampGridPosition, normalizeGridDefinition } from './grid';
 import { getTilePosition } from './shapes';
-import type { CombatState, Creature } from './types';
+import type { ActionDefinition, CombatState, Creature, Resource, ResourceReset, TurnResourceState } from './types';
+
+const RESOURCE_RESET_OPTIONS: ResourceReset[] = ['turnStart', 'shortRest', 'longRest', 'dawn', 'manual', 'never'];
 
 export interface CombatStateParseResult {
   ok: boolean;
@@ -82,6 +85,8 @@ export function validateCombatStateShape(value: unknown): string | undefined {
 export function normalizeImportedCombatState(state: CombatState): CombatState {
   const grid = normalizeGridDefinition(state.grid);
   const creatures = state.creatures.map((creature) => normalizeImportedCreature(creature, grid));
+  const turnResources = normalizeTurnResources(state, creatures);
+  const activeTurnResource = state.activeCreatureId ? turnResources[state.activeCreatureId] : undefined;
 
   return {
     ...state,
@@ -90,15 +95,16 @@ export function normalizeImportedCombatState(state: CombatState): CombatState {
     initiative: state.initiative ?? [],
     round: state.round ?? 0,
     turnIndex: state.turnIndex ?? 0,
-    turnState: {
+    turnState: activeTurnResource ?? {
       ...state.turnState,
       creatureId: state.turnState?.creatureId ?? state.activeCreatureId,
-      remainingMovement: state.turnState?.remainingMovement ?? 0,
+      remainingMovement: numberOr(state.turnState?.remainingMovement, 0),
+      movementRemaining: numberOr((state.turnState as Partial<TurnResourceState> | undefined)?.movementRemaining, state.turnState?.remainingMovement ?? 0),
       actionUsed: state.turnState?.actionUsed ?? false,
       bonusActionUsed: state.turnState?.bonusActionUsed ?? false,
       reactionUsed: state.turnState?.reactionUsed ?? false
     },
-    turnResources: state.turnResources ?? {},
+    turnResources,
     pendingReactions: state.pendingReactions ?? [],
     rulesSettings: {
       ...DEFAULT_RULES_SETTINGS,
@@ -157,21 +163,69 @@ function normalizeImportedCreature(creature: Creature, grid: CombatState['grid']
     ...creature,
     position: clampGridPosition(getTilePosition(creature.position, grid), grid),
     conditions: normalizeConditions(creature.conditions),
-    actions: creature.actions.map((action) => {
-      const kind = action.kind ?? action.type ?? 'custom';
-      const type = kind === 'multiattack' || kind === 'basicAction'
-        ? undefined
-        : action.type ?? (kind === 'meleeAttack' || kind === 'rangedAttack' || kind === 'savingThrowEffect' ? kind : undefined);
-      return {
-        ...action,
-        kind,
-        type,
-        actionCost: action.actionCost ?? 'action',
-        tags: action.tags ?? [],
-        effects: action.effects ?? []
-      };
-    })
+    actions: creature.actions.map(normalizeImportedAction),
+    ...(creature.resources ? { resources: creature.resources.map(normalizeImportedResource) } : {}),
+    ...(creature.features
+      ? {
+          features: creature.features.map((feature) => ({
+            ...feature,
+            enabled: feature.enabled !== false,
+            alternateActions: feature.alternateActions ?? [],
+            rules: feature.rules ?? []
+          }))
+        }
+      : {})
   };
+}
+
+function normalizeImportedAction(action: ActionDefinition): ActionDefinition {
+  const kind = action.kind ?? action.type ?? 'custom';
+  const type = kind === 'multiattack' || kind === 'basicAction'
+    ? undefined
+    : action.type ?? (kind === 'meleeAttack' || kind === 'rangedAttack' || kind === 'savingThrowEffect' ? kind : undefined);
+  return {
+    ...action,
+    kind,
+    type,
+    actionCost: action.actionCost ?? 'action',
+    tags: action.tags ?? [],
+    effects: action.effects ?? [],
+    ...(action.resourceCosts ? { resourceCosts: action.resourceCosts } : {}),
+    ...(action.rules ? { rules: action.rules } : {})
+  };
+}
+
+function normalizeImportedResource(resource: Resource): Resource {
+  const max = Math.max(0, numberOr(resource.max, 0));
+  return {
+    ...resource,
+    current: clamp(numberOr(resource.current, max), 0, max),
+    max,
+    resetOn: RESOURCE_RESET_OPTIONS.includes(resource.resetOn) ? resource.resetOn : 'longRest',
+    display: resource.display ?? { showOnCreaturePanel: true, mode: 'pips' }
+  };
+}
+
+function normalizeTurnResources(state: CombatState, creatures: Creature[]): Record<string, TurnResourceState> {
+  return Object.fromEntries(
+    creatures.map((creature) => {
+      const existing = state.turnResources?.[creature.id] as Partial<TurnResourceState> | undefined;
+      const fallbackMovement = getEffectiveMovementSpeed(creature, state);
+      const remainingMovement = numberOr(existing?.remainingMovement, numberOr(existing?.movementRemaining, fallbackMovement));
+      const movementRemaining = numberOr(existing?.movementRemaining, remainingMovement);
+      return [
+        creature.id,
+        {
+          creatureId: creature.id,
+          remainingMovement,
+          movementRemaining,
+          actionUsed: existing?.actionUsed ?? false,
+          bonusActionUsed: existing?.bonusActionUsed ?? false,
+          reactionUsed: existing?.reactionUsed ?? false
+        }
+      ];
+    })
+  );
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -180,4 +234,12 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function isNumber(value: unknown): value is number {
   return typeof value === 'number' && Number.isFinite(value);
+}
+
+function numberOr(value: unknown, fallback: number): number {
+  return isNumber(value) ? value : fallback;
+}
+
+function clamp(value: number, min: number, max: number): number {
+  return Math.min(max, Math.max(min, value));
 }

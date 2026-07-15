@@ -21,6 +21,8 @@ import {
   findCreature,
   getActionShapeSquares,
   getAttackDebugStats,
+  getOpportunityAttackCandidatesForMovementPath,
+  getTargetsInShape,
   isDefeated,
   moveActiveCreature,
   performDisengageAction,
@@ -61,7 +63,7 @@ import {
   getEffectiveSpeed,
   getUnavailableActionReason
 } from './engine/features';
-import { getReachableMovementSquares } from './engine/movement';
+import { getMovementOptionsForDestination, getReachableMovementSquares, type MovementOption } from './engine/movement';
 import { formatBaseEffectiveBonus, formatBaseEffectiveNumber, getConditionTags, getHpPercent } from './engine/presentation';
 import { parseCombatStateJson, serializeCombatState } from './engine/serialization';
 import {
@@ -121,6 +123,7 @@ export function App() {
   const [areaOrigin, setAreaOrigin] = useState<GridPosition | undefined>();
   const [selectionMode, setSelectionMode] = useState<SelectionMode>('move');
   const [conditionToApply, setConditionToApply] = useState<string>('poisoned');
+  const [concentrationName, setConcentrationName] = useState('');
   const [customConditionLibrary, setCustomConditionLibrary] = useState<CustomConditionTemplate[]>(loadCustomConditionLibrary);
   const [basicTargetId, setBasicTargetId] = useState<string | undefined>();
   const [basicNote, setBasicNote] = useState('');
@@ -200,7 +203,45 @@ export function App() {
   const mapToolKeys = useMemo(() => new Set(mapToolSquares.map(positionKey)), [mapToolSquares]);
   const visibleMapToolKeys = useMemo(() => (uiSettings.showMapTools ? mapToolKeys : new Set<string>()), [mapToolKeys, uiSettings.showMapTools]);
   const movementKeys = useMemo(() => new Set(movementOptions.map((option) => position3DKey(option.position))), [movementOptions]);
-  const movementOptionByKey = useMemo(() => new Map(movementOptions.map((option) => [position3DKey(option.position), option])), [movementOptions]);
+  const movementOptionByKey = useMemo(
+    () =>
+      new Map(
+        movementOptions.map((option) => [
+          position3DKey(option.position),
+          activeCreature ? getPreferredMovementOption(combat, activeCreature, option) : option
+        ])
+      ),
+    [activeCreature, combat, movementOptions]
+  );
+  const opportunityMovementKeys = useMemo(
+    () =>
+      new Set(
+        activeCreature
+          ? [...movementOptionByKey.values()]
+              .filter((option) => getOpportunityAttackCandidatesForMovementPath(combat, activeCreature, option.path).length > 0)
+              .map((option) => position3DKey(option.position))
+          : []
+      ),
+    [activeCreature, combat, movementOptionByKey]
+  );
+  const selectedMovementOption = useMemo(
+    () =>
+      selectionMode === 'move' && activeCreature
+        ? movementOptionByKey.get(position3DKey(gridCursor))
+        : undefined,
+    [activeCreature, gridCursor, movementOptionByKey, selectionMode]
+  );
+  const selectedMovementOpportunityCount = useMemo(
+    () =>
+      activeCreature && selectedMovementOption
+        ? getOpportunityAttackCandidatesForMovementPath(combat, activeCreature, selectedMovementOption.path).length
+        : 0,
+    [activeCreature, combat, selectedMovementOption]
+  );
+  const movementPathTileKeys = useMemo(
+    () => new Set((selectedMovementOption?.path ?? []).map(positionKey)),
+    [selectedMovementOption]
+  );
   const targetsInArea =
     activeCreature && selectedAction
       ? getTargetsForAction(combat, activeCreature, selectedAction, selectedTargetId, areaOrigin, direction)
@@ -303,6 +344,9 @@ export function App() {
       } else if (['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'].includes(event.key)) {
         const movementKey = battlemapView === '3d' ? getCameraRelativeArrowKey(event.key, cameraYaw) : event.key;
         setGridCursor((current) => getTilePosition(moveGridCursor(current, movementKey, combat.grid.width, combat.grid.height), combat.grid));
+      } else if (battlemapView === '3d' && (event.key === 'PageUp' || event.key === 'PageDown')) {
+        event.preventDefault();
+        adjustGridCursorElevation(event.key === 'PageUp' ? 1 : -1);
       } else if (event.key === 'Enter') {
         handleGridConfirm();
       }
@@ -327,6 +371,16 @@ export function App() {
     uiSettings.shortcutsEnabled,
     uiSettings.showMapTools
   ]);
+
+  function adjustGridCursorElevation(delta: number) {
+    setGridCursor((current) => {
+      const tileHeight = getTileHeight(current, combat.grid);
+      return {
+        ...current,
+        z: Math.max(tileHeight, getElevation(current) + delta)
+      };
+    });
+  }
 
   function resetTargeting(actionId?: string) {
     setSelectedActionId(actionId);
@@ -599,7 +653,10 @@ export function App() {
       performSavingThrowAction(
         current,
         selectedAction.id,
-        targets.map((target) => target.id)
+        targets.map((target) => target.id),
+        Math.random,
+        {},
+        { origin: getShapeOrigin(selectedAction, activeCreature.position, areaOrigin), direction }
       )
     );
   }
@@ -696,7 +753,10 @@ export function App() {
       }
 
       return applyCondition(current, creature.id, conditionToApply, {
-        sourceCreatureId: activeCreature?.id
+        sourceCreatureId: activeCreature?.id,
+        metadata: conditionToApply === 'concentrating' && concentrationName.trim()
+          ? { concentrationName: concentrationName.trim() }
+          : undefined
       });
     });
   }
@@ -951,6 +1011,13 @@ export function App() {
               >
                 {uiSettings.showGridCoordinates ? 'Hide Coordinates' : 'Show Coordinates'}
               </button>
+              {selectedMovementOption && (
+                <span className="movement-path-readout">
+                  Path {selectedMovementOption.costFeet} ft / {Math.max(0, selectedMovementOption.path.length - 1)} step(s)
+                  {formatPathElevationSummary(selectedMovementOption.path)}
+                  {selectedMovementOpportunityCount > 0 ? ` / ${selectedMovementOpportunityCount} OA risk` : ' / safe'}
+                </span>
+              )}
             </div>
             {uiSettings.showMapTools && (
               <>
@@ -1016,6 +1083,8 @@ export function App() {
               mapToolKeys={visibleMapToolKeys}
               mapToolStart={mapToolStart}
               movementKeys={movementKeys}
+              movementPathTileKeys={movementPathTileKeys}
+              opportunityMovementKeys={opportunityMovementKeys}
               onCellClick={handleCellClick}
               selectedCreatureId={selectedCreatureId}
               selectionMode={selectionMode}
@@ -1035,7 +1104,10 @@ export function App() {
               highlightedKeys={highlightedKeys}
               mapToolKeys={visibleMapToolKeys}
               movementKeys={movementKeys}
+              movementPathTileKeys={movementPathTileKeys}
+              opportunityMovementKeys={opportunityMovementKeys}
               onCellClick={handleCellClick}
+              onCursorElevationChange={adjustGridCursorElevation}
               selectedCreatureId={selectedCreatureId}
               settings={uiSettings}
               setCameraPanX={setCameraPanX}
@@ -1340,6 +1412,16 @@ export function App() {
                   )}
                 </select>
               </label>
+              {conditionToApply === 'concentrating' && (
+                <label>
+                  Concentration
+                  <input
+                    placeholder="Spell or effect name"
+                    value={concentrationName}
+                    onChange={(event) => setConcentrationName(event.target.value)}
+                  />
+                </label>
+              )}
               {selectedCustomConditionTemplate && (
                 <p className="condition-template-hint">
                   Custom: {hasMechanicalCustomConditionEffects(selectedCustomConditionTemplate)
@@ -1439,6 +1521,8 @@ function Battlefield2DView({
   mapToolKeys,
   mapToolStart,
   movementKeys,
+  movementPathTileKeys,
+  opportunityMovementKeys,
   onCellClick,
   selectedCreatureId,
   selectionMode,
@@ -1453,6 +1537,8 @@ function Battlefield2DView({
   mapToolKeys: Set<string>;
   mapToolStart?: GridPosition;
   movementKeys: Set<string>;
+  movementPathTileKeys: Set<string>;
+  opportunityMovementKeys: Set<string>;
   onCellClick: (position: GridPosition) => void;
   selectedCreatureId?: string;
   selectionMode: SelectionMode;
@@ -1540,6 +1626,8 @@ function Battlefield2DView({
           const creature = creatureByTile.get(key);
           const blocked = blockedKeys.has(key);
           const movement = selectionMode === 'move' && movementKeys.has(position3DKey(position));
+          const movementPath = movementPathTileKeys.has(positionKey(position));
+          const opportunityMovement = movement && opportunityMovementKeys.has(position3DKey(position));
           const highlighted = highlightedKeys.has(key);
           const toolHighlighted = mapToolKeys.has(key);
           const active = creature?.id === combat.activeCreatureId;
@@ -1551,13 +1639,15 @@ function Battlefield2DView({
 
           return (
             <button
-              aria-label={`Grid ${x},${y}${creature ? ` ${creature.name}` : ''}${blocked ? ' blocked' : ''}`}
+              aria-label={`Grid ${x},${y}${creature ? ` ${creature.name}` : ''}${blocked ? ' blocked' : ''}${opportunityMovement ? ' may provoke opportunity attack' : ''}`}
               className={[
                 'grid-cell',
                 blocked ? 'blocked' : '',
                 highlighted ? 'highlighted' : '',
                 toolHighlighted ? 'tool-highlighted' : '',
                 movement ? 'movement-cell' : '',
+                movementPath ? 'movement-path-cell' : '',
+                opportunityMovement ? 'opportunity-movement-cell' : '',
                 active ? 'active-cell' : '',
                 selected ? 'selected-cell' : '',
                 toolStart ? 'tool-start-cell' : '',
@@ -1567,6 +1657,7 @@ function Battlefield2DView({
               key={key}
               onClick={() => onCellClick(position)}
               style={{ height: cellSize, left: x * stride, top: y * stride, width: cellSize }}
+              title={opportunityMovement ? 'This movement may provoke an opportunity attack.' : undefined}
             >
               {showGridCoordinates && <span className="coord">{x},{y}</span>}
               {tileHeight !== 0 && <span className="height-marker">z{tileHeight}</span>}
@@ -1594,7 +1685,10 @@ function Battlefield3DView({
   highlightedKeys,
   mapToolKeys,
   movementKeys,
+  movementPathTileKeys,
+  opportunityMovementKeys,
   onCellClick,
+  onCursorElevationChange,
   selectedCreatureId,
   settings,
   cameraYaw,
@@ -1615,7 +1709,10 @@ function Battlefield3DView({
   highlightedKeys: Set<string>;
   mapToolKeys: Set<string>;
   movementKeys: Set<string>;
+  movementPathTileKeys: Set<string>;
+  opportunityMovementKeys: Set<string>;
   onCellClick: (position: GridPosition) => void;
+  onCursorElevationChange: (delta: number) => void;
   selectedCreatureId?: string;
   settings: UiSettings;
   cameraYaw: number;
@@ -1650,6 +1747,11 @@ function Battlefield3DView({
   };
   const dragState = useRef<{ x: number; y: number; mode: 'orbit' | 'pan' } | undefined>(undefined);
   const blockedTileKeys = useMemo(() => new Set(combat.grid.blocked.map(positionKey)), [combat.grid.blocked]);
+  const movementTileKeys = useMemo(() => new Set([...movementKeys].map((key) => key.split(',').slice(0, 2).join(','))), [movementKeys]);
+  const opportunityMovementTileKeys = useMemo(
+    () => new Set([...opportunityMovementKeys].map((key) => key.split(',').slice(0, 2).join(','))),
+    [opportunityMovementKeys]
+  );
   const tileCoordinates = useMemo(() => {
     const coordinates = get3DTileCoordinates({
       gridWidth: combat.grid.width,
@@ -1830,11 +1932,15 @@ function Battlefield3DView({
   function getTileStroke({
     highlighted,
     movement,
+    movementPath,
+    opportunityMovement,
     toolHighlighted,
     cursor
   }: {
     highlighted: boolean;
     movement: boolean;
+    movementPath: boolean;
+    opportunityMovement: boolean;
     toolHighlighted: boolean;
     cursor: boolean;
   }) {
@@ -1846,6 +1952,15 @@ function Battlefield3DView({
     }
     if (highlighted) {
       return { stroke: '#c47f00', width: 4 };
+    }
+    if (movementPath && opportunityMovement) {
+      return { stroke: '#b45309', width: 4 };
+    }
+    if (movementPath) {
+      return { stroke: '#2563eb', width: 4 };
+    }
+    if (opportunityMovement) {
+      return { stroke: '#b45309', width: 4 };
     }
     if (movement) {
       return { stroke: '#2f9e44', width: 3 };
@@ -1864,12 +1979,14 @@ function Battlefield3DView({
     const tileHeight = getTileHeight(position, combat.grid);
     const blocked = blockedTileKeys.has(positionKey(position));
     const highlighted = highlightedKeys.has(positionKey(position));
-    const movement = movementKeys.has(position3DKey(position));
+    const movement = movementKeys.has(position3DKey(position)) || movementTileKeys.has(positionKey(position));
+    const movementPath = movementPathTileKeys.has(positionKey(position));
+    const opportunityMovement = opportunityMovementKeys.has(position3DKey(position)) || opportunityMovementTileKeys.has(positionKey(position));
     const toolHighlighted = mapToolKeys.has(positionKey(position));
     const cursor = samePosition(gridCursor, position);
-    const stroke = getTileStroke({ highlighted, movement, toolHighlighted, cursor });
+    const stroke = getTileStroke({ highlighted, movement, movementPath, opportunityMovement, toolHighlighted, cursor });
     const terrainPalette = {
-      top: movement ? '#a8df99' : highlighted ? '#f7e59b' : '#d9decf',
+      top: movementPath && opportunityMovement ? '#ffd08a' : movementPath ? '#bfdbfe' : opportunityMovement ? '#ffd08a' : movement ? '#a8df99' : highlighted ? '#f7e59b' : '#d9decf',
       north: '#b2baa7',
       south: '#8f9a82',
       east: '#a3ad96',
@@ -2009,6 +2126,11 @@ function Battlefield3DView({
           Reset
         </button>
       </details>
+      <div className="altitude-controls-3d" onPointerDown={(event) => event.stopPropagation()} onWheel={(event) => event.stopPropagation()}>
+        <button aria-label="Raise cursor altitude" onClick={() => onCursorElevationChange(1)}>+</button>
+        <span>z{getElevation(gridCursor)}</span>
+        <button aria-label="Lower cursor altitude" onClick={() => onCursorElevationChange(-1)}>-</button>
+      </div>
       <div className="battlefield-3d-legend">
         <span><b>z1</b> = 5 ft</span>
         <span>Dark tiles are blocked</span>
@@ -2692,16 +2814,46 @@ function getTargetsForAction(
 
   if ((action.type ?? action.kind) === 'savingThrowEffect') {
     const origin = getShapeOrigin(action, activeCreature.position, areaOrigin);
-    const squares = getActionShapeSquares(combat, action, origin, direction);
-    return combat.creatures.filter(
-      (creature) =>
-        creature.id !== activeCreature.id &&
-        !isDefeated(creature) &&
-        squares.some((square) => samePosition(square, creature.position))
-    );
+    return getTargetsInShape(combat, action.id, origin, direction);
   }
 
   return [];
+}
+
+function getPreferredMovementOption(
+  combat: CombatState,
+  activeCreature: Creature,
+  option: MovementOption
+): MovementOption {
+  const alternatives = getMovementOptionsForDestination(combat, activeCreature.id, option.position);
+  if (alternatives.length === 0) {
+    return option;
+  }
+
+  return alternatives.reduce((best, candidate) => {
+    const bestRisk = getOpportunityAttackCandidatesForMovementPath(combat, activeCreature, best.path).length;
+    const candidateRisk = getOpportunityAttackCandidatesForMovementPath(combat, activeCreature, candidate.path).length;
+    if (candidateRisk !== bestRisk) {
+      return candidateRisk < bestRisk ? candidate : best;
+    }
+
+    if (candidate.costFeet !== best.costFeet) {
+      return candidate.costFeet < best.costFeet ? candidate : best;
+    }
+
+    return candidate.path.length < best.path.length ? candidate : best;
+  }, alternatives[0]);
+}
+
+function formatPathElevationSummary(path: GridPosition[]): string {
+  const elevations = path.map(getElevation);
+  const min = Math.min(...elevations);
+  const max = Math.max(...elevations);
+  if (min === max) {
+    return min === 0 ? '' : ` / z${min}`;
+  }
+
+  return ` / z${min}-${max}`;
 }
 
 function getMapToolSquares(

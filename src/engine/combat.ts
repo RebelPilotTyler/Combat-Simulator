@@ -13,10 +13,11 @@ import type {
   Ability,
   Skill,
   RollMode,
+  RollModifier,
   MultiattackStep,
   CombatRulesSettings
 } from './types';
-import { getShapeSquares, getTilePosition, isBlocked, isInBounds, samePosition } from './shapes';
+import { getElevation, getShapeSquares, getTilePosition, isBlocked, isInBounds, samePosition } from './shapes';
 import { getMovementOption, getMovementOptionForPath, isOccupied } from './movement';
 import { clampGridPosition, normalizeGridDefinition } from './grid';
 import {
@@ -46,6 +47,7 @@ import {
   getHostileCreaturesWithinReach,
   getOpportunityAttackCandidates,
   hasLineOfSight,
+  isBeyondNormalRange,
   isInActionRange
 } from './targeting';
 import {
@@ -101,6 +103,12 @@ export type SearchMode = 'perception' | 'investigation';
 export interface MultiattackTargetSelections {
   targetId?: string;
   stepTargets?: Record<string, string>;
+}
+
+export interface OpportunityAttackPathCandidate {
+  creature: Creature;
+  from: GridPosition;
+  to: GridPosition;
 }
 
 export interface AttackDebugStats {
@@ -266,7 +274,7 @@ export function moveActiveCreature(state: CombatState, movement: GridPosition | 
   }
 
   const from = { ...creature.position };
-  const opportunityCandidates = hasCondition(creature, 'disengaged') ? [] : getOpportunityAttackCandidatesForPath(next, creature, movementOption.path);
+  const opportunityCandidates = getOpportunityAttackCandidatesForMovementPath(next, creature, movementOption.path);
   creature.position = destinationPosition;
   const resource = getResource(next, creature.id);
   resource.remainingMovement -= movementOption.costFeet;
@@ -703,6 +711,11 @@ export function performAttackAction(
     return next;
   }
 
+  if (!canCreatureTargetHarmfulEffect(attacker, target)) {
+    addLog(next, 'system', `${attacker.name} cannot attack or harm ${target.name} while charmed by them.`);
+    return next;
+  }
+
   if (!usesDeferredActionCost(action)) {
     if (!spendActionCost(next, attacker, action.actionCost)) {
       return next;
@@ -833,6 +846,11 @@ function resolveAttackAction(
     return;
   }
 
+  if (!canCreatureTargetHarmfulEffect(attacker, target)) {
+    addLog(next, 'system', `${attacker.name} cannot attack or harm ${target.name} while charmed by them.`);
+    return;
+  }
+
   const targetPosition = options.targetPositionOverride ?? target.position;
   if (!isInActionRange(action, attacker.position, targetPosition)) {
     addLog(next, 'system', `${target.name} is out of range for ${action.name}.`);
@@ -853,6 +871,7 @@ function resolveAttackAction(
     getDistanceFeet(attacker.position, targetPosition)
   );
   attackModifier = mergeRollModifiers(attackModifier, collectBeforeAttackRollRuleModifiers(next, { attacker, target, action }));
+  attackModifier = mergeRollModifiers(attackModifier, getFrightenedRollModifier(next, attacker));
   if (isFlankingAttack(next, attacker, target, action)) {
     attackModifier = mergeRollModifiers(attackModifier, {
       advantage: true,
@@ -865,6 +884,12 @@ function resolveAttackAction(
       notes: ['hostile creature within 5 ft']
     });
   }
+  if (isBeyondNormalRange(action, attacker.position, targetPosition)) {
+    attackModifier = mergeRollModifiers(attackModifier, {
+      disadvantage: true,
+      notes: ['long range']
+    });
+  }
   const rollMode = resolveRollMode(attackModifier);
   const firstD20 = rollDice('1d20', random);
   const secondD20 = rollMode === 'normal' ? undefined : rollDice('1d20', random);
@@ -873,10 +898,11 @@ function resolveAttackAction(
   const attackBonus = getEffectiveAttackBonus(action, attacker, next);
   const flatModifier = attackModifier.flatModifier ?? 0;
   const attackTotal = d20Total + attackBonus + flatModifier;
-  const critical = naturalRoll === 20;
+  const naturalCritical = naturalRoll === 20;
   const naturalMiss = naturalRoll === 1;
   const targetAc = getEffectiveAC(target, next);
-  const hit = naturalMiss ? false : critical ? true : attackModifier.autoFail ? false : attackModifier.autoSuccess ? true : attackTotal >= targetAc;
+  const hit = naturalMiss ? false : naturalCritical ? true : attackModifier.autoFail ? false : attackModifier.autoSuccess ? true : attackTotal >= targetAc;
+  const critical = naturalCritical || (hit && isAutomaticMeleeCritical(attacker, target, targetPosition));
 
   hooks.afterAttackRoll?.(next, { attacker, target, action, attackTotal });
   runAfterAttackRollRules(next, { attacker, target, action, attackTotal, hit, critical });
@@ -906,7 +932,8 @@ export function performSavingThrowAction(
   actionId: string,
   targetIds: string[],
   random: RandomSource = Math.random,
-  hooks: CombatHooks = {}
+  hooks: CombatHooks = {},
+  options: { origin?: GridPosition; direction?: CardinalDirection } = {}
 ): CombatState {
   const next = ensureTurnState(normalizeState(cloneState(state)));
   const source = getActiveCreature(next);
@@ -920,6 +947,25 @@ export function performSavingThrowAction(
     throw new Error(`${action.name} is not a valid saving throw damage action.`);
   }
 
+  const origin = getShapeOriginForAction(next, action, source.position, options.origin);
+  if (!isInActionRange(action, source.position, origin)) {
+    addLog(next, 'system', `${formatPosition(origin)} is out of range for ${action.name}.`);
+    return next;
+  }
+
+  if ((action.tags.includes('spell') || action.kind === 'spell') && !hasLineOfSight(next, source.position, origin)) {
+    addLog(next, 'system', `${source.name} does not have line of sight to ${formatPosition(origin)} for ${action.name}.`);
+    return next;
+  }
+
+  const validTargets = getTargetsInActionShape(next, action, source, origin, options.direction)
+    .filter((target) => targetIds.includes(target.id) && canCreatureTargetHarmfulEffect(source, target));
+
+  if (validTargets.length === 0) {
+    addLog(next, 'system', `${action.name} has no valid targets in its selected area.`);
+    return next;
+  }
+
   if (!spendActionCost(next, source, action.actionCost)) {
     return next;
   }
@@ -931,13 +977,13 @@ export function performSavingThrowAction(
     next,
     source,
     action,
-    targetIds.map((targetId) => findCreature(next, targetId))
+    validTargets
   );
   if (action.tags.includes('spell') || action.kind === 'spell') {
     addLog(next, 'action', `${source.name} casts ${action.name}.`);
   }
 
-  resolveSavingThrowDamageAction(next, source.id, action, targetIds, random, hooks);
+  resolveSavingThrowDamageAction(next, source.id, action, validTargets.map((target) => target.id), random, hooks);
 
   return next;
 }
@@ -950,14 +996,7 @@ export function getTargetsInShape(
 ): Creature[] {
   const source = getActiveCreature(state);
   const action = findAction(source, actionId, state);
-  const squares = getActionShapeSquares(state, action, origin, direction);
-
-  return state.creatures.filter(
-    (creature) =>
-      creature.id !== source.id &&
-      !isDefeated(creature) &&
-      squares.some((square) => samePosition(square, creature.position))
-  );
+  return getTargetsInActionShape(state, action, source, origin, direction);
 }
 
 export function getAttackDebugStats(
@@ -980,7 +1019,9 @@ export function getAttackDebugStats(
       getDistanceFeet(attacker.position, target.position)
     ),
     collectBeforeAttackRollRuleModifiers(normalized, { attacker, target, action }),
-    isFlankingAttack(normalized, attacker, target, action) ? { advantage: true, notes: ['flanking'] } : undefined
+    getFrightenedRollModifier(normalized, attacker),
+    isFlankingAttack(normalized, attacker, target, action) ? { advantage: true, notes: ['flanking'] } : undefined,
+    isBeyondNormalRange(action, attacker.position, target.position) ? { disadvantage: true, notes: ['long range'] } : undefined
   );
   const rollMode = resolveRollMode(attackModifier);
   const attackBonus = getEffectiveAttackBonus(action, attacker, normalized) + (attackModifier.flatModifier ?? 0);
@@ -1044,6 +1085,83 @@ export function getActionShapeSquares(
   return getShapeSquares(action.shape ?? { type: 'single' }, origin, state.grid, direction);
 }
 
+function getShapeOriginForAction(
+  state: CombatState,
+  action: ActionDefinition,
+  sourcePosition: GridPosition,
+  selectedOrigin?: GridPosition
+): GridPosition {
+  if (action.shape?.type === 'line' || action.shape?.type === 'cone') {
+    return getTilePosition(sourcePosition, state.grid);
+  }
+
+  return getTilePosition(selectedOrigin ?? sourcePosition, state.grid);
+}
+
+function getTargetsInActionShape(
+  state: CombatState,
+  action: ActionDefinition,
+  source: Creature,
+  origin: GridPosition,
+  direction?: CardinalDirection
+): Creature[] {
+  return state.creatures.filter(
+    (creature) =>
+      creature.id !== source.id &&
+      !isDefeated(creature) &&
+      isPositionInActionShape(state, action, origin, creature.position, direction)
+  );
+}
+
+function isPositionInActionShape(
+  state: CombatState,
+  action: ActionDefinition,
+  origin: GridPosition,
+  position: GridPosition,
+  direction?: CardinalDirection
+): boolean {
+  const shape = action.shape ?? { type: 'single' as const };
+  const normalizedOrigin = getTilePosition(origin, state.grid);
+  const normalizedPosition = getTilePosition(position, state.grid);
+
+  if (shape.type === 'radius') {
+    const radius = shape.radius ?? 1;
+    const dx = normalizedPosition.x - normalizedOrigin.x;
+    const dy = normalizedPosition.y - normalizedOrigin.y;
+    const dz = getElevation(normalizedPosition) - getElevation(normalizedOrigin);
+    return dx * dx + dy * dy + dz * dz <= radius * radius;
+  }
+
+  return getActionShapeSquares(state, action, normalizedOrigin, direction).some((square) => samePosition(square, normalizedPosition));
+}
+
+function isAutomaticMeleeCritical(attacker: Creature, target: Creature, targetPosition: GridPosition): boolean {
+  return getDistanceFeet(attacker.position, targetPosition) <= 5 && (hasCondition(target, 'paralyzed') || hasCondition(target, 'unconscious'));
+}
+
+function canCreatureTargetHarmfulEffect(source: Creature, target: Creature): boolean {
+  return !normalizeConditions(source.conditions).some(
+    (condition) => condition.id === 'charmed' && condition.sourceCreatureId === target.id
+  );
+}
+
+function getFrightenedRollModifier(state: CombatState, creature: Creature): RollModifier | undefined {
+  const relevantFrightened = normalizeConditions(creature.conditions).some((condition) => {
+    if (condition.id !== 'frightened') {
+      return false;
+    }
+
+    if (!condition.sourceCreatureId) {
+      return false;
+    }
+
+    const source = state.creatures.find((candidate) => candidate.id === condition.sourceCreatureId);
+    return source !== undefined && !isDefeated(source) && hasLineOfSight(state, creature.position, source.position);
+  });
+
+  return relevantFrightened ? { disadvantage: true, notes: ['Frightened'] } : undefined;
+}
+
 function isFlankingAttack(state: CombatState, attacker: Creature, target: Creature, action: ActionDefinition): boolean {
   if (!state.rulesSettings?.flanking?.enabled) {
     return false;
@@ -1072,6 +1190,7 @@ function isFlankingAttack(state: CombatState, attacker: Creature, target: Creatu
       ally.id === target.id ||
       ally.team !== attacker.team ||
       isDefeated(ally) ||
+      !canCreatureTakeReaction(state, ally) ||
       isBlocked(ally.position, state.grid)
     ) {
       return false;
@@ -1178,12 +1297,61 @@ function applyDamage(
   runAfterDamageHooks(state, source, target, action, modifiedAmount);
   runAfterDamageRules(state, { source, target, action, amount: modifiedAmount });
   hooks.afterDamage?.(state, { source, target, action, amount: modifiedAmount });
+  resolveConcentrationAfterDamage(state, source, target, action, modifiedAmount, random);
   if (target.hp === 0 && !hasCondition(target, 'defeated')) {
     applyConditionToCreature(target, createAppliedCondition('defeated'));
     hooks.onCreatureDefeated?.(state, target);
     addLog(state, 'defeat', `${target.name} is defeated.`);
   }
   return modifiedAmount;
+}
+
+function resolveConcentrationAfterDamage(
+  state: CombatState,
+  source: Creature,
+  target: Creature,
+  action: ActionDefinition,
+  amount: number,
+  random: RandomSource
+): void {
+  if (amount <= 0 || !hasCondition(target, 'concentrating')) {
+    return;
+  }
+
+  if (target.hp === 0) {
+    if (removeConditionFromCreature(target, 'concentrating')) {
+      addLog(state, 'condition', `${target.name} loses concentration because they are defeated.`);
+    }
+    return;
+  }
+
+  const dc = Math.max(10, Math.floor(amount / 2));
+  const saveRollModifier = mergeRollModifiers(
+    collectSavingThrowModifiers(state, target, 'con'),
+    collectBeforeSavingThrowRuleModifiers(state, { source, target, action, ability: 'con' })
+  );
+  const rollMode = resolveRollMode(saveRollModifier);
+  const firstSaveRoll = rollDice('1d20', random);
+  const secondSaveRoll = rollMode === 'normal' ? undefined : rollDice('1d20', random);
+  const saveModifier = getEffectiveSaveBonus(target, 'con', state);
+  const flatModifier = saveRollModifier.flatModifier ?? 0;
+  const d20Total = chooseD20(firstSaveRoll.total, secondSaveRoll?.total, rollMode);
+  const saveTotal = saveRollModifier.autoFail
+    ? Number.NEGATIVE_INFINITY
+    : saveRollModifier.autoSuccess
+      ? Number.POSITIVE_INFINITY
+      : d20Total + saveModifier + flatModifier;
+  const success = saveTotal >= dc;
+
+  addLog(
+    state,
+    'save',
+    `${target.name} rolls concentration save after taking ${amount} damage: ${formatD20Roll(firstSaveRoll.total, secondSaveRoll?.total, rollMode)}${formatRollReasons(saveRollModifier.notes)} + ${saveModifier}${flatModifier ? ` ${formatSigned(flatModifier)}` : ''} = ${saveTotal} vs DC ${dc}. ${success ? 'Success.' : 'Failure.'}`
+  );
+
+  if (!success && removeConditionFromCreature(target, 'concentrating')) {
+    addLog(state, 'condition', `${target.name} loses concentration on ${action.name}.`);
+  }
 }
 
 function resolveSavingThrowDamageAction(
@@ -1231,7 +1399,7 @@ function resolveSavingThrowDamageAction(
     addLog(
       state,
       'save',
-      `${target.name} rolls ${save.ability.toUpperCase()} save against ${action.name}: ${formatD20Roll(firstSaveRoll.total, secondSaveRoll?.total, rollMode)} + ${saveModifier}${flatModifier ? ` ${formatSigned(flatModifier)}` : ''} = ${saveTotal} vs DC ${save.dc}. ${success ? 'Success.' : 'Failure.'}`
+      `${target.name} rolls ${save.ability.toUpperCase()} save against ${action.name}: ${formatD20Roll(firstSaveRoll.total, secondSaveRoll?.total, rollMode)}${formatRollReasons(saveRollModifier.notes)} + ${saveModifier}${flatModifier ? ` ${formatSigned(flatModifier)}` : ''} = ${saveTotal} vs DC ${save.dc}. ${success ? 'Success.' : 'Failure.'}`
     );
     runAfterSavingThrowRules(state, { source, target, action, ability: save.ability, total: saveTotal, success });
 
@@ -1456,7 +1624,10 @@ function rollAbilityCheck(
   skill: Skill | undefined,
   random: RandomSource
 ) {
-  const conditionModifier = collectAbilityCheckModifiers(state, creature, ability);
+  const conditionModifier = mergeRollModifiers(
+    collectAbilityCheckModifiers(state, creature, ability),
+    getFrightenedRollModifier(state, creature)
+  );
   const rollMode = resolveRollMode(conditionModifier);
   const first = rollDice('1d20', random);
   const second = rollMode === 'normal' ? undefined : rollDice('1d20', random);
@@ -1582,12 +1753,16 @@ function syncActiveTurnState(state: CombatState): void {
   }
 }
 
-function getOpportunityAttackCandidatesForPath(
+export function getOpportunityAttackCandidatesForMovementPath(
   state: CombatState,
   mover: Creature,
   path: GridPosition[]
-): Array<{ creature: Creature; from: GridPosition; to: GridPosition }> {
-  const candidates: Array<{ creature: Creature; from: GridPosition; to: GridPosition }> = [];
+): OpportunityAttackPathCandidate[] {
+  if (hasCondition(mover, 'disengaged')) {
+    return [];
+  }
+
+  const candidates: OpportunityAttackPathCandidate[] = [];
   const triggeredCreatureIds = new Set<string>();
 
   for (let index = 1; index < path.length; index += 1) {

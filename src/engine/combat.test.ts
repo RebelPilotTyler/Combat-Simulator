@@ -5,6 +5,7 @@ import {
   applyCondition,
   getAttackDebugStats,
   getExpectedHitChance,
+  getOpportunityAttackCandidatesForMovementPath,
   moveActiveCreature,
   performDisengageAction,
   performCreatureUtilityAction,
@@ -364,6 +365,40 @@ describe('combat engine', () => {
     expect(result.log.some((entry) => entry.type === 'save')).toBe(true);
   });
 
+  it('validates saving throw area origin against action range before spending the action', () => {
+    const state = rollInitiative(
+      createCombatState([
+        creature({ id: 'a', name: 'Alpha', position: { x: 0, y: 0 } }),
+        creature({ id: 'b', name: 'Bravo', hp: 10, position: { x: 5, y: 0 }, abilityScores: { ...baseCreature.abilityScores, dex: 8 } })
+      ]),
+      sequence([0.9, 0.1])
+    );
+
+    const invalid = performSavingThrowAction(state, 'burst', ['b'], sequence([0.1]), {}, { origin: { x: 5, y: 0 } });
+    expect(findCreatureForTest(invalid, 'b').hp).toBe(10);
+    expect(invalid.turnState.actionUsed).toBe(false);
+    expect(invalid.log[0].message).toContain('out of range');
+
+    const valid = performSavingThrowAction(state, 'burst', ['b'], sequence([0.1, 0.49, 0.49]), {}, { origin: { x: 4, y: 0 } });
+    expect(findCreatureForTest(valid, 'b').hp).toBe(4);
+    expect(valid.turnState.actionUsed).toBe(true);
+  });
+
+  it('includes aerial creatures in 3D radius saving throw effects', () => {
+    const state = rollInitiative(
+      createCombatState([
+        creature({ id: 'a', name: 'Alpha', position: { x: 0, y: 0, z: 2 } }),
+        creature({ id: 'b', name: 'Bravo', hp: 10, position: { x: 1, y: 0, z: 2 }, abilityScores: { ...baseCreature.abilityScores, dex: 8 } })
+      ]),
+      sequence([0.9, 0.1])
+    );
+
+    const result = performSavingThrowAction(state, 'burst', ['b'], sequence([0.1, 0.49, 0.49]), {}, { origin: { x: 0, y: 0, z: 2 } });
+
+    expect(findCreatureForTest(result, 'b').hp).toBe(4);
+    expect(result.turnState.actionUsed).toBe(true);
+  });
+
   it('applies Dodge until the start of the creature turn', () => {
     const state = rollInitiative(
       createCombatState([
@@ -417,6 +452,27 @@ describe('combat engine', () => {
     expect(result.log.some((entry) => entry.message.includes('advantage'))).toBe(true);
   });
 
+  it('rolls concentration saves after damage and removes concentration on failure', () => {
+    const state = rollInitiative(
+      createCombatState([
+        creature({ id: 'a', name: 'Alpha', position: { x: 0, y: 0 } }),
+        creature({ id: 'b', name: 'Bravo', hp: 20, maxHp: 20, position: { x: 1, y: 0 }, conditions: [createAppliedCondition('concentrating')] })
+      ]),
+      sequence([0.9, 0.1])
+    );
+
+    const failed = performAttackAction(state, 'strike', 'b', sequence([0.5, 0, 0]));
+
+    expect(hasCondition(findCreatureForTest(failed, 'b'), 'concentrating')).toBe(false);
+    expect(failed.log.some((entry) => entry.message.includes('concentration save'))).toBe(true);
+    expect(failed.log.some((entry) => entry.message.includes('loses concentration'))).toBe(true);
+
+    const succeeded = performAttackAction(state, 'strike', 'b', sequence([0.5, 0, 0.99]));
+
+    expect(hasCondition(findCreatureForTest(succeeded, 'b'), 'concentrating')).toBe(true);
+    expect(succeeded.log.some((entry) => entry.message.includes('concentration save'))).toBe(true);
+  });
+
   it('applies and removes conditions with log entries', () => {
     const state = createCombatState([creature({ id: 'a', name: 'Alpha' })]);
 
@@ -427,6 +483,14 @@ describe('combat engine', () => {
     const removed = removeCondition(applied, 'a', 'poisoned');
     expect(hasCondition(removed.creatures[0], 'poisoned')).toBe(false);
     expect(removed.log[0].message).toContain('removed');
+  });
+
+  it('labels concentrating conditions with the tracked effect name', () => {
+    const condition = createAppliedCondition('concentrating', {
+      metadata: { concentrationName: 'Bless' }
+    });
+
+    expect(getConditionLabel(condition)).toBe('Concentrating: Bless');
   });
 
   it('expires target-start and round-duration conditions', () => {
@@ -473,6 +537,61 @@ describe('combat engine', () => {
     const modifier = collectAbilityCheckModifiers(state, state.creatures[0], 'str');
 
     expect(resolveRollMode(modifier)).toBe('disadvantage');
+  });
+
+  it('charmed prevents attacking or harmful save effects against the charmer', () => {
+    const state = rollInitiative(
+      createCombatState([
+        creature({ id: 'a', name: 'Alpha', conditions: [createAppliedCondition('charmed', { sourceCreatureId: 'b' })] }),
+        creature({ id: 'b', name: 'Bravo', team: 'enemies', hp: 10, position: { x: 1, y: 0 } })
+      ]),
+      sequence([0.9, 0.1])
+    );
+
+    const attack = performAttackAction(state, 'strike', 'b', sequence([0.99, 0]));
+
+    expect(findCreatureForTest(attack, 'b').hp).toBe(10);
+    expect(attack.turnState.actionUsed).toBe(false);
+    expect(attack.log[0].message).toContain('charmed');
+
+    const area = performSavingThrowAction(state, 'burst', ['b'], sequence([0.1]), {}, { origin: { x: 1, y: 0 } });
+
+    expect(findCreatureForTest(area, 'b').hp).toBe(10);
+    expect(area.turnState.actionUsed).toBe(false);
+    expect(area.log[0].message).toContain('no valid targets');
+  });
+
+  it('frightened only penalizes attacks while the fear source is visible', () => {
+    const visibleSourceState = rollInitiative(
+      createCombatState([
+        creature({ id: 'a', name: 'Alpha', position: { x: 0, y: 0 }, conditions: [createAppliedCondition('frightened', { sourceCreatureId: 'b' })] }),
+        creature({ id: 'b', name: 'Bravo', team: 'enemies', position: { x: 2, y: 0 } }),
+        creature({ id: 'c', name: 'Charlie', team: 'enemies', hp: 10, ac: 12, position: { x: 0, y: 1 } })
+      ]),
+      sequence([0.9, 0.1, 0.2])
+    );
+
+    const frightened = performAttackAction(visibleSourceState, 'strike', 'c', sequence([0.99, 0]));
+    expect(findCreatureForTest(frightened, 'c').hp).toBe(10);
+    expect(frightened.log.some((entry) => entry.message.includes('Frightened'))).toBe(true);
+
+    const blockedSourceState = rollInitiative(
+      createCombatState(
+        [
+          creature({ id: 'a', name: 'Alpha', position: { x: 0, y: 0 }, conditions: [createAppliedCondition('frightened', { sourceCreatureId: 'b' })] }),
+          creature({ id: 'b', name: 'Bravo', team: 'enemies', position: { x: 2, y: 0 } }),
+          creature({ id: 'c', name: 'Charlie', team: 'enemies', hp: 10, ac: 12, position: { x: 0, y: 1 } })
+        ],
+        3,
+        2,
+        [{ x: 1, y: 0 }]
+      ),
+      sequence([0.9, 0.1, 0.2])
+    );
+
+    const blocked = performAttackAction(blockedSourceState, 'strike', 'c', sequence([0.5, 0]));
+    expect(findCreatureForTest(blocked, 'c').hp).toBe(7);
+    expect(blocked.log.some((entry) => entry.message.includes('Frightened'))).toBe(false);
   });
 
   it('prone grants melee advantage and ranged disadvantage against the target', () => {
@@ -553,6 +672,40 @@ describe('combat engine', () => {
     expect(result.log.some((entry) => entry.message.includes('disadvantage'))).toBe(true);
   });
 
+  it('stunned creatures auto-fail Dexterity saving throws', () => {
+    const state = rollInitiative(
+      createCombatState([
+        creature({ id: 'a', name: 'Alpha' }),
+        creature({
+          id: 'b',
+          name: 'Bravo',
+          hp: 10,
+          abilityScores: { ...baseCreature.abilityScores, dex: 20 },
+          conditions: [createAppliedCondition('stunned')]
+        })
+      ]),
+      sequence([0.9, 0.1])
+    );
+
+    const result = performSavingThrowAction(state, 'burst', ['b'], sequence([0.99, 0.49, 0.49]));
+    expect(result.creatures.find((candidate) => candidate.id === 'b')?.hp).toBe(4);
+    expect(result.log.some((entry) => entry.message.includes('Stunned'))).toBe(true);
+  });
+
+  it('melee hits against paralyzed or unconscious targets are critical hits within 5 feet', () => {
+    const state = rollInitiative(
+      createCombatState([
+        creature({ id: 'a', name: 'Alpha', position: { x: 0, y: 0 } }),
+        creature({ id: 'b', name: 'Bravo', hp: 10, ac: 10, position: { x: 1, y: 0 }, conditions: [createAppliedCondition('paralyzed')] })
+      ]),
+      sequence([0.9, 0.1])
+    );
+
+    const result = performAttackAction(state, 'strike', 'b', sequence([0.5, 0, 0]));
+    expect(result.creatures.find((candidate) => candidate.id === 'b')?.hp).toBe(6);
+    expect(result.log.some((entry) => entry.message.includes('Critical hit'))).toBe(true);
+  });
+
   it('blocks melee attacks outside 5 feet and ranged attacks through obstacles', () => {
     const meleeState = rollInitiative(
       createCombatState([
@@ -591,6 +744,45 @@ describe('combat engine', () => {
 
     const ranged = performAttackAction(rangedState, 'shot', 'b', sequence([0.99]));
     expect(ranged.log[0].message).toContain('line of sight');
+  });
+
+  it('allows long-range attacks with disadvantage but rejects beyond long range', () => {
+    const shot: ActionDefinition = {
+      ...baseCreature.actions[0],
+      id: 'longbow',
+      name: 'Longbow',
+      kind: 'rangedAttack',
+      type: 'rangedAttack',
+      tags: ['attack', 'ranged'],
+      range: 2,
+      normalRange: 10,
+      longRange: 30
+    };
+    const state = rollInitiative(
+      createCombatState([
+        creature({ id: 'a', name: 'Alpha', position: { x: 0, y: 0 }, actions: [shot] }),
+        creature({ id: 'b', name: 'Bravo', hp: 10, ac: 10, position: { x: 4, y: 0 } })
+      ]),
+      sequence([0.9, 0.1])
+    );
+
+    const longRange = performAttackAction(state, 'longbow', 'b', sequence([0.99, 0.05]));
+    expect(findCreatureForTest(longRange, 'b').hp).toBe(10);
+    expect(longRange.log.some((entry) => entry.message.includes('long range'))).toBe(true);
+
+    const tooFar = performAttackAction(
+      rollInitiative(
+        createCombatState([
+          creature({ id: 'a', name: 'Alpha', position: { x: 0, y: 0 }, actions: [shot] }),
+          creature({ id: 'b', name: 'Bravo', hp: 10, ac: 10, position: { x: 7, y: 0 } })
+        ]),
+        sequence([0.9, 0.1])
+      ),
+      'longbow',
+      'b',
+      sequence([0.99])
+    );
+    expect(tooFar.log[0].message).toContain('out of range');
   });
 
   it('grapple contested roll applies Grappled on success', () => {
@@ -756,6 +948,32 @@ describe('combat engine', () => {
       from: { x: 1, y: 0, z: 0 },
       to: { x: 2, y: 0, z: 0 }
     });
+  });
+
+  it('previews opportunity attack candidates for a selected movement path', () => {
+    const state = rollInitiative(
+      createCombatState([
+        creature({ id: 'a', name: 'Alpha', position: { x: 0, y: 0 } }),
+        creature({ id: 'b', name: 'Bravo', team: 'enemies', position: { x: 0, y: 1 } })
+      ]),
+      sequence([0.9, 0.1])
+    );
+    const option = getMovementOption(state, 'a', { x: 2, y: 0 });
+    if (!option) {
+      throw new Error('Expected routed movement option');
+    }
+
+    const candidates = getOpportunityAttackCandidatesForMovementPath(state, state.creatures[0], option.path);
+
+    expect(candidates).toHaveLength(1);
+    expect(candidates[0]).toMatchObject({
+      creature: { id: 'b' },
+      from: { x: 1, y: 0, z: 0 },
+      to: { x: 2, y: 0, z: 0 }
+    });
+
+    const disengaged = applyCondition(state, 'a', 'disengaged');
+    expect(getOpportunityAttackCandidatesForMovementPath(disengaged, disengaged.creatures[0], option.path)).toHaveLength(0);
   });
 
   it('does not trigger opportunity attacks while moving through spaces that remain within reach', () => {
@@ -974,6 +1192,21 @@ describe('combat engine', () => {
     );
     const blockedResult = performAttackAction(blocked, 'strike', 'b', sequence([0, 0.8, 0.49]));
     expect(blockedResult.creatures.find((candidate) => candidate.id === 'b')?.hp).toBe(10);
+  });
+
+  it('flanking ignores allies that cannot threaten the target', () => {
+    const base = rollInitiative(
+      createCombatState([
+        creature({ id: 'a', name: 'Alpha', team: 'players', position: { x: 0, y: 1 } }),
+        creature({ id: 'c', name: 'Charlie', team: 'players', position: { x: 2, y: 1 }, conditions: [createAppliedCondition('incapacitated')] }),
+        creature({ id: 'b', name: 'Bravo', team: 'enemies', hp: 10, ac: 18, position: { x: 1, y: 1 } })
+      ]),
+      sequence([0.9, 0.1, 0.2])
+    );
+
+    const result = performAttackAction(setFlankingEnabled(base, true), 'strike', 'b', sequence([0, 0.8, 0.49]));
+    expect(result.creatures.find((candidate) => candidate.id === 'b')?.hp).toBe(10);
+    expect(result.log.some((entry) => entry.message.includes('flanking'))).toBe(false);
   });
 
   it('ranged attacks have disadvantage when threatened but not by unconscious enemies', () => {
@@ -1705,6 +1938,65 @@ describe('combat engine', () => {
     expect(hasCondition(findCreatureForTest(result, 'b'), 'prone')).toBe(true);
   });
 
+  it('preserves embedded custom condition mechanics when rule effects apply conditions', () => {
+    const bindingStrike: ActionDefinition = {
+      ...baseCreature.actions[0],
+      id: 'binding-strike',
+      name: 'Binding Strike',
+      rules: [
+        {
+          id: 'bind-on-hit',
+          trigger: 'afterDamage',
+          selectors: [{ type: 'actionTarget' }],
+          effects: [
+            {
+              type: 'applyCondition',
+              conditionId: 'ash-bound',
+              name: 'Ash Bound',
+              description: 'Ash makes attacks unreliable.',
+              tags: ['ash'],
+              durationType: 'rounds',
+              remainingRounds: 2,
+              rules: [
+                {
+                  id: 'ash-attack',
+                  trigger: 'beforeAttackRoll',
+                  selectors: [{ type: 'self' }],
+                  effects: [{ type: 'grantDisadvantage', note: 'Ash Bound' }]
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    };
+    const state = rollInitiative(
+      createCombatState([
+        creature({ id: 'a', name: 'Alpha', actions: [bindingStrike], position: { x: 0, y: 0 } }),
+        creature({ id: 'b', name: 'Bravo', team: 'enemies', hp: 20, maxHp: 20, position: { x: 1, y: 0 } })
+      ]),
+      sequence([0.9, 0.1])
+    );
+
+    const bound = performAttackAction(state, 'binding-strike', 'b', sequence([0.5, 0]));
+    const condition = findCreatureForTest(bound, 'b').conditions.find((candidate) => candidate.id === 'ash-bound');
+
+    expect(condition?.name).toBe('Ash Bound');
+    expect(condition?.rules).toHaveLength(1);
+
+    const bravoTurn = {
+      ...bound,
+      activeCreatureId: 'b',
+      turnState: { creatureId: 'b', remainingMovement: 30, actionUsed: false, bonusActionUsed: false, reactionUsed: false },
+      turnResources: {
+        ...bound.turnResources,
+        b: { creatureId: 'b', remainingMovement: 30, movementRemaining: 30, actionUsed: false, bonusActionUsed: false, reactionUsed: false }
+      }
+    };
+    const disadvantaged = performAttackAction(bravoTurn, 'strike', 'a', sequence([0.99, 0.05]));
+    expect(disadvantaged.log.some((entry) => entry.message.includes('Ash Bound'))).toBe(true);
+  });
+
   it('lets resource-spending rule effects prevent repeated use', () => {
     const focusStrike: ActionDefinition = {
       ...baseCreature.actions[0],
@@ -1980,6 +2272,50 @@ describe('combat engine', () => {
   it('bad JSON returns a friendly validation error', () => {
     expect(parseCombatStateJson('{ nope').error).toContain('Invalid JSON');
     expect(parseCombatStateJson(JSON.stringify({ creatures: [] })).error).toContain('missing grid object');
+  });
+
+  it('normalizes imported resources and turn resource rows from older saves', () => {
+    const state = rollInitiative(
+      createCombatState([
+        creature({
+          id: 'a',
+          name: 'Alpha',
+          resources: [{ id: 'focus', name: 'Focus', current: 5, max: 2, resetOn: 'invalid' as never }]
+        }),
+        creature({ id: 'b', name: 'Bravo' })
+      ]),
+      sequence([0.9, 0.1])
+    );
+    const imported = {
+      ...state,
+      turnResources: {
+        a: { creatureId: 'a', remainingMovement: 12, actionUsed: true }
+      }
+    };
+
+    const parsed = parseCombatStateJson(JSON.stringify(imported));
+
+    expect(parsed.ok).toBe(true);
+    expect(parsed.state?.creatures[0].resources?.[0]).toMatchObject({
+      current: 2,
+      max: 2,
+      resetOn: 'longRest',
+      display: { showOnCreaturePanel: true, mode: 'pips' }
+    });
+    expect(parsed.state?.turnResources.a).toMatchObject({
+      creatureId: 'a',
+      remainingMovement: 12,
+      movementRemaining: 12,
+      actionUsed: true,
+      bonusActionUsed: false,
+      reactionUsed: false
+    });
+    expect(parsed.state?.turnResources.b).toMatchObject({
+      creatureId: 'b',
+      remainingMovement: 30,
+      movementRemaining: 30
+    });
+    expect(parsed.state?.turnState).toEqual(parsed.state?.turnResources.a);
   });
 
   it('exported JSON shape validates as CombatState', () => {

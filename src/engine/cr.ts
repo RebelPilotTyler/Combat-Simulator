@@ -181,9 +181,11 @@ function estimateActionDamage(
     return damage > 0 ? { damage, uses: getActionUsesInFirstThreeRounds(action, resources, notes) } : 0;
   }
 
-  const damage = action.damage ?? action.effects.find((effect) => effect.type === 'damage')?.damage;
+  const damageEffect = action.effects.find((effect) => effect.type === 'damage');
+  const damage = action.damage ?? damageEffect?.damage;
+  const save = action.save ?? damageEffect?.save;
   if (!damage?.dice) {
-    if (action.tags.includes('attack') || action.save) {
+    if (action.tags.includes('attack') || save) {
       notes.push(`${action.name} has attack/save data but no parseable damage dice.`);
     }
     return 0;
@@ -195,9 +197,9 @@ function estimateActionDamage(
     return 0;
   }
 
-  if (action.save?.dc) {
-    const failChance = getSaveFailureChance(action.save.dc, options.targetSaveBonus);
-    const successDamage = action.save.halfDamageOnSuccess ? averageDamage / 2 : 0;
+  if (save?.dc) {
+    const failChance = getSaveFailureChance(save.dc, options.targetSaveBonus);
+    const successDamage = save.halfDamageOnSuccess ? averageDamage / 2 : 0;
     return {
       damage: failChance * averageDamage + (1 - failChance) * successDamage,
       uses: getActionUsesInFirstThreeRounds(action, resources, notes)
@@ -231,7 +233,7 @@ function getActionUsesInFirstThreeRounds(action: ActionDefinition, resources: Ma
 
 function getOffenseAdjustment(creature: Creature, options: CrEstimateOptions, offensiveBase: CrRow, notes: string[]): number {
   const attackBonuses = creature.actions.map((action) => action.attackBonus).filter((bonus): bonus is number => typeof bonus === 'number');
-  const saveDcs = creature.actions.map((action) => action.save?.dc).filter((dc): dc is number => typeof dc === 'number');
+  const saveDcs = creature.actions.map(getActionSaveDc).filter((dc): dc is number => typeof dc === 'number');
   const attackBonus = attackBonuses.length > 0 ? Math.max(...attackBonuses) : undefined;
   const saveDc = saveDcs.length > 0 ? Math.max(...saveDcs) : undefined;
 
@@ -278,6 +280,10 @@ function getResistanceHpMultiplier(creature: Creature, notes: string[]): number 
     notes.push('No resistance, immunity, or vulnerability fields found.');
   }
   return multiplier;
+}
+
+function getActionSaveDc(action: ActionDefinition): number | undefined {
+  return action.save?.dc ?? action.effects.find((effect) => effect.type === 'damage' && effect.save)?.save?.dc;
 }
 
 function averageDice(expression: string): number | undefined {

@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { createCombatState, moveActiveCreature, rollInitiative } from './combat';
-import { getMovementOption, getReachableMovementSquares } from './movement';
+import { getMovementOption, getMovementOptionsForDestination, getReachableMovementSquares } from './movement';
 import type { Creature } from './types';
 
 const creature: Creature = {
@@ -56,6 +56,15 @@ describe('3D movement', () => {
     expect(moved.turnState.remainingMovement).toBe(10);
   });
 
+  it('returns alternate legal paths to the same destination', () => {
+    const state = createCombatState([creature], 4, 3);
+    const options = getMovementOptionsForDestination(state, 'climber', { x: 3, y: 1 });
+
+    expect(options.length).toBeGreaterThan(1);
+    expect(options[0].path.map((position) => `${position.x},${position.y}`)).toEqual(['0,0', '1,0', '2,0', '3,0', '3,1']);
+    expect(options.some((option) => option.path.map((position) => `${position.x},${position.y}`).join('|') === '0,0|0,1|1,1|2,1|3,1')).toBe(true);
+  });
+
   it('lets walkers step up 5 feet but not climb higher vertical terrain', () => {
     const state = createCombatState(
       [creature],
@@ -96,6 +105,46 @@ describe('3D movement', () => {
     );
 
     expect(reachableKeys(state)).toContain('1,0,4');
+  });
+
+  it('allows flyers to spend movement changing altitude in open air', () => {
+    const state = rollInitiative(createCombatState([{ ...creature, flySpeed: 30 }]), () => 0.9);
+    const option = getMovementOption(state, 'climber', { x: 0, y: 0, z: 2 });
+
+    expect(option?.costFeet).toBe(10);
+
+    const moved = moveActiveCreature(state, option!.path);
+
+    expect(moved.creatures[0].position).toEqual({ x: 0, y: 0, z: 2 });
+    expect(moved.turnState.remainingMovement).toBe(20);
+  });
+
+  it('lets flyers move horizontally while holding altitude above lower terrain', () => {
+    const state = createCombatState([{ ...creature, flySpeed: 30, position: { x: 0, y: 0, z: 2 } }], 2, 1);
+    const option = getMovementOption(state, 'climber', { x: 1, y: 0, z: 2 });
+
+    expect(option?.path.map((position) => `${position.x},${position.y},${position.z ?? 0}`)).toEqual([
+      '0,0,2',
+      '1,0,2'
+    ]);
+  });
+
+  it('blocks routes through hostile spaces but allows allied spaces as extra-cost transit', () => {
+    const hostileBlocker: Creature = { ...creature, id: 'enemy', name: 'Enemy', team: 'enemies', position: { x: 1, y: 0 } };
+    const allyBlocker: Creature = { ...creature, id: 'ally', name: 'Ally', team: 'players', position: { x: 1, y: 0 } };
+
+    const hostileState = createCombatState([creature, hostileBlocker], 3, 1);
+    expect(getMovementOption(hostileState, 'climber', { x: 2, y: 0 })).toBeUndefined();
+
+    const alliedState = createCombatState([creature, allyBlocker], 3, 1);
+    const option = getMovementOption(alliedState, 'climber', { x: 2, y: 0 });
+
+    expect(option?.costFeet).toBe(15);
+    expect(option?.path.map((position) => `${position.x},${position.y},${position.z ?? 0}`)).toEqual([
+      '0,0,0',
+      '1,0,0',
+      '2,0,0'
+    ]);
   });
 
   it('uses fly speed for the active turn movement budget when it is the fastest mode', () => {

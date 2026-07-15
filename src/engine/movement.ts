@@ -1,6 +1,6 @@
 import type { CombatState, Creature, GridPosition } from './types';
 import { canCreatureMove, getMovementCostMultiplier, normalizeConditions } from './conditions';
-import { getElevation, getTilePosition, isBlocked, isInBounds, position3DKey, samePosition } from './shapes';
+import { getElevation, getTileHeight, getTilePosition, isBlocked, isInBounds, position3DKey, samePosition } from './shapes';
 import { getEffectiveClimbSpeed, getEffectiveFlySpeed, getEffectiveMovementSpeed, getEffectiveSpeed } from './features';
 
 export const FEET_PER_SQUARE = 5;
@@ -38,7 +38,7 @@ export function getReachableMovementSquares(state: CombatState, creatureId: stri
   const costMultiplier = getMovementCostMultiplier(state, creature);
   const startingPosition = getTilePosition(creature.position, state.grid);
   const visited = getAvailableMovementModes(state, creature, maxFeet).reduce(
-    (combined, mode) => mergeVisitedCosts(combined, getReachableByMode(state, mode, startingPosition, costMultiplier)),
+    (combined, mode) => mergeVisitedCosts(combined, getReachableByMode(state, creature, mode, startingPosition, costMultiplier)),
     new Map<string, PathCost>()
   );
 
@@ -61,6 +61,47 @@ export function getMovementOption(state: CombatState, creatureId: string, destin
   return getReachableMovementSquares(state, creatureId).find((option) => samePosition(option.position, destinationPosition));
 }
 
+export function getMovementOptionsForDestination(
+  state: CombatState,
+  creatureId: string,
+  destination: GridPosition,
+  maxOptions = 8
+): MovementOption[] {
+  const creature = state.creatures.find((candidate) => candidate.id === creatureId);
+  if (!creature || maxOptions <= 0) {
+    return [];
+  }
+
+  creature.conditions = normalizeConditions(creature.conditions);
+  if (!canCreatureMove(state, creature)) {
+    return [];
+  }
+
+  const maxFeet = state.turnState.creatureId === creatureId ? state.turnState.remainingMovement : getEffectiveMovementSpeed(creature, state);
+  const costMultiplier = getMovementCostMultiplier(state, creature);
+  const startingPosition = getTilePosition(creature.position, state.grid);
+  const destinationPosition = getTilePosition(destination, state.grid);
+  if (samePosition(startingPosition, destinationPosition) || isOccupied(state, destinationPosition, creature.id)) {
+    return [];
+  }
+
+  const options = getAvailableMovementModes(state, creature, maxFeet).flatMap((mode) =>
+    getMovementOptionsForDestinationByMode(state, creature, mode, startingPosition, destinationPosition, costMultiplier, maxOptions)
+  );
+  const seen = new Set<string>();
+  return options
+    .filter((option) => {
+      const key = option.path.map(position3DKey).join('|');
+      if (seen.has(key)) {
+        return false;
+      }
+      seen.add(key);
+      return true;
+    })
+    .sort((a, b) => a.costFeet - b.costFeet || a.path.length - b.path.length)
+    .slice(0, maxOptions);
+}
+
 export function getMovementOptionForPath(state: CombatState, creatureId: string, path: GridPosition[]): MovementOption | undefined {
   const creature = state.creatures.find((candidate) => candidate.id === creatureId);
   if (!creature || path.length === 0) {
@@ -73,6 +114,58 @@ export function getMovementOptionForPath(state: CombatState, creatureId: string,
     : [startingPosition, ...path.map((position) => getTilePosition(position, state.grid))];
 
   return getReachableMovementSquares(state, creatureId).find((option) => samePath(option.path, normalizedPath));
+}
+
+function getMovementOptionsForDestinationByMode(
+  state: CombatState,
+  creature: Creature,
+  mode: MovementModeDefinition,
+  startingPosition: GridPosition,
+  destinationPosition: GridPosition,
+  costMultiplier: number,
+  maxOptions: number
+): MovementOption[] {
+  const maxSteps = Math.floor(mode.maxFeet / FEET_PER_SQUARE);
+  const queue: PathCost[] = [{ path: [startingPosition], steps: 0 }];
+  const options: MovementOption[] = [];
+  let explored = 0;
+
+  while (queue.length > 0 && explored < 5000) {
+    explored += 1;
+    const current = queue.shift()!;
+    const currentPosition = current.path[current.path.length - 1];
+    if (current.steps >= maxSteps) {
+      continue;
+    }
+
+    for (const next of getNeighborPositions(state, currentPosition, mode.mode)) {
+      if (
+        current.path.some((position) => samePosition(position, next)) ||
+        !canEnterPosition(state, creature, next) ||
+        !canTraverseElevation(currentPosition, next, mode.mode)
+      ) {
+        continue;
+      }
+
+      const nextSteps = current.steps + getStepCost(state, creature, currentPosition, next, costMultiplier);
+      if (nextSteps > maxSteps) {
+        continue;
+      }
+
+      const path = [...current.path, next];
+      if (samePosition(next, destinationPosition)) {
+        options.push({ position: next, costFeet: nextSteps * FEET_PER_SQUARE, path });
+        if (options.length >= maxOptions) {
+          return options;
+        }
+        continue;
+      }
+
+      queue.push({ path, steps: nextSteps });
+    }
+  }
+
+  return options;
 }
 
 export function isOccupied(state: CombatState, position: GridPosition, ignoredCreatureId?: string): boolean {
@@ -114,6 +207,7 @@ function getAvailableMovementModes(state: CombatState, creature: Creature, maxFe
 
 function getReachableByMode(
   state: CombatState,
+  creature: Creature,
   mode: MovementModeDefinition,
   startingPosition: GridPosition,
   costMultiplier: number
@@ -130,13 +224,12 @@ function getReachableByMode(
       continue;
     }
 
-    for (const neighbor of neighbors(currentPosition)) {
-      const next = getTilePosition(neighbor, state.grid);
-      if (!isInBounds(next, state.grid) || isBlocked(next, state.grid) || !canTraverseElevation(currentPosition, next, mode.mode)) {
+    for (const next of getNeighborPositions(state, currentPosition, mode.mode)) {
+      if (!canEnterPosition(state, creature, next) || !canTraverseElevation(currentPosition, next, mode.mode)) {
         continue;
       }
 
-      const nextSteps = current.steps + getStepCost(currentPosition, next, costMultiplier);
+      const nextSteps = current.steps + getStepCost(state, creature, currentPosition, next, costMultiplier);
       if (nextSteps > maxSteps) {
         continue;
       }
@@ -154,6 +247,49 @@ function getReachableByMode(
   }
 
   return visited;
+}
+
+function getNeighborPositions(state: CombatState, position: GridPosition, mode: MovementMode): GridPosition[] {
+  if (mode !== 'fly') {
+    return neighbors(position).map((neighbor) => getTilePosition(neighbor, state.grid));
+  }
+
+  const seen = new Set<string>();
+  const positions: GridPosition[] = [];
+  const add = (candidate: GridPosition) => {
+    const key = position3DKey(candidate);
+    if (seen.has(key)) {
+      return;
+    }
+    seen.add(key);
+    positions.push(candidate);
+  };
+
+  neighbors(position).forEach((neighbor) => {
+    const terrainPosition = getTilePosition(neighbor, state.grid);
+    add(terrainPosition);
+
+    const sameAltitudePosition = { ...terrainPosition, z: getElevation(position) };
+    if (getElevation(sameAltitudePosition) >= getTileHeight(sameAltitudePosition, state.grid)) {
+      add(sameAltitudePosition);
+    }
+  });
+
+  add({ ...position, z: getElevation(position) + 1 });
+  if (getElevation(position) > getTileHeight(position, state.grid)) {
+    add({ ...position, z: getElevation(position) - 1 });
+  }
+
+  return positions;
+}
+
+function canEnterPosition(state: CombatState, creature: Creature, position: GridPosition): boolean {
+  return (
+    isInBounds(position, state.grid) &&
+    !isBlocked(position, state.grid) &&
+    getElevation(position) >= getTileHeight(position, state.grid) &&
+    !isOccupiedByHostileCreature(state, creature, position)
+  );
 }
 
 function mergeVisitedCosts(current: Map<string, PathCost>, next: Map<string, PathCost>): Map<string, PathCost> {
@@ -174,10 +310,30 @@ function canTraverseElevation(from: GridPosition, to: GridPosition, mode: Moveme
   return getElevation(to) - getElevation(from) <= 1;
 }
 
-function getStepCost(from: GridPosition, to: GridPosition, costMultiplier: number): number {
-  return Math.max(1, Math.abs(getElevation(to) - getElevation(from))) * costMultiplier;
+function getStepCost(state: CombatState, creature: Creature, from: GridPosition, to: GridPosition, costMultiplier: number): number {
+  const baseCost = Math.max(1, Math.abs(getElevation(to) - getElevation(from))) * costMultiplier;
+  return isOccupiedByAlliedCreature(state, creature, to) ? baseCost + 1 : baseCost;
 }
 
 function samePath(a: GridPosition[], b: GridPosition[]): boolean {
   return a.length === b.length && a.every((position, index) => samePosition(position, b[index]));
+}
+
+function isOccupiedByHostileCreature(state: CombatState, mover: Creature, position: GridPosition): boolean {
+  const occupyingCreature = getOccupyingCreature(state, position, mover.id);
+  return occupyingCreature !== undefined && occupyingCreature.team !== mover.team;
+}
+
+function isOccupiedByAlliedCreature(state: CombatState, mover: Creature, position: GridPosition): boolean {
+  return getOccupyingCreature(state, position, mover.id)?.team === mover.team;
+}
+
+function getOccupyingCreature(state: CombatState, position: GridPosition, ignoredCreatureId?: string): Creature | undefined {
+  return state.creatures.find(
+    (creature) =>
+      creature.id !== ignoredCreatureId &&
+      creature.hp > 0 &&
+      !normalizeConditions(creature.conditions).some((condition) => condition.id === 'defeated') &&
+      samePosition(creature.position, position)
+  );
 }

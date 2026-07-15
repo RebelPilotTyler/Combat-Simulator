@@ -120,4 +120,35 @@ describe('estimateCreatureCR', () => {
     expect(estimate.offensiveCr).toBe('0');
     expect(estimate.notes.some((note) => note.includes('no parseable damage dice') || note.includes('No reliable automated action damage'))).toBe(true);
   });
+
+  it('uses save data from damage effects when estimating DPR', () => {
+    const estimate = estimateCreatureCR(
+      creature({
+        actions: [
+          {
+            id: 'burning-burst',
+            name: 'Burning Burst',
+            kind: 'savingThrowEffect',
+            type: 'savingThrowEffect',
+            actionCost: 'action',
+            tags: ['area'],
+            range: 6,
+            effects: [
+              {
+                id: 'burn',
+                name: 'Burn',
+                type: 'damage',
+                damage: { dice: '4d6' },
+                save: { ability: 'dex', dc: 15, halfDamageOnSuccess: true }
+              }
+            ]
+          }
+        ]
+      }),
+      { targetAc: 15, targetSaveBonus: 3 }
+    );
+
+    expect(estimate.estimatedDpr).toBe(10.9);
+    expect(estimate.notes.some((note) => note.includes('save DC 15'))).toBe(true);
+  });
 });
