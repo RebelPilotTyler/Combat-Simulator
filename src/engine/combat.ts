@@ -6,6 +6,7 @@ import type {
   CombatLogEntry,
   CombatState,
   Creature,
+  EffectDefinition,
   GridPosition,
   AppliedCondition,
   ConditionDurationType,
@@ -76,6 +77,7 @@ import {
   runConditionAppliedRules,
   runTurnRules
 } from './rules';
+import { enqueueVisualEvent, pruneVisualEvents } from './visualEvents';
 
 export const BASIC_ACTIONS = [
   'Attack',
@@ -286,6 +288,14 @@ export function moveActiveCreature(state: CombatState, movement: GridPosition | 
     'movement',
     `${creature.name} moves from ${formatPosition(from)} to ${formatPosition(destinationPosition)} for ${movementOption.costFeet} feet. ${next.turnState.remainingMovement} feet remain.`
   );
+  enqueueVisualEvent(next, {
+    kind: 'movementComplete',
+    creatureId: creature.id,
+    from,
+    to: destinationPosition,
+    path: movementOption.path,
+    label: `${movementOption.costFeet} ft`
+  });
   opportunityCandidates.forEach((candidate) => {
     const action = findOpportunityAttackAction(candidate.creature);
     if (!action) {
@@ -304,6 +314,14 @@ export function moveActiveCreature(state: CombatState, movement: GridPosition | 
     };
     next.pendingReactions.push(pending);
     addLog(next, 'action', `Opportunity attack triggered: ${pending.description}`);
+    enqueueVisualEvent(next, {
+      kind: 'opportunityAttackTriggered',
+      creatureId: creature.id,
+      sourceCreatureId: candidate.creature.id,
+      from: candidate.from,
+      to: candidate.to,
+      label: 'OA'
+    });
   });
 
   return next;
@@ -665,19 +683,36 @@ export function applyHpChange(
   const delta = Math.max(0, amount);
 
   if (mode === 'heal') {
+    const beforeHp = target.hp;
     target.hp = Math.min(target.maxHp, target.hp + delta);
     if (target.hp > 0) {
-      removeConditionFromCreature(target, 'defeated');
+      if (removeConditionFromCreature(target, 'defeated')) {
+        emitConditionRemoved(next, target, createAppliedCondition('defeated'));
+      }
     }
     addLog(next, 'damage', `${target.name} heals ${delta} HP.`);
+    enqueueVisualEvent(next, {
+      kind: 'healingReceived',
+      creatureId: target.id,
+      amount: target.hp - beforeHp,
+      label: `+${target.hp - beforeHp}`
+    });
     return next;
   }
 
+  const beforeHp = target.hp;
   target.hp = Math.max(0, target.hp - delta);
   addLog(next, 'damage', `${target.name} takes ${delta} manual damage.`);
+  enqueueVisualEvent(next, {
+    kind: 'damageDealt',
+    creatureId: target.id,
+    amount: beforeHp - target.hp,
+    label: `-${beforeHp - target.hp}`
+  });
   if (target.hp === 0 && !hasCondition(target, 'defeated')) {
     applyConditionToCreature(target, createAppliedCondition('defeated'));
     addLog(next, 'defeat', `${target.name} is defeated.`);
+    enqueueVisualEvent(next, { kind: 'creatureDefeated', creatureId: target.id, label: 'Defeated' });
   }
 
   return next;
@@ -912,9 +947,25 @@ function resolveAttackAction(
     'attack',
     `${attacker.name} ${action.tags.includes('spell') || action.kind === 'spell' ? 'casts' : 'uses'} ${action.name} on ${target.name}: ${formatD20Roll(firstD20.total, secondD20?.total, rollMode)}${formatRollReasons(attackModifier.notes)} + ${attackBonus}${flatModifier ? ` ${formatSigned(flatModifier)}` : ''} = ${attackTotal} vs AC ${targetAc}. ${critical ? 'Critical hit.' : hit ? 'Hit.' : naturalMiss ? 'Natural 1 miss.' : 'Miss.'}`
   );
+  if (critical) {
+    enqueueVisualEvent(next, { kind: 'criticalHit', creatureId: target.id, sourceCreatureId: attacker.id, label: 'Crit' });
+  } else if (hit) {
+    enqueueVisualEvent(next, { kind: 'attackHit', creatureId: target.id, sourceCreatureId: attacker.id, label: 'Hit' });
+  } else {
+    enqueueVisualEvent(next, { kind: 'attackMiss', creatureId: target.id, sourceCreatureId: attacker.id, label: 'Miss' });
+  }
   consumeHelpAfterAttack(next, attacker, target);
 
   if (hit && action.damage) {
+    enqueueVisualEvent(next, {
+      kind: 'attackImpact',
+      creatureId: target.id,
+      sourceCreatureId: attacker.id,
+      from: attacker.position,
+      to: targetPosition,
+      color: getVisualColorForAction(action),
+      label: critical ? 'Crit' : 'Hit'
+    });
     if (options.consumeHitResources ?? true) {
       spendActionResources(next, attacker, action, 'hit');
     }
@@ -984,6 +1035,17 @@ export function performSavingThrowAction(
     addLog(next, 'action', `${source.name} casts ${action.name}.`);
   }
 
+  enqueueVisualEvent(next, {
+    kind: 'shapeEffect',
+    creatureId: source.id,
+    sourceCreatureId: source.id,
+    origin,
+    direction: options.direction,
+    shape: action.shape ?? { type: 'single' },
+    targetIds: validTargets.map((target) => target.id),
+    color: getVisualColorForAction(action, effect),
+    label: action.name
+  });
   resolveSavingThrowDamageAction(next, source.id, action, validTargets.map((target) => target.id), random, hooks);
 
   return next;
@@ -1254,6 +1316,7 @@ export function removeCondition(state: CombatState, targetId: string, conditionI
   const existing = target.conditions.find((condition) => condition.id === conditionId);
   if (removeConditionFromCreature(target, conditionId)) {
     addLog(next, 'condition', `${existing?.name ?? getConditionDefinition(conditionId).name} removed from ${target.name}.`);
+    emitConditionRemoved(next, target, existing ?? createAppliedCondition(conditionId));
   }
 
   return next;
@@ -1295,6 +1358,15 @@ function applyDamage(
   hooks.beforeDamage?.(state, { source, target, action, amount: modifiedAmount });
 
   target.hp = Math.max(0, target.hp - modifiedAmount);
+  if (modifiedAmount > 0) {
+    enqueueVisualEvent(state, {
+      kind: 'damageDealt',
+      creatureId: target.id,
+      sourceCreatureId: source.id,
+      amount: modifiedAmount,
+      label: `-${modifiedAmount}`
+    });
+  }
 
   runAfterDamageHooks(state, source, target, action, modifiedAmount);
   runAfterDamageRules(state, { source, target, action, amount: modifiedAmount });
@@ -1304,6 +1376,7 @@ function applyDamage(
     applyConditionToCreature(target, createAppliedCondition('defeated'));
     hooks.onCreatureDefeated?.(state, target);
     addLog(state, 'defeat', `${target.name} is defeated.`);
+    enqueueVisualEvent(state, { kind: 'creatureDefeated', creatureId: target.id, sourceCreatureId: source.id, label: 'Defeated' });
   }
   return modifiedAmount;
 }
@@ -1323,6 +1396,7 @@ function resolveConcentrationAfterDamage(
   if (target.hp === 0) {
     if (removeConditionFromCreature(target, 'concentrating')) {
       addLog(state, 'condition', `${target.name} loses concentration because they are defeated.`);
+      emitConditionRemoved(state, target, createAppliedCondition('concentrating'));
     }
     return;
   }
@@ -1350,9 +1424,16 @@ function resolveConcentrationAfterDamage(
     'save',
     `${target.name} rolls concentration save after taking ${amount} damage: ${formatD20Roll(firstSaveRoll.total, secondSaveRoll?.total, rollMode)}${formatRollReasons(saveRollModifier.notes)} + ${saveModifier}${flatModifier ? ` ${formatSigned(flatModifier)}` : ''} = ${saveTotal} vs DC ${dc}. ${success ? 'Success.' : 'Failure.'}`
   );
+  enqueueVisualEvent(state, {
+    kind: success ? 'savingThrowSuccess' : 'savingThrowFailure',
+    creatureId: target.id,
+    sourceCreatureId: source.id,
+    label: success ? 'Save' : 'Fail'
+  });
 
   if (!success && removeConditionFromCreature(target, 'concentrating')) {
     addLog(state, 'condition', `${target.name} loses concentration on ${action.name}.`);
+    emitConditionRemoved(state, target, createAppliedCondition('concentrating'));
   }
 }
 
@@ -1404,6 +1485,12 @@ function resolveSavingThrowDamageAction(
       'save',
       `${target.name} rolls ${save.ability.toUpperCase()} save against ${action.name}: ${formatD20Roll(firstSaveRoll.total, secondSaveRoll?.total, rollMode)}${formatRollReasons(saveRollModifier.notes)} + ${saveModifier}${flatModifier ? ` ${formatSigned(flatModifier)}` : ''} = ${saveTotal} vs DC ${saveDc}. ${success ? 'Success.' : 'Failure.'}`
     );
+    enqueueVisualEvent(state, {
+      kind: success ? 'savingThrowSuccess' : 'savingThrowFailure',
+      creatureId: target.id,
+      sourceCreatureId: source.id,
+      label: success ? 'Save' : 'Fail'
+    });
     runAfterSavingThrowRules(state, { source, target, action, ability: save.ability, total: saveTotal, success });
 
     const appliedDamage = applyDamage(state, source.id, target.id, action, amount, hooks, random);
@@ -1564,7 +1651,17 @@ function spendActionResources(
   }
 
   const consumptions = consumeActionResources(creature, action, consumeOn);
-  consumptions.forEach((consumption) => addLog(state, 'action', consumption.message));
+  consumptions.forEach((consumption) => {
+    addLog(state, 'action', consumption.message);
+    enqueueVisualEvent(state, {
+      kind: 'resourceSpent',
+      creatureId: creature.id,
+      amount: consumption.cost.amount,
+      resourceId: consumption.cost.resourceId,
+      resourceName: consumption.resource.name,
+      label: `-${consumption.cost.amount} ${consumption.resource.name}`
+    });
+  });
   return { ok: true, consumptions };
 }
 
@@ -1854,6 +1951,9 @@ function normalizeState(state: CombatState): CombatState {
   state.pendingReactions = state.pendingReactions ?? [];
   state.rulesSettings = normalizeRulesSettings(state.rulesSettings);
   state.ruleMemory = state.ruleMemory ?? {};
+  if (state.visualEvents) {
+    state.visualEvents = pruneVisualEvents(state.visualEvents);
+  }
   if (!state.turnState) {
     state.turnState = createTurnState(state.activeCreatureId ? findCreature(state, state.activeCreatureId) : undefined, state);
   }
@@ -1883,6 +1983,51 @@ function normalizeRulesSettings(settings: CombatRulesSettings | undefined): Comb
   };
 }
 
+function getVisualColorForAction(action: ActionDefinition, effect?: EffectDefinition): string {
+  const explicitColor = action.visual?.color ?? effect?.visual?.color;
+  if (explicitColor) {
+    return explicitColor;
+  }
+
+  const damageType = action.damage?.type ?? effect?.damage?.type;
+  if (damageType) {
+    return getVisualColorForDamageType(damageType);
+  }
+
+  const tagColor = action.tags.map(getVisualColorForDamageType).find((color) => color !== DEFAULT_VISUAL_EFFECT_COLOR);
+  return tagColor ?? DEFAULT_VISUAL_EFFECT_COLOR;
+}
+
+const DEFAULT_VISUAL_EFFECT_COLOR = '#7ca7e4';
+
+function getVisualColorForDamageType(type: string): string {
+  switch (type.toLowerCase()) {
+    case 'acid':
+    case 'poison':
+      return '#45b36b';
+    case 'cold':
+    case 'ice':
+      return '#73d2ff';
+    case 'fire':
+      return '#ff7a1a';
+    case 'force':
+      return '#9b7cff';
+    case 'lightning':
+    case 'thunder':
+      return '#f6d84a';
+    case 'necrotic':
+      return '#7f4aa3';
+    case 'psychic':
+      return '#d65ad1';
+    case 'radiant':
+      return '#ffe58a';
+    case 'healing':
+      return '#37b26c';
+    default:
+      return DEFAULT_VISUAL_EFFECT_COLOR;
+  }
+}
+
 function normalizeActionDefinition(action: ActionDefinition): ActionDefinition {
   const kind = action.kind ?? action.type ?? 'custom';
   const type = kind === 'multiattack' || kind === 'basicAction' ? undefined : action.type ?? (isRulesActionKind(kind) ? kind : undefined);
@@ -1909,6 +2054,14 @@ function logConditionChange(
   const label = getConditionLabel(condition);
   const verb = result === 'applied' ? 'applied to' : result === 'refreshed' ? 'refreshed on' : 'stacked on';
   addLog(state, 'condition', `${label} ${verb} ${creature.name}.`);
+  enqueueVisualEvent(state, {
+    kind: 'conditionApplied',
+    creatureId: creature.id,
+    sourceCreatureId: condition.sourceCreatureId,
+    conditionId: condition.id,
+    conditionName: label,
+    label
+  });
   runConditionAppliedRules(
     state,
     creature,
@@ -1932,6 +2085,18 @@ function stampConditionApplicationTiming(state: CombatState, condition: AppliedC
 function logExpiredConditions(state: CombatState, conditions: AppliedCondition[]): void {
   conditions.forEach((condition) => {
     addLog(state, 'condition', `${getConditionLabel(condition)} expired.`);
+  });
+}
+
+function emitConditionRemoved(state: CombatState, creature: Creature, condition: AppliedCondition): void {
+  const label = getConditionLabel(condition);
+  enqueueVisualEvent(state, {
+    kind: 'conditionRemoved',
+    creatureId: creature.id,
+    sourceCreatureId: condition.sourceCreatureId,
+    conditionId: condition.id,
+    conditionName: label,
+    label
   });
 }
 

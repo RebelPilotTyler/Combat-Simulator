@@ -14,7 +14,8 @@ export interface CombatStateParseResult {
 }
 
 export function serializeCombatState(state: CombatState): string {
-  return JSON.stringify(state, null, 2);
+  const { visualEvents: _visualEvents, ...serializableState } = state;
+  return JSON.stringify(serializableState, null, 2);
 }
 
 export function parseCombatStateJson(text: string): CombatStateParseResult {

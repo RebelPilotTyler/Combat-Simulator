@@ -297,6 +297,10 @@ export interface ShapeDefinition {
   direction?: CardinalDirection;
 }
 
+export interface VisualEffectStyle {
+  color?: string;
+}
+
 export interface EffectDefinition {
   id: string;
   name: string;
@@ -304,6 +308,7 @@ export interface EffectDefinition {
   damage?: DamageDefinition;
   save?: SaveDefinition;
   condition?: ConditionId;
+  visual?: VisualEffectStyle;
 }
 
 export interface Resource {
@@ -391,6 +396,7 @@ export interface ActionDefinition {
   save?: SaveDefinition;
   shape?: ShapeDefinition;
   effects: EffectDefinition[];
+  visual?: VisualEffectStyle;
   description?: string;
   resourceCosts?: ResourceCost[];
   rules?: RuleDefinition[];
@@ -455,6 +461,46 @@ export interface CombatLogEntry {
   timestamp: string;
 }
 
+export type VisualEventKind =
+  | 'attackHit'
+  | 'attackMiss'
+  | 'criticalHit'
+  | 'damageDealt'
+  | 'healingReceived'
+  | 'conditionApplied'
+  | 'conditionRemoved'
+  | 'savingThrowSuccess'
+  | 'savingThrowFailure'
+  | 'opportunityAttackTriggered'
+  | 'creatureDefeated'
+  | 'movementComplete'
+  | 'resourceSpent'
+  | 'attackImpact'
+  | 'shapeEffect';
+
+export interface VisualEvent {
+  id: string;
+  kind: VisualEventKind;
+  creatureId: string;
+  sourceCreatureId?: string;
+  amount?: number;
+  label?: string;
+  conditionId?: string;
+  conditionName?: string;
+  resourceId?: string;
+  resourceName?: string;
+  color?: string;
+  origin?: GridPosition;
+  direction?: CardinalDirection;
+  shape?: ShapeDefinition;
+  targetIds?: string[];
+  from?: GridPosition;
+  to?: GridPosition;
+  path?: GridPosition[];
+  createdAt: number;
+  durationMs: number;
+}
+
 export interface TurnState {
   creatureId?: string;
   remainingMovement: number;
@@ -497,6 +543,7 @@ export interface CombatState {
   pendingReactions: PendingReaction[];
   rulesSettings?: CombatRulesSettings;
   ruleMemory?: Record<string, { turnKey?: string; round?: number }>;
+  visualEvents?: VisualEvent[];
   log: CombatLogEntry[];
 }
 

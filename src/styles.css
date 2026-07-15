@@ -774,6 +774,215 @@ summary:focus-visible {
   opacity: 0.45;
 }
 
+.creature-3d-visual-ring {
+  fill: none;
+  opacity: 0.9;
+  pointer-events: none;
+  stroke: #315c9a;
+  stroke-width: 3px;
+  animation: visual-3d-ring-pulse 900ms ease-out forwards;
+}
+
+.creature-3d-visual-ring.conditionApplied {
+  stroke: #b1771b;
+}
+
+.creature-3d-visual-ring.conditionRemoved,
+.creature-3d-visual-ring.healingReceived,
+.creature-3d-visual-ring.savingThrowSuccess {
+  stroke: #228b74;
+}
+
+.creature-3d-visual-ring.criticalHit,
+.creature-3d-visual-ring.damageDealt,
+.creature-3d-visual-ring.creatureDefeated,
+.creature-3d-visual-ring.savingThrowFailure {
+  stroke: #b3261e;
+}
+
+.creature-3d-visual-label {
+  fill: #fff;
+  font-size: 13px;
+  font-weight: 900;
+  paint-order: stroke;
+  pointer-events: none;
+  stroke: rgba(13, 18, 28, 0.9);
+  stroke-width: 4px;
+  text-anchor: middle;
+  animation: visual-3d-float-up 900ms ease-out forwards;
+}
+
+.creature-3d-visual-label.text-small {
+  font-size: 11px;
+}
+
+.creature-3d-visual-label.text-large {
+  font-size: 16px;
+}
+
+.battlefield-3d-shape-effect,
+.battlefield-3d-attack-impact {
+  --impact-duration: 700ms;
+  --impact-core-duration: 520ms;
+  --impact-halo-opacity: 0.42;
+  --impact-halo-mid-opacity: 0.22;
+  --impact-opacity: 0.95;
+  --impact-spoke-width: 3px;
+  --impact-spark-width: 2px;
+  --impact-trace-width: 4px;
+  --impact-trace-ghost-width: 3px;
+  --shape-duration: 1100ms;
+  --shape-fill-peak: 0.24;
+  --shape-origin-mid-opacity: 0.38;
+  --shape-stroke-peak: 0.9;
+  pointer-events: none;
+}
+
+.battlefield-3d-shape-effect.intensity-low,
+.battlefield-3d-attack-impact.intensity-low {
+  --impact-duration: 560ms;
+  --impact-core-duration: 420ms;
+  --impact-halo-opacity: 0.28;
+  --impact-halo-mid-opacity: 0.12;
+  --impact-opacity: 0.75;
+  --impact-spoke-width: 2px;
+  --impact-spark-width: 1.5px;
+  --impact-trace-width: 3px;
+  --impact-trace-ghost-width: 2px;
+  --shape-duration: 850ms;
+  --shape-fill-peak: 0.16;
+  --shape-origin-mid-opacity: 0.24;
+  --shape-stroke-peak: 0.62;
+}
+
+.battlefield-3d-shape-effect.intensity-high,
+.battlefield-3d-attack-impact.intensity-high {
+  --impact-duration: 840ms;
+  --impact-core-duration: 620ms;
+  --impact-halo-opacity: 0.56;
+  --impact-halo-mid-opacity: 0.3;
+  --impact-opacity: 1;
+  --impact-spoke-width: 4px;
+  --impact-spark-width: 3px;
+  --impact-trace-width: 5px;
+  --impact-trace-ghost-width: 3.5px;
+  --shape-duration: 1250ms;
+  --shape-fill-peak: 0.32;
+  --shape-origin-mid-opacity: 0.5;
+  --shape-stroke-peak: 1;
+}
+
+.battlefield-3d-shape-effect.intensity-epic,
+.battlefield-3d-attack-impact.intensity-epic {
+  --impact-duration: 1040ms;
+  --impact-core-duration: 780ms;
+  --impact-halo-opacity: 0.7;
+  --impact-halo-mid-opacity: 0.42;
+  --impact-opacity: 1;
+  --impact-spoke-width: 5px;
+  --impact-spark-width: 4px;
+  --impact-trace-width: 6px;
+  --impact-trace-ghost-width: 4px;
+  --shape-duration: 1450ms;
+  --shape-fill-peak: 0.42;
+  --shape-origin-mid-opacity: 0.64;
+  --shape-stroke-peak: 1;
+}
+
+.battlefield-3d-shape-cell {
+  fill-opacity: 0.18;
+  stroke-opacity: 0.68;
+  stroke-width: 2px;
+  transform-box: fill-box;
+  transform-origin: center;
+  animation: battlefield-3d-shape-cell-pulse var(--shape-duration) ease-out forwards;
+}
+
+.battlefield-3d-shape-effect.line .battlefield-3d-shape-cell,
+.battlefield-3d-shape-effect.cone .battlefield-3d-shape-cell {
+  fill-opacity: 0.22;
+}
+
+.battlefield-3d-shape-mote {
+  opacity: 0;
+  paint-order: stroke;
+  stroke: rgba(255, 255, 255, 0.78);
+  stroke-width: 1px;
+  transform-box: fill-box;
+  transform-origin: center;
+  animation: battlefield-3d-shape-mote-rise 850ms ease-out forwards;
+}
+
+.battlefield-3d-shape-origin-pulse {
+  fill: none;
+  opacity: 0;
+  stroke-width: 5px;
+  transform-box: fill-box;
+  transform-origin: center;
+  animation: battlefield-3d-shape-origin-pulse var(--shape-duration) ease-out forwards;
+}
+
+.battlefield-3d-attack-trace {
+  fill: none;
+  opacity: 0;
+  stroke-dasharray: 10 8;
+  stroke-linecap: round;
+  stroke-width: var(--impact-trace-width);
+  animation: battlefield-3d-attack-trace 520ms ease-out forwards;
+}
+
+.battlefield-3d-attack-trace.trace-1,
+.battlefield-3d-attack-trace.trace-2 {
+  opacity: 0;
+  stroke-width: var(--impact-trace-ghost-width);
+}
+
+.battlefield-3d-impact-wave {
+  fill: none;
+  opacity: 0;
+  stroke-width: 4px;
+  transform-box: fill-box;
+  transform-origin: center;
+  animation: battlefield-3d-impact-wave var(--impact-duration) ease-out forwards;
+}
+
+.battlefield-3d-impact-halo {
+  fill: none;
+  opacity: 0;
+  stroke-width: 8px;
+  transform-box: fill-box;
+  transform-origin: center;
+  animation: battlefield-3d-impact-halo var(--impact-duration) ease-out forwards;
+}
+
+.battlefield-3d-impact-core {
+  opacity: 0;
+  paint-order: stroke;
+  stroke: rgba(255, 255, 255, 0.82);
+  stroke-width: 2px;
+  transform-box: fill-box;
+  transform-origin: center;
+  animation: battlefield-3d-impact-core var(--impact-core-duration) ease-out forwards;
+}
+
+.battlefield-3d-impact-spoke {
+  opacity: 0;
+  stroke-linecap: round;
+  stroke-width: var(--impact-spoke-width);
+  transform-box: fill-box;
+  transform-origin: center;
+  animation: battlefield-3d-impact-spoke 620ms ease-out forwards;
+}
+
+.battlefield-3d-impact-spark {
+  opacity: 0;
+  stroke-linecap: round;
+  stroke-width: var(--impact-spark-width);
+  transform-box: fill-box;
+  transform-origin: center;
+  animation: battlefield-3d-impact-spark var(--impact-duration) ease-out forwards;
+}
+
 .battlefield-3d-legend {
   align-items: center;
   background: rgba(255, 255, 255, 0.76);
@@ -861,6 +1070,7 @@ summary:focus-visible {
   display: grid;
   gap: 1px;
   justify-items: center;
+  position: relative;
   width: 100%;
 }
 
@@ -895,6 +1105,360 @@ summary:focus-visible {
   background: #222;
   opacity: 0.45;
   text-decoration: line-through;
+}
+
+.token.visual-hit {
+  animation: token-hit-pulse 420ms ease-out;
+}
+
+.token.visual-critical {
+  animation: token-critical-shake 560ms ease-out;
+}
+
+.token.visual-defeated {
+  animation: token-defeated-pulse 900ms ease-out;
+}
+
+.visual-event-layer {
+  inset: 0;
+  pointer-events: none;
+  position: absolute;
+  z-index: 4;
+}
+
+.visual-float {
+  background: rgba(16, 24, 39, 0.74);
+  border-radius: 999px;
+  color: #fff;
+  font-size: 11px;
+  font-weight: 800;
+  left: 50%;
+  line-height: 1;
+  max-width: 64px;
+  overflow: hidden;
+  padding: 3px 5px;
+  position: absolute;
+  text-overflow: ellipsis;
+  top: -9px;
+  transform: translateX(-50%);
+  white-space: nowrap;
+  animation: visual-float-up 900ms ease-out forwards;
+}
+
+.visual-event-layer.reduced .visual-float {
+  animation-duration: 650ms;
+}
+
+.visual-event-layer.text-small .visual-float {
+  font-size: 9px;
+  max-width: 52px;
+  padding: 2px 4px;
+}
+
+.visual-event-layer.text-large .visual-float {
+  font-size: 13px;
+  max-width: 82px;
+  padding: 4px 6px;
+}
+
+.visual-float-1 {
+  left: 38%;
+  top: -17px;
+}
+
+.visual-float-2 {
+  left: 62%;
+  top: -23px;
+}
+
+.visual-float.damageDealt,
+.visual-float.criticalHit,
+.visual-float.savingThrowFailure,
+.visual-float.creatureDefeated {
+  background: rgba(154, 35, 35, 0.88);
+}
+
+.visual-float.healingReceived,
+.visual-float.savingThrowSuccess {
+  background: rgba(36, 128, 67, 0.88);
+}
+
+.visual-float.attackMiss {
+  background: rgba(73, 82, 96, 0.78);
+}
+
+.visual-float.resourceSpent {
+  background: rgba(79, 70, 139, 0.86);
+}
+
+.visual-ring {
+  border: 3px solid rgba(49, 92, 154, 0.72);
+  border-radius: 50%;
+  height: min(38px, calc(100% - 2px));
+  left: 50%;
+  position: absolute;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  width: min(38px, calc(100% - 2px));
+  animation: visual-ring-pulse 800ms ease-out forwards;
+}
+
+.visual-ring.conditionApplied {
+  border-color: rgba(177, 119, 27, 0.86);
+}
+
+.visual-ring.conditionRemoved {
+  border-color: rgba(34, 139, 116, 0.82);
+}
+
+.visual-ring.opportunityAttackTriggered {
+  border-color: rgba(180, 83, 9, 0.88);
+}
+
+.visual-ring.movementComplete {
+  border-color: rgba(37, 99, 235, 0.68);
+}
+
+@keyframes token-hit-pulse {
+  0% {
+    transform: scale(1);
+  }
+  38% {
+    transform: scale(1.13);
+  }
+  100% {
+    transform: scale(1);
+  }
+}
+
+@keyframes token-critical-shake {
+  0%,
+  100% {
+    transform: translateX(0) scale(1);
+  }
+  20% {
+    transform: translateX(-3px) scale(1.08);
+  }
+  40% {
+    transform: translateX(3px) scale(1.08);
+  }
+  60% {
+    transform: translateX(-2px) scale(1.05);
+  }
+  80% {
+    transform: translateX(2px) scale(1.02);
+  }
+}
+
+@keyframes token-defeated-pulse {
+  0% {
+    opacity: 1;
+    transform: scale(1);
+  }
+  45% {
+    opacity: 0.35;
+    transform: scale(1.12);
+  }
+  100% {
+    opacity: 0.45;
+    transform: scale(1);
+  }
+}
+
+@keyframes visual-float-up {
+  0% {
+    opacity: 0;
+    transform: translate(-50%, 8px) scale(0.92);
+  }
+  18% {
+    opacity: 1;
+  }
+  100% {
+    opacity: 0;
+    transform: translate(-50%, -24px) scale(1);
+  }
+}
+
+@keyframes visual-ring-pulse {
+  0% {
+    opacity: 0.92;
+    transform: translate(-50%, -50%) scale(0.72);
+  }
+  100% {
+    opacity: 0;
+    transform: translate(-50%, -50%) scale(1.3);
+  }
+}
+
+@keyframes visual-3d-ring-pulse {
+  0% {
+    opacity: 0.9;
+    stroke-width: 4px;
+  }
+  100% {
+    opacity: 0;
+    stroke-width: 1px;
+  }
+}
+
+@keyframes visual-3d-float-up {
+  0% {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  18% {
+    opacity: 1;
+  }
+  100% {
+    opacity: 0;
+    transform: translateY(-18px);
+  }
+}
+
+@keyframes battlefield-3d-shape-cell-pulse {
+  0% {
+    fill-opacity: 0;
+    stroke-opacity: var(--shape-stroke-peak);
+    stroke-width: 4px;
+  }
+  35% {
+    fill-opacity: var(--shape-fill-peak);
+  }
+  100% {
+    fill-opacity: 0;
+    stroke-opacity: 0;
+    stroke-width: 1px;
+  }
+}
+
+@keyframes battlefield-3d-shape-origin-pulse {
+  0% {
+    opacity: var(--shape-stroke-peak);
+    transform: scale(0.28);
+  }
+  55% {
+    opacity: var(--shape-origin-mid-opacity);
+  }
+  100% {
+    opacity: 0;
+    transform: scale(2.15);
+  }
+}
+
+@keyframes battlefield-3d-shape-mote-rise {
+  0% {
+    opacity: 0;
+    transform: translateY(7px) scale(0.7);
+  }
+  22% {
+    opacity: 0.95;
+  }
+  100% {
+    opacity: 0;
+    transform: translateY(-16px) scale(1.18);
+  }
+}
+
+@keyframes battlefield-3d-attack-trace {
+  0% {
+    opacity: 0;
+    stroke-dashoffset: 28;
+  }
+  25% {
+    opacity: var(--impact-opacity);
+  }
+  100% {
+    opacity: 0;
+    stroke-dashoffset: 0;
+  }
+}
+
+@keyframes battlefield-3d-impact-wave {
+  0% {
+    opacity: var(--impact-opacity);
+    transform: scale(0.35);
+  }
+  100% {
+    opacity: 0;
+    transform: scale(1.45);
+  }
+}
+
+@keyframes battlefield-3d-impact-halo {
+  0% {
+    opacity: var(--impact-halo-opacity);
+    transform: scale(0.2);
+  }
+  50% {
+    opacity: var(--impact-halo-mid-opacity);
+  }
+  100% {
+    opacity: 0;
+    transform: scale(2.2);
+  }
+}
+
+@keyframes battlefield-3d-impact-core {
+  0% {
+    opacity: 0;
+    transform: scale(0.8);
+  }
+  20% {
+    opacity: 1;
+  }
+  100% {
+    opacity: 0;
+    transform: scale(1.45);
+  }
+}
+
+@keyframes battlefield-3d-impact-spoke {
+  0% {
+    opacity: 0;
+    transform: scale(0.55);
+  }
+  25% {
+    opacity: var(--impact-opacity);
+  }
+  100% {
+    opacity: 0;
+    transform: scale(1.18);
+  }
+}
+
+@keyframes battlefield-3d-impact-spark {
+  0% {
+    opacity: 0;
+    transform: scale(0.35) rotate(0deg);
+  }
+  22% {
+    opacity: var(--impact-opacity);
+  }
+  100% {
+    opacity: 0;
+    transform: scale(1.36) rotate(12deg);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .token.visual-hit,
+  .token.visual-critical,
+  .token.visual-defeated,
+  .visual-float,
+  .visual-ring,
+  .creature-3d-visual-ring,
+  .creature-3d-visual-label,
+  .battlefield-3d-shape-cell,
+  .battlefield-3d-shape-mote,
+  .battlefield-3d-shape-origin-pulse,
+  .battlefield-3d-attack-trace,
+  .battlefield-3d-impact-wave,
+  .battlefield-3d-impact-halo,
+  .battlefield-3d-impact-core,
+  .battlefield-3d-impact-spoke,
+  .battlefield-3d-impact-spark {
+    animation-duration: 1ms;
+  }
 }
 
 .hp-bar {

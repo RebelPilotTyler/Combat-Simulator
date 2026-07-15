@@ -9,6 +9,7 @@ import {
 } from './conditions';
 import { getEnabledFeatures, getResource } from './features';
 import { getDistanceFeet } from './targeting';
+import { enqueueVisualEvent } from './visualEvents';
 import type {
   Ability,
   ActionDefinition,
@@ -304,6 +305,14 @@ function applyRuleEffect(
       stampConditionApplicationTiming(state, condition);
       const result = applyConditionToCreature(creature, condition);
       logRuleMessage(state, `${getConditionDefinition(effect.conditionId).name} ${result === 'applied' ? 'applied to' : result === 'refreshed' ? 'refreshed on' : 'stacked on'} ${creature.name}.`);
+      enqueueVisualEvent(state, {
+        kind: 'conditionApplied',
+        creatureId: creature.id,
+        sourceCreatureId: condition.sourceCreatureId,
+        conditionId: condition.id,
+        conditionName: condition.name ?? getConditionDefinition(effect.conditionId).name,
+        label: condition.name ?? getConditionDefinition(effect.conditionId).name
+      });
       runConditionAppliedRules(state, creature, condition, event.source ?? entry.owner);
     });
     return selected.length > 0;
@@ -311,7 +320,18 @@ function applyRuleEffect(
 
   if (effect.type === 'removeCondition') {
     const changed = selected.filter((creature) => removeConditionFromCreature(creature, effect.conditionId));
-    changed.forEach((creature) => logRuleMessage(state, `${getConditionDefinition(effect.conditionId).name} removed from ${creature.name}.`));
+    changed.forEach((creature) => {
+      const label = getConditionDefinition(effect.conditionId).name;
+      logRuleMessage(state, `${label} removed from ${creature.name}.`);
+      enqueueVisualEvent(state, {
+        kind: 'conditionRemoved',
+        creatureId: creature.id,
+        sourceCreatureId: event.source?.id ?? entry.owner.id,
+        conditionId: effect.conditionId,
+        conditionName: label,
+        label
+      });
+    });
     return changed.length > 0;
   }
 
@@ -326,6 +346,13 @@ function applyRuleEffect(
       creature.hp = Math.max(0, creature.hp - damage.total);
       if (creature.hp !== before) {
         changed = true;
+        enqueueVisualEvent(state, {
+          kind: 'damageDealt',
+          creatureId: creature.id,
+          sourceCreatureId: event.source?.id ?? entry.owner.id,
+          amount: before - creature.hp,
+          label: `-${before - creature.hp}`
+        });
         logRuleMessage(
           state,
           `${creature.name} takes ${damage.total} ${effect.damageType ?? 'damage'} from ${effect.note ?? entry.rule.name ?? entry.label}.`
@@ -334,6 +361,12 @@ function applyRuleEffect(
       if (creature.hp === 0 && !hasCondition(creature, 'defeated')) {
         applyConditionToCreature(creature, createAppliedCondition('defeated'));
         logRuleMessage(state, `${creature.name} is defeated.`);
+        enqueueVisualEvent(state, {
+          kind: 'creatureDefeated',
+          creatureId: creature.id,
+          sourceCreatureId: event.source?.id ?? entry.owner.id,
+          label: 'Defeated'
+        });
       }
     });
     return changed;

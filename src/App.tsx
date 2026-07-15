@@ -67,6 +67,7 @@ import {
 import { getMovementOptionsForDestination, getReachableMovementSquares, type MovementOption } from './engine/movement';
 import { formatBaseEffectiveBonus, formatBaseEffectiveNumber, getConditionTags, getHpPercent } from './engine/presentation';
 import { parseCombatStateJson, serializeCombatState } from './engine/serialization';
+import { getActiveVisualEvents } from './engine/visualEvents';
 import {
   getElevation,
   getShapeSquares,
@@ -79,7 +80,7 @@ import {
   sameTilePosition
 } from './engine/shapes';
 import { getDistanceFeet, getLineSquares, hasLineOfSight } from './engine/targeting';
-import type { Ability, ActionDefinition, CardinalDirection, CombatState, Creature, CustomConditionTemplate, GridPosition, ShapeDefinition, TurnState } from './engine/types';
+import type { Ability, ActionDefinition, CardinalDirection, CombatState, Creature, CustomConditionTemplate, GridPosition, ShapeDefinition, TurnState, VisualEvent } from './engine/types';
 import { getVisibleGridCells, getVisibleGridWindow, type GridWindow } from './ui/gridWindow';
 import { getActionForNumberHotkey, getNumberHotkeyIndex, isTypingShortcutTarget, moveGridCursor } from './ui/keyboard';
 
@@ -94,6 +95,9 @@ type HudPanelOffset = Partial<Record<HudPanel, { x: number; y: number }>>;
 type UiTheme = 'slate' | 'parchment' | 'midnight';
 type TextScale = 'compact' | 'normal' | 'large';
 type UiDensity = 'comfortable' | 'compact';
+type VisualEffectsMode = 'full' | 'reduced' | 'off';
+type VisualEffectsTextSize = 'small' | 'normal' | 'large';
+type VisualEffectsIntensity = 'low' | 'normal' | 'high' | 'epic';
 
 interface UiSettings {
   theme: UiTheme;
@@ -104,6 +108,9 @@ interface UiSettings {
   showAdvancedTools: boolean;
   showMapTools: boolean;
   showGridCoordinates: boolean;
+  visualEffectsMode: VisualEffectsMode;
+  visualEffectsTextSize: VisualEffectsTextSize;
+  visualEffectsIntensity: VisualEffectsIntensity;
   invertCameraOrbitX: boolean;
   invertCameraOrbitY: boolean;
   invertCameraPanX: boolean;
@@ -157,6 +164,7 @@ export function App() {
   const [multiattackTargets, setMultiattackTargets] = useState<Record<string, string>>({});
   const [actionTab, setActionTab] = useState<ActionDefinition['actionCost']>('action');
   const [gridCursor, setGridCursor] = useState<GridPosition>(combat.creatures[0]?.position ?? { x: 0, y: 0 });
+  const [visualEffectNow, setVisualEffectNow] = useState(() => Date.now());
   const [debugOpen, setDebugOpen] = useState(false);
   const [toolsOpen, setToolsOpen] = useState(false);
   const [showHelp, setShowHelp] = useState(false);
@@ -261,6 +269,19 @@ export function App() {
       : undefined;
   const keyboardHint = getKeyboardHint(selectionMode, selectedAction, gridCursor, combat);
   const mapToolResult = uiSettings.showMapTools ? getMapToolResult(combat, mapTool, mapToolStart, mapToolEnd, mapToolSquares) : '';
+  const activeVisualEvents = useMemo(
+    () => (uiSettings.visualEffectsMode === 'off' ? [] : getActiveVisualEvents(combat.visualEvents, visualEffectNow)),
+    [combat.visualEvents, uiSettings.visualEffectsMode, visualEffectNow]
+  );
+
+  useEffect(() => {
+    if (uiSettings.visualEffectsMode === 'off' || activeVisualEvents.length === 0) {
+      return;
+    }
+
+    const interval = window.setInterval(() => setVisualEffectNow(Date.now()), 120);
+    return () => window.clearInterval(interval);
+  }, [activeVisualEvents.length, uiSettings.visualEffectsMode]);
 
   useEffect(() => {
     if (activeCreature) {
@@ -1094,6 +1115,9 @@ export function App() {
               selectedCreatureId={selectedCreatureId}
               selectionMode={selectionMode}
               showGridCoordinates={uiSettings.showGridCoordinates}
+              visualEffectsMode={uiSettings.visualEffectsMode}
+              visualEffectsTextSize={uiSettings.visualEffectsTextSize}
+              visualEvents={activeVisualEvents}
               viewportRef={gridRef}
             />
           ) : (
@@ -1115,6 +1139,9 @@ export function App() {
               onCursorElevationChange={adjustGridCursorElevation}
               selectedCreatureId={selectedCreatureId}
               settings={uiSettings}
+              visualEffectsIntensity={uiSettings.visualEffectsIntensity}
+              visualEffectsTextSize={uiSettings.visualEffectsTextSize}
+              visualEvents={activeVisualEvents}
               setCameraPanX={setCameraPanX}
               setCameraPanY={setCameraPanY}
               setCameraPitch={setCameraPitch}
@@ -1532,6 +1559,9 @@ function Battlefield2DView({
   selectedCreatureId,
   selectionMode,
   showGridCoordinates,
+  visualEffectsMode,
+  visualEffectsTextSize,
+  visualEvents,
   viewportRef
 }: {
   combat: CombatState;
@@ -1548,6 +1578,9 @@ function Battlefield2DView({
   selectedCreatureId?: string;
   selectionMode: SelectionMode;
   showGridCoordinates: boolean;
+  visualEffectsMode: VisualEffectsMode;
+  visualEffectsTextSize: VisualEffectsTextSize;
+  visualEvents: VisualEvent[];
   viewportRef: RefObject<HTMLDivElement | null>;
 }) {
   const cellSize = Math.max(32, gridCellSize);
@@ -1613,6 +1646,7 @@ function Battlefield2DView({
     () => new Map(combat.creatures.map((creature) => [positionKey(creature.position), creature])),
     [combat.creatures]
   );
+  const visualEventsByCreature = useMemo(() => groupVisualEventsByCreature(visualEvents), [visualEvents]);
   const blockedKeys = useMemo(() => new Set(combat.grid.blocked.map(positionKey)), [combat.grid.blocked]);
 
   return (
@@ -1637,6 +1671,7 @@ function Battlefield2DView({
           const toolHighlighted = mapToolKeys.has(key);
           const active = creature?.id === combat.activeCreatureId;
           const selected = creature?.id === selectedCreatureId;
+          const creatureVisualEvents = creature ? visualEventsByCreature.get(creature.id) ?? [] : [];
           const cursor = samePosition(gridCursor, position);
           const toolStart = mapToolStart ? samePosition(mapToolStart, position) : false;
           const toolEnd = mapToolEnd ? samePosition(mapToolEnd, position) : false;
@@ -1668,9 +1703,10 @@ function Battlefield2DView({
               {tileHeight !== 0 && <span className="height-marker">z{tileHeight}</span>}
               {creature && (
                 <span className="token-stack" title={`${creature.name} at ${formatPosition(creature.position)} HP ${creature.hp}/${creature.maxHp} ${getConditionLabels(creature)}`}>
-                  <span className={`token ${creature.team} ${isDefeated(creature) ? 'defeated' : ''}`}>
+                  <span className={`token ${creature.team} ${isDefeated(creature) ? 'defeated' : ''} ${getTokenVisualClass(creatureVisualEvents, visualEffectsMode)}`}>
                     {getCreatureShortLabel(creature)}
                   </span>
+                  <VisualEventOverlay events={creatureVisualEvents} mode={visualEffectsMode} textSize={visualEffectsTextSize} />
                   <HpBar creature={creature} compact />
                   <ConditionTags creature={creature} compact />
                 </span>
@@ -1696,6 +1732,9 @@ function Battlefield3DView({
   onCursorElevationChange,
   selectedCreatureId,
   settings,
+  visualEffectsIntensity,
+  visualEffectsTextSize,
+  visualEvents,
   cameraYaw,
   cameraPitch,
   cameraZoom,
@@ -1720,6 +1759,9 @@ function Battlefield3DView({
   onCursorElevationChange: (delta: number) => void;
   selectedCreatureId?: string;
   settings: UiSettings;
+  visualEffectsIntensity: VisualEffectsIntensity;
+  visualEffectsTextSize: VisualEffectsTextSize;
+  visualEvents: VisualEvent[];
   cameraYaw: number;
   cameraPitch: number;
   cameraZoom: number;
@@ -1752,6 +1794,8 @@ function Battlefield3DView({
   };
   const dragState = useRef<{ x: number; y: number; mode: 'orbit' | 'pan' } | undefined>(undefined);
   const blockedTileKeys = useMemo(() => new Set(combat.grid.blocked.map(positionKey)), [combat.grid.blocked]);
+  const effectiveVisualEffectsIntensity = settings.visualEffectsMode === 'reduced' ? 'low' : visualEffectsIntensity;
+  const visualIntensity = getVisualIntensityConfig(effectiveVisualEffectsIntensity);
   const movementTileKeys = useMemo(() => new Set([...movementKeys].map((key) => key.split(',').slice(0, 2).join(','))), [movementKeys]);
   const opportunityMovementTileKeys = useMemo(
     () => new Set([...opportunityMovementKeys].map((key) => key.split(',').slice(0, 2).join(','))),
@@ -2026,9 +2070,144 @@ function Battlefield3DView({
     );
   }
 
+  function renderShapeVisualEvent(event: VisualEvent) {
+    if (!event.origin || !event.shape) {
+      return null;
+    }
+
+    const color = getSafeVisualColor(event.color);
+    const squares = getShapeSquares(event.shape, event.origin, combat.grid, event.direction);
+    const limitedSquares = squares.slice(0, visualIntensity.shapeSquareLimit);
+    const originPoint = projectPoint(event.origin.x + 0.5, event.origin.y + 0.5, getElevation(event.origin) + 0.16);
+    return (
+      <g className={`battlefield-3d-shape-effect ${event.shape.type} intensity-${effectiveVisualEffectsIntensity}`} key={`shape-effect-${event.id}`}>
+        <circle
+          className="battlefield-3d-shape-origin-pulse"
+          cx={originPoint.x}
+          cy={originPoint.y}
+          r={Math.max(12, cellSize * visualIntensity.shapeOriginRadiusScale)}
+          stroke={color}
+        />
+        {limitedSquares.map((square, index) => {
+          const tileHeight = getTileHeight(square, combat.grid);
+          const corners = projectTileCorners(square.x, square.y, tileHeight + 0.06);
+          const center = projectPoint(square.x + 0.5, square.y + 0.5, tileHeight + 0.1);
+          return (
+            <g key={`${event.id}-${positionKey(square)}`}>
+              <polygon
+                className="battlefield-3d-shape-cell"
+                fill={color}
+                points={formatPolygon([corners.northWest, corners.northEast, corners.southEast, corners.southWest])}
+                stroke={color}
+              />
+              {Array.from({ length: visualIntensity.motesPerSquare }, (_, moteIndex) => {
+                const angle = index * 1.91 + moteIndex * 2.37;
+                const offset = cellSize * visualIntensity.moteSpread * (moteIndex / Math.max(1, visualIntensity.motesPerSquare - 1) - 0.5);
+                return (
+                  <circle
+                    className={`battlefield-3d-shape-mote mote-${moteIndex}`}
+                    cx={center.x + Math.cos(angle) * offset}
+                    cy={center.y + Math.sin(angle) * offset * 0.55}
+                    fill={color}
+                    key={`mote-${event.id}-${positionKey(square)}-${moteIndex}`}
+                    r={Math.max(2.2, cellSize * visualIntensity.moteRadiusScale)}
+                    style={{ animationDelay: `${Math.min(index * 18 + moteIndex * 55, 620)}ms` }}
+                  />
+                );
+              })}
+            </g>
+          );
+        })}
+      </g>
+    );
+  }
+
+  function renderAttackImpactEvent(event: VisualEvent) {
+    if (!event.to) {
+      return null;
+    }
+
+    const color = getSafeVisualColor(event.color);
+    const targetPoint = projectPoint(event.to.x + 0.5, event.to.y + 0.5, getElevation(event.to) + 0.62);
+    const sourcePoint = event.from
+      ? projectPoint(event.from.x + 0.5, event.from.y + 0.5, getElevation(event.from) + 0.55)
+      : undefined;
+    const radius = Math.max(10, cellSize * visualIntensity.impactRadiusScale);
+    const spokes = Array.from({ length: visualIntensity.spokeCount }, (_, index) => {
+      const angle = (Math.PI * 2 * index) / visualIntensity.spokeCount;
+      return {
+        x1: targetPoint.x + Math.cos(angle) * radius * 0.35,
+        y1: targetPoint.y + Math.sin(angle) * radius * 0.35,
+        x2: targetPoint.x + Math.cos(angle) * radius,
+        y2: targetPoint.y + Math.sin(angle) * radius
+      };
+    });
+    const sparks = Array.from({ length: visualIntensity.sparkCount }, (_, index) => {
+      const angle = index * 2.27;
+      const inner = radius * 0.22;
+      const outer = radius * (0.65 + (index % 3) * 0.18);
+      return {
+        x1: targetPoint.x + Math.cos(angle) * inner,
+        y1: targetPoint.y + Math.sin(angle) * inner,
+        x2: targetPoint.x + Math.cos(angle) * outer,
+        y2: targetPoint.y + Math.sin(angle) * outer
+      };
+    });
+
+    return (
+      <g className={`battlefield-3d-attack-impact intensity-${effectiveVisualEffectsIntensity}`} key={`impact-${event.id}`}>
+        {sourcePoint && (
+          Array.from({ length: visualIntensity.traceCount }, (_, index) => {
+            const offset = (index - (visualIntensity.traceCount - 1) / 2) * Math.max(3, cellSize * 0.06);
+            return (
+              <line
+                className={`battlefield-3d-attack-trace trace-${index}`}
+                key={`trace-${event.id}-${index}`}
+                stroke={color}
+                x1={sourcePoint.x + offset}
+                y1={sourcePoint.y - offset * 0.45}
+                x2={targetPoint.x + offset * 0.3}
+                y2={targetPoint.y - offset * 0.2}
+              />
+            );
+          })
+        )}
+        <circle className="battlefield-3d-impact-wave" cx={targetPoint.x} cy={targetPoint.y} r={radius} stroke={color} />
+        <circle className="battlefield-3d-impact-halo" cx={targetPoint.x} cy={targetPoint.y} r={radius * 0.58} stroke={color} />
+        <circle className="battlefield-3d-impact-core" cx={targetPoint.x} cy={targetPoint.y} fill={color} r={Math.max(4, cellSize * visualIntensity.coreRadiusScale)} />
+        {spokes.map((spoke, index) => (
+          <line
+            className="battlefield-3d-impact-spoke"
+            key={`impact-spoke-${event.id}-${index}`}
+            stroke={color}
+            x1={spoke.x1}
+            y1={spoke.y1}
+            x2={spoke.x2}
+            y2={spoke.y2}
+          />
+        ))}
+        {sparks.map((spark, index) => (
+          <line
+            className="battlefield-3d-impact-spark"
+            key={`impact-spark-${event.id}-${index}`}
+            stroke={color}
+            x1={spark.x1}
+            y1={spark.y1}
+            x2={spark.x2}
+            y2={spark.y2}
+            style={{ animationDelay: `${index * 24}ms` }}
+          />
+        ))}
+      </g>
+    );
+  }
+
   const sortedCreatures = [...combat.creatures].sort(
     (a, b) => getProjectedDepth(a.position.x + 0.5, a.position.y + 0.5) - getProjectedDepth(b.position.x + 0.5, b.position.y + 0.5)
   );
+  const visualEventsByCreature = useMemo(() => groupVisualEventsByCreature(visualEvents), [visualEvents]);
+  const shapeVisualEvents = visualEvents.filter((event) => event.kind === 'shapeEffect');
+  const impactVisualEvents = visualEvents.filter((event) => event.kind === 'attackImpact');
 
   return (
     <div
@@ -2048,15 +2227,29 @@ function Battlefield3DView({
       <svg className="battlefield-3d-svg" viewBox={`0 0 ${svgWidth} ${svgHeight}`} role="img" aria-label="Projected 3D battlefield">
         <rect className="battlefield-3d-sky" height={svgHeight} width={svgWidth} x={0} y={0} />
         {tileCoordinates.map(renderTile)}
+        {shapeVisualEvents.map(renderShapeVisualEvent)}
+        {impactVisualEvents.map(renderAttackImpactEvent)}
         {sortedCreatures.map((creature) => {
           const center = projectPoint(creature.position.x + 0.5, creature.position.y + 0.5, getElevation(creature.position) + 0.28);
           const base = projectPoint(creature.position.x + 0.5, creature.position.y + 0.5, getElevation(creature.position));
           const selected = creature.id === selectedCreatureId;
           const active = creature.id === combat.activeCreatureId;
+          const creatureVisualEvents = visualEventsByCreature.get(creature.id) ?? [];
+          const visualLabel = getPrimaryVisualEventLabel(creatureVisualEvents, settings.visualEffectsMode);
+          const visualClass = getPrimaryVisualEventKind(creatureVisualEvents);
 
           return (
             <g className={isDefeated(creature) ? 'creature-3d defeated' : 'creature-3d'} key={`creature-svg-${creature.id}`}>
               <ellipse className="creature-3d-shadow" cx={base.x + 4} cy={base.y + 7} rx={cellSize * 0.27} ry={cellSize * 0.11} />
+              {visualClass && (
+                <ellipse
+                  className={`creature-3d-visual-ring ${visualClass}`}
+                  cx={center.x}
+                  cy={center.y}
+                  rx={cellSize * 0.42}
+                  ry={cellSize * 0.2}
+                />
+              )}
               <ellipse
                 className="creature-3d-side"
                 cx={center.x}
@@ -2076,6 +2269,11 @@ function Battlefield3DView({
               <text className="creature-3d-label" x={center.x} y={center.y - 17}>
                 {getCreatureShortLabel(creature)}
               </text>
+              {visualLabel && (
+                <text className={`creature-3d-visual-label ${visualClass ?? ''} text-${visualEffectsTextSize}`} x={center.x} y={center.y - 35}>
+                  {visualLabel}
+                </text>
+              )}
             </g>
           );
         })}
@@ -2589,6 +2787,31 @@ function SettingsDialog({
                 <option value="compact">Compact</option>
               </select>
             </label>
+            <label>
+              Visual Effects
+              <select value={settings.visualEffectsMode} onChange={(event) => onChange({ visualEffectsMode: event.target.value as VisualEffectsMode })}>
+                <option value="full">Full</option>
+                <option value="reduced">Reduced</option>
+                <option value="off">Off</option>
+              </select>
+            </label>
+            <label>
+              Visual Text
+              <select value={settings.visualEffectsTextSize} onChange={(event) => onChange({ visualEffectsTextSize: event.target.value as VisualEffectsTextSize })}>
+                <option value="small">Small</option>
+                <option value="normal">Normal</option>
+                <option value="large">Large</option>
+              </select>
+            </label>
+            <label>
+              VFX Intensity
+              <select value={settings.visualEffectsIntensity} onChange={(event) => onChange({ visualEffectsIntensity: event.target.value as VisualEffectsIntensity })}>
+                <option value="low">Low</option>
+                <option value="normal">Normal</option>
+                <option value="high">High</option>
+                <option value="epic">Epic</option>
+              </select>
+            </label>
           </div>
         </section>
 
@@ -2947,6 +3170,226 @@ function getTargetOptions(
   });
 }
 
+function groupVisualEventsByCreature(events: VisualEvent[]): Map<string, VisualEvent[]> {
+  return events.reduce((groups, event) => {
+    const group = groups.get(event.creatureId) ?? [];
+    group.push(event);
+    groups.set(event.creatureId, group);
+    return groups;
+  }, new Map<string, VisualEvent[]>());
+}
+
+function VisualEventOverlay({
+  events,
+  mode,
+  textSize
+}: {
+  events: VisualEvent[];
+  mode: VisualEffectsMode;
+  textSize: VisualEffectsTextSize;
+}) {
+  if (mode === 'off' || events.length === 0) {
+    return null;
+  }
+
+  const labeledEvents = events.filter((event) => getVisualEventLabel(event, mode));
+  const ringEvents = events.filter((event) => isRingVisualEvent(event));
+
+  return (
+    <span className={`visual-event-layer ${mode === 'reduced' ? 'reduced' : ''} text-${textSize}`} aria-hidden="true">
+      {ringEvents.map((event) => (
+        <span className={`visual-ring ${event.kind}`} key={`ring-${event.id}`} />
+      ))}
+      {labeledEvents.slice(-3).map((event, index) => (
+        <span className={`visual-float ${event.kind} visual-float-${index}`} key={event.id}>
+          {getVisualEventLabel(event, mode)}
+        </span>
+      ))}
+    </span>
+  );
+}
+
+function getTokenVisualClass(events: VisualEvent[], mode: VisualEffectsMode): string {
+  if (mode === 'off') {
+    return '';
+  }
+
+  if (events.some((event) => event.kind === 'criticalHit')) {
+    return 'visual-critical';
+  }
+  if (events.some((event) => event.kind === 'creatureDefeated')) {
+    return 'visual-defeated';
+  }
+  if (mode === 'full' && events.some((event) => event.kind === 'attackHit' || event.kind === 'damageDealt')) {
+    return 'visual-hit';
+  }
+  return '';
+}
+
+function getPrimaryVisualEventKind(events: VisualEvent[]): string | undefined {
+  return getPrimaryVisualEvent(events)?.kind;
+}
+
+function getPrimaryVisualEventLabel(events: VisualEvent[], mode: VisualEffectsMode): string {
+  const event = getPrimaryVisualEvent(events);
+  return event ? getVisualEventLabel(event, mode) : '';
+}
+
+function getPrimaryVisualEvent(events: VisualEvent[]): VisualEvent | undefined {
+  const priority = [
+    'creatureDefeated',
+    'criticalHit',
+    'damageDealt',
+    'healingReceived',
+    'attackMiss',
+    'savingThrowFailure',
+    'savingThrowSuccess',
+    'conditionApplied',
+    'conditionRemoved',
+    'opportunityAttackTriggered',
+    'resourceSpent',
+    'movementComplete',
+    'attackHit',
+    'attackImpact',
+    'shapeEffect'
+  ];
+  return [...events].sort((left, right) => priority.indexOf(left.kind) - priority.indexOf(right.kind))[0];
+}
+
+function getVisualEventLabel(event: VisualEvent, mode: VisualEffectsMode): string {
+  if (event.kind === 'attackImpact' || event.kind === 'shapeEffect') {
+    return '';
+  }
+
+  if (mode === 'reduced' && (event.kind === 'attackHit' || event.kind === 'movementComplete' || event.kind === 'resourceSpent')) {
+    return '';
+  }
+
+  if (event.label) {
+    return event.label;
+  }
+
+  if (event.kind === 'damageDealt') {
+    return `-${event.amount ?? 0}`;
+  }
+  if (event.kind === 'healingReceived') {
+    return `+${event.amount ?? 0}`;
+  }
+  if (event.kind === 'attackMiss') {
+    return 'Miss';
+  }
+  if (event.kind === 'attackHit') {
+    return 'Hit';
+  }
+  if (event.kind === 'criticalHit') {
+    return 'Crit';
+  }
+  if (event.kind === 'savingThrowSuccess') {
+    return 'Save';
+  }
+  if (event.kind === 'savingThrowFailure') {
+    return 'Fail';
+  }
+  if (event.kind === 'opportunityAttackTriggered') {
+    return 'OA';
+  }
+  if (event.kind === 'creatureDefeated') {
+    return 'Defeated';
+  }
+
+  return '';
+}
+
+function isRingVisualEvent(event: VisualEvent): boolean {
+  return event.kind === 'conditionApplied' || event.kind === 'conditionRemoved' || event.kind === 'movementComplete' || event.kind === 'opportunityAttackTriggered';
+}
+
+interface VisualIntensityConfig {
+  shapeSquareLimit: number;
+  shapeOriginRadiusScale: number;
+  motesPerSquare: number;
+  moteRadiusScale: number;
+  moteSpread: number;
+  impactRadiusScale: number;
+  coreRadiusScale: number;
+  spokeCount: number;
+  sparkCount: number;
+  traceCount: number;
+}
+
+function getVisualIntensityConfig(intensity: VisualEffectsIntensity): VisualIntensityConfig {
+  if (intensity === 'low') {
+    return {
+      shapeSquareLimit: 48,
+      shapeOriginRadiusScale: 0.28,
+      motesPerSquare: 1,
+      moteRadiusScale: 0.04,
+      moteSpread: 0.12,
+      impactRadiusScale: 0.22,
+      coreRadiusScale: 0.07,
+      spokeCount: 6,
+      sparkCount: 0,
+      traceCount: 1
+    };
+  }
+
+  if (intensity === 'high') {
+    return {
+      shapeSquareLimit: 90,
+      shapeOriginRadiusScale: 0.42,
+      motesPerSquare: 2,
+      moteRadiusScale: 0.052,
+      moteSpread: 0.26,
+      impactRadiusScale: 0.34,
+      coreRadiusScale: 0.1,
+      spokeCount: 10,
+      sparkCount: 8,
+      traceCount: 2
+    };
+  }
+
+  if (intensity === 'epic') {
+    return {
+      shapeSquareLimit: 130,
+      shapeOriginRadiusScale: 0.52,
+      motesPerSquare: 3,
+      moteRadiusScale: 0.062,
+      moteSpread: 0.36,
+      impactRadiusScale: 0.44,
+      coreRadiusScale: 0.13,
+      spokeCount: 14,
+      sparkCount: 14,
+      traceCount: 3
+    };
+  }
+
+  return {
+    shapeSquareLimit: 64,
+    shapeOriginRadiusScale: 0.34,
+    motesPerSquare: 1,
+    moteRadiusScale: 0.045,
+    moteSpread: 0.18,
+    impactRadiusScale: 0.26,
+    coreRadiusScale: 0.08,
+    spokeCount: 8,
+    sparkCount: 4,
+    traceCount: 1
+  };
+}
+
+function getSafeVisualColor(color: string | undefined): string {
+  if (!color) {
+    return '#7ca7e4';
+  }
+
+  const trimmed = color.trim();
+  if (/^#[0-9a-f]{3,8}$/i.test(trimmed) || /^[a-zA-Z]+$/.test(trimmed)) {
+    return trimmed;
+  }
+
+  return '#7ca7e4';
+}
+
 function HpBar({ creature, compact = false }: { creature: Creature; compact?: boolean }) {
   return (
     <span className={compact ? 'hp-bar compact-hp' : 'hp-bar'}>
@@ -3019,7 +3462,19 @@ function loadUiSettings(): UiSettings {
       ...parsed,
       theme: parsed.theme === 'parchment' || parsed.theme === 'midnight' || parsed.theme === 'slate' ? parsed.theme : 'slate',
       textScale: parsed.textScale === 'compact' || parsed.textScale === 'large' || parsed.textScale === 'normal' ? parsed.textScale : 'normal',
-      density: parsed.density === 'compact' || parsed.density === 'comfortable' ? parsed.density : 'comfortable'
+      density: parsed.density === 'compact' || parsed.density === 'comfortable' ? parsed.density : 'comfortable',
+      visualEffectsMode:
+        parsed.visualEffectsMode === 'reduced' || parsed.visualEffectsMode === 'off' || parsed.visualEffectsMode === 'full'
+          ? parsed.visualEffectsMode
+          : 'full',
+      visualEffectsTextSize:
+        parsed.visualEffectsTextSize === 'small' || parsed.visualEffectsTextSize === 'large' || parsed.visualEffectsTextSize === 'normal'
+          ? parsed.visualEffectsTextSize
+          : 'normal',
+      visualEffectsIntensity:
+        parsed.visualEffectsIntensity === 'low' || parsed.visualEffectsIntensity === 'high' || parsed.visualEffectsIntensity === 'epic' || parsed.visualEffectsIntensity === 'normal'
+          ? parsed.visualEffectsIntensity
+          : 'normal'
     };
   } catch {
     return defaultUiSettings();
@@ -3044,6 +3499,9 @@ function defaultUiSettings(): UiSettings {
     showAdvancedTools: false,
     showMapTools: true,
     showGridCoordinates: true,
+    visualEffectsMode: 'full',
+    visualEffectsTextSize: 'normal',
+    visualEffectsIntensity: 'normal',
     invertCameraOrbitX: false,
     invertCameraOrbitY: false,
     invertCameraPanX: false,
