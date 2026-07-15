@@ -29,7 +29,9 @@ import type {
   ActionDefinition,
   ActionKind,
   ActionTag,
+  BotProfile,
   CombatState,
+  CreatureControlMode,
   ConditionDurationType,
   Creature,
   CustomConditionTemplate,
@@ -61,6 +63,8 @@ const RESOURCE_LIBRARY_KEY = 'dnd5e-combat.resourceLibrary.v1';
 
 const abilities: Ability[] = ['str', 'dex', 'con', 'int', 'wis', 'cha'];
 const teams: Team[] = ['players', 'enemies', 'neutral'];
+const controlModes: CreatureControlMode[] = ['manual', 'bot'];
+const botProfiles: BotProfile[] = ['aggressiveMelee', 'rangedAttacker', 'cowardly', 'support', 'passive'];
 const actionKinds: ActionKind[] = ['meleeAttack', 'rangedAttack', 'savingThrowEffect', 'basicAction', 'spell', 'multiattack', 'custom'];
 const actionCosts: ActionCost[] = ['action', 'bonusAction', 'reaction', 'free'];
 const actionTags: ActionTag[] = ['attack', 'spell', 'melee', 'ranged', 'area', 'condition', 'movement', 'opportunity', 'bonus', 'reaction', 'placeholder'];
@@ -929,6 +933,26 @@ export function EncounterEditor({
                     {teams.map((team) => (
                       <option key={team} value={team}>
                         {team}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <label>
+                  Control
+                  <select value={creatureDraft.controlMode ?? 'manual'} onChange={(event) => updateDraftCreature({ controlMode: event.target.value as CreatureControlMode })}>
+                    {controlModes.map((mode) => (
+                      <option key={mode} value={mode}>
+                        {mode === 'bot' ? 'Bot' : 'Manual'}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <label>
+                  Bot Profile
+                  <select value={creatureDraft.botProfile ?? 'passive'} onChange={(event) => updateDraftCreature({ botProfile: event.target.value as BotProfile })}>
+                    {botProfiles.map((profile) => (
+                      <option key={profile} value={profile}>
+                        {formatBotProfileLabel(profile)}
                       </option>
                     ))}
                   </select>
@@ -2828,6 +2852,8 @@ function coerceCreature(value: unknown): Creature | undefined {
     id: typeof value.id === 'string' ? value.id : createId(value.name, 'creature'),
     name: value.name,
     team: isTeam(value.team) ? value.team : blank.team,
+    controlMode: isCreatureControlMode(value.controlMode) ? value.controlMode : blank.controlMode,
+    botProfile: isBotProfile(value.botProfile) ? value.botProfile : blank.botProfile,
     hp: numberOr(value.hp, blank.hp),
     maxHp: numberOr(value.maxHp, numberOr(value.hp, blank.maxHp)),
     ac: numberOr(value.ac, blank.ac),
@@ -2917,6 +2943,8 @@ function createBlankCreature(): Creature {
     id: createId('new-creature', 'creature'),
     name: 'New Creature',
     team: 'enemies',
+    controlMode: 'manual',
+    botProfile: 'passive',
     hp: 10,
     maxHp: 10,
     ac: 12,
@@ -3082,6 +3110,12 @@ function getEncounterOverridesFromCreature(creature: Creature, template?: Creatu
   if (!template || creature.team !== template.team) {
     overrides.team = creature.team;
   }
+  if (!template || creature.controlMode !== template.controlMode) {
+    overrides.controlMode = creature.controlMode;
+  }
+  if (!template || creature.botProfile !== template.botProfile) {
+    overrides.botProfile = creature.botProfile;
+  }
   if (creature.readiedAction) {
     overrides.readiedAction = cloneJson(creature.readiedAction);
   }
@@ -3158,6 +3192,8 @@ function normalizeCreatureDraft(creature: Creature): Creature {
     ...creature,
     id: toId(creature.id || creature.name || 'creature'),
     name: creature.name.trim() || 'Unnamed Creature',
+    controlMode: creature.controlMode === 'bot' ? 'bot' : 'manual',
+    botProfile: isBotProfile(creature.botProfile) ? creature.botProfile : 'passive',
     hp: clamp(numberOr(creature.hp, maxHp), 0, maxHp),
     maxHp,
     ac: Math.max(0, numberOr(creature.ac, 10)),
@@ -3509,6 +3545,29 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function isTeam(value: unknown): value is Team {
   return teams.includes(value as Team);
+}
+
+function isCreatureControlMode(value: unknown): value is CreatureControlMode {
+  return controlModes.includes(value as CreatureControlMode);
+}
+
+function isBotProfile(value: unknown): value is BotProfile {
+  return botProfiles.includes(value as BotProfile);
+}
+
+function formatBotProfileLabel(profile: BotProfile): string {
+  switch (profile) {
+    case 'aggressiveMelee':
+      return 'Aggressive Melee';
+    case 'rangedAttacker':
+      return 'Ranged Attacker';
+    case 'cowardly':
+      return 'Cowardly';
+    case 'support':
+      return 'Support';
+    case 'passive':
+      return 'Passive/Test Dummy';
+  }
 }
 
 function isDefined<T>(value: T | undefined): value is T {

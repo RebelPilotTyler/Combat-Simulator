@@ -1547,6 +1547,22 @@ summary:focus-visible {
   padding: 6px;
 }
 
+.bot-turn-status {
+  align-items: center;
+  background: var(--accent-soft);
+  border: 1px solid var(--accent);
+  border-radius: var(--radius-sm);
+  display: grid;
+  gap: 8px;
+  grid-template-columns: minmax(0, 1fr) auto;
+  padding: 6px;
+}
+
+.bot-turn-status span {
+  font-weight: 700;
+  min-width: 0;
+}
+
 .selected-action {
   background: var(--accent-soft);
   border-color: var(--accent);

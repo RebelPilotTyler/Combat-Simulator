@@ -16,10 +16,11 @@ import type {
   RollMode,
   RollModifier,
   MultiattackStep,
-  CombatRulesSettings
+  CombatRulesSettings,
+  BotProfile
 } from './types';
 import { getElevation, getShapeSquares, getTilePosition, isBlocked, isInBounds, samePosition } from './shapes';
-import { getMovementOption, getMovementOptionForPath, isOccupied } from './movement';
+import { getMovementOption, getMovementOptionForPath, getReachableMovementSquares, isOccupied, type MovementOption } from './movement';
 import { clampGridPosition, normalizeGridDefinition } from './grid';
 import {
   applyConditionToCreature,
@@ -1051,6 +1052,431 @@ export function performSavingThrowAction(
   return next;
 }
 
+export function runBotTurn(state: CombatState, random: RandomSource = Math.random): CombatState {
+  const prepared = ensureTurnState(normalizeState(cloneState(state)));
+  if (!prepared.activeCreatureId) {
+    addLog(prepared, 'system', 'No active creature for bot turn.');
+    return prepared;
+  }
+
+  const bot = getActiveCreature(prepared);
+  if (bot.controlMode !== 'bot') {
+    addLog(prepared, 'system', `${bot.name} is not bot-controlled.`);
+    return prepared;
+  }
+
+  let next = runBotTurnMovementStep(prepared);
+  next = runBotTurnActionStep(next, random);
+  return runBotTurnEndStep(next);
+}
+
+export function canRunBotTurn(state: CombatState): boolean {
+  if (!state.activeCreatureId) {
+    return false;
+  }
+
+  return findCreature(state, state.activeCreatureId).controlMode === 'bot';
+}
+
+export function runBotTurnMovementStep(state: CombatState): CombatState {
+  let next = ensureTurnState(normalizeState(cloneState(state)));
+  if (!next.activeCreatureId) {
+    addLog(next, 'system', 'No active creature for bot turn.');
+    return next;
+  }
+
+  const bot = getActiveCreature(next);
+  const profile = bot.botProfile ?? 'passive';
+  if (bot.controlMode !== 'bot') {
+    addLog(next, 'system', `${bot.name} is not bot-controlled.`);
+    return next;
+  }
+
+  if (profile === 'passive') {
+    return next;
+  }
+
+  const beforeMovement = chooseBotMovement(next, bot, profile);
+  if (beforeMovement) {
+    addLog(next, 'action', `${bot.name} bot moves toward a better ${formatBotProfile(profile)} position.`);
+    next = moveActiveCreature(next, beforeMovement.path);
+  }
+
+  return next;
+}
+
+export function runBotTurnActionStep(state: CombatState, random: RandomSource = Math.random): CombatState {
+  let next = ensureTurnState(normalizeState(cloneState(state)));
+  if (!next.activeCreatureId) {
+    addLog(next, 'system', 'No active creature for bot turn.');
+    return next;
+  }
+
+  const activeBot = getActiveCreature(next);
+  const profile = activeBot.botProfile ?? 'passive';
+  if (activeBot.controlMode !== 'bot') {
+    addLog(next, 'system', `${activeBot.name} is not bot-controlled.`);
+    return next;
+  }
+
+  if (profile === 'passive') {
+    addLog(next, 'action', `${activeBot.name} bot waits. Passive/Test Dummy profile takes no action.`);
+    return next;
+  }
+
+  const decision = chooseBotAction(next, activeBot, profile);
+  if (decision) {
+    addLog(next, 'action', `${activeBot.name} bot chooses ${decision.action.name} against ${decision.targets.map((target) => target.name).join(', ')}.`);
+    next = executeBotAction(next, decision, random);
+  } else {
+    const waited = performBotWait(next, activeBot);
+    next = waited.state;
+  }
+
+  return next;
+}
+
+export function runBotTurnEndStep(state: CombatState): CombatState {
+  const next = ensureTurnState(normalizeState(cloneState(state)));
+  if (!next.activeCreatureId) {
+    return next;
+  }
+
+  if (getActiveCreature(next).controlMode !== 'bot') {
+    return next;
+  }
+
+  return endTurn(next);
+}
+
+interface BotActionDecision {
+  action: ActionDefinition;
+  targets: Creature[];
+  origin?: GridPosition;
+  direction?: CardinalDirection;
+  score: number;
+}
+
+function chooseBotMovement(state: CombatState, bot: Creature, profile: BotProfile): MovementOption | undefined {
+  const enemies = getLivingEnemies(state, bot);
+  if (enemies.length === 0 || !canCreatureMove(state, bot)) {
+    return undefined;
+  }
+
+  const reachable = getReachableMovementSquares(state, bot.id);
+  if (reachable.length === 0) {
+    return undefined;
+  }
+
+  if (profile === 'cowardly') {
+    const currentSafety = getMinimumDistanceToCreatures(bot.position, enemies);
+    return reachable
+      .filter((option) => getMinimumDistanceToCreatures(option.position, enemies) > currentSafety)
+      .sort((a, b) => getMinimumDistanceToCreatures(b.position, enemies) - getMinimumDistanceToCreatures(a.position, enemies) || a.costFeet - b.costFeet)[0];
+  }
+
+  if (profile === 'rangedAttacker') {
+    const rangedActions = getBotUsableActions(state, bot).filter(isRangedAttackActionDefinition);
+    const currentDecision = chooseBestBotActionFromPosition(state, bot, profile, bot.position, rangedActions);
+    const threatened = getMinimumDistanceToCreatures(bot.position, enemies) <= 5;
+    if (currentDecision && !threatened) {
+      return undefined;
+    }
+
+    return reachable
+      .map((option) => ({
+        option,
+        decision: chooseBestBotActionFromPosition(state, bot, profile, option.position, rangedActions),
+        safety: getMinimumDistanceToCreatures(option.position, enemies)
+      }))
+      .filter((candidate) => candidate.decision)
+      .sort((a, b) => b.safety - a.safety || b.decision!.score - a.decision!.score || a.option.costFeet - b.option.costFeet)[0]?.option;
+  }
+
+  const meleeActions = getBotUsableActions(state, bot).filter(isMeleeAttackActionDefinition);
+  if (chooseBestBotActionFromPosition(state, bot, profile, bot.position, meleeActions)) {
+    return undefined;
+  }
+
+  const nearestEnemy = enemies.sort((a, b) => getDistanceFeet(bot.position, a.position) - getDistanceFeet(bot.position, b.position))[0];
+  return reachable
+    .map((option) => ({
+      option,
+      distance: getDistanceFeet(option.position, nearestEnemy.position),
+      decision: chooseBestBotActionFromPosition(state, bot, profile, option.position, meleeActions)
+    }))
+    .sort((a, b) => {
+      if (a.decision && !b.decision) {
+        return -1;
+      }
+      if (!a.decision && b.decision) {
+        return 1;
+      }
+      return a.distance - b.distance || a.option.costFeet - b.option.costFeet;
+    })[0]?.option;
+}
+
+function chooseBotAction(state: CombatState, bot: Creature, profile: BotProfile): BotActionDecision | undefined {
+  const actions = getBotUsableActions(state, bot);
+  if (profile === 'support') {
+    const supportDecision = chooseSupportBotAction(state, bot, actions);
+    if (supportDecision) {
+      return supportDecision;
+    }
+  }
+
+  if (profile === 'cowardly' && getMinimumDistanceToCreatures(bot.position, getLivingEnemies(state, bot)) <= 10) {
+    return undefined;
+  }
+
+  return chooseBestBotActionFromPosition(state, bot, profile, bot.position, actions);
+}
+
+function chooseBestBotActionFromPosition(
+  state: CombatState,
+  bot: Creature,
+  profile: BotProfile,
+  position: GridPosition,
+  actions: ActionDefinition[]
+): BotActionDecision | undefined {
+  const decisions = actions.flatMap((action) => getBotActionDecisions(state, bot, profile, position, action));
+  return decisions.sort((a, b) => b.score - a.score)[0];
+}
+
+function getBotActionDecisions(
+  state: CombatState,
+  bot: Creature,
+  profile: BotProfile,
+  position: GridPosition,
+  action: ActionDefinition
+): BotActionDecision[] {
+  const enemies = getLivingEnemies(state, bot);
+  if (isAttackActionDefinition(action)) {
+    return enemies
+      .filter((target) => isBotAttackValidFromPosition(state, bot, action, position, target))
+      .map((target) => ({
+        action,
+        targets: [target],
+        score: getBotAttackScore(state, bot, action, position, target, profile)
+      }));
+  }
+
+  if (getRulesKind(action) === 'savingThrowEffect' && action.save && (action.damage || action.effects.some((effect) => effect.type === 'damage'))) {
+    return enemies.flatMap((target) => {
+      const origin = getBotShapeOrigin(action, position, target.position);
+      const direction = getBotShapeDirection(position, target.position);
+      if (!isInActionRange(action, position, origin)) {
+        return [];
+      }
+      if ((action.tags.includes('spell') || action.kind === 'spell') && !hasLineOfSight({ ...state, creatures: replaceBotPosition(state, bot.id, position) }, position, origin)) {
+        return [];
+      }
+      const simulated = { ...state, creatures: replaceBotPosition(state, bot.id, position) };
+      const targets = getTargetsInActionShape(simulated, action, { ...bot, position }, origin, direction)
+        .filter((candidate) => candidate.team !== bot.team && candidate.id !== bot.id);
+      if (!targets.some((candidate) => candidate.id === target.id)) {
+        return [];
+      }
+
+      return [{
+        action,
+        targets,
+        origin,
+        direction,
+        score: targets.length * 8 + getEstimatedActionDamage(action)
+      }];
+    });
+  }
+
+  return [];
+}
+
+function chooseSupportBotAction(state: CombatState, bot: Creature, actions: ActionDefinition[]): BotActionDecision | undefined {
+  const hurtAlly = getLivingAllies(state, bot)
+    .filter((ally) => ally.hp < ally.maxHp / 2)
+    .sort((a, b) => a.hp / a.maxHp - b.hp / b.maxHp)[0];
+  if (!hurtAlly) {
+    return undefined;
+  }
+
+  const supportAction = actions.find((action) =>
+    action.tags.some((tag) => tag.toLowerCase() === 'heal' || tag.toLowerCase() === 'healing' || tag.toLowerCase() === 'support' || tag.toLowerCase() === 'buff')
+  );
+  if (!supportAction || !isInActionRange(supportAction, bot.position, hurtAlly.position)) {
+    return undefined;
+  }
+
+  return {
+    action: supportAction,
+    targets: [hurtAlly],
+    score: 100
+  };
+}
+
+function executeBotAction(state: CombatState, decision: BotActionDecision, random: RandomSource): CombatState {
+  const actionKind = getRulesKind(decision.action);
+  if (isAttackActionDefinition(decision.action)) {
+    return performAttackAction(state, decision.action.id, decision.targets[0].id, random);
+  }
+
+  if (actionKind === 'savingThrowEffect') {
+    return performSavingThrowAction(
+      state,
+      decision.action.id,
+      decision.targets.map((target) => target.id),
+      random,
+      {},
+      { origin: decision.origin, direction: decision.direction }
+    );
+  }
+
+  return state;
+}
+
+function performBotWait(state: CombatState, bot: Creature): { state: CombatState; waited: boolean } {
+  if (!state.turnState.actionUsed && canCreatureTakeAction(state, bot)) {
+    addLog(state, 'action', `${bot.name} bot found no good target and Dodges.`);
+    return { state: performBasicAction(state, 'Dodge'), waited: true };
+  }
+
+  addLog(state, 'action', `${bot.name} bot found no valid action and waits.`);
+  return { state, waited: true };
+}
+
+function getBotUsableActions(state: CombatState, bot: Creature): ActionDefinition[] {
+  return getAvailableActions(bot, state).filter((action) => isBotActionCostAvailable(state, bot, action) && hasResourcesForAction(bot, action));
+}
+
+function isBotActionCostAvailable(state: CombatState, bot: Creature, action: ActionDefinition): boolean {
+  const resource = state.turnResources[bot.id] ?? state.turnState;
+  if (action.actionCost === 'free') {
+    return true;
+  }
+  if (action.actionCost === 'bonusAction') {
+    return !resource.bonusActionUsed;
+  }
+  if (action.actionCost === 'reaction') {
+    return !resource.reactionUsed && canCreatureTakeReaction(state, bot);
+  }
+  return !resource.actionUsed && canCreatureTakeAction(state, bot);
+}
+
+function isBotAttackValidFromPosition(
+  state: CombatState,
+  bot: Creature,
+  action: ActionDefinition,
+  position: GridPosition,
+  target: Creature
+): boolean {
+  if (target.team === bot.team || target.id === bot.id || isDefeated(target)) {
+    return false;
+  }
+  if (!isInActionRange(action, position, target.position)) {
+    return false;
+  }
+  if ((getRulesKind(action) === 'rangedAttack' || action.tags.includes('ranged')) && !hasLineOfSight({ ...state, creatures: replaceBotPosition(state, bot.id, position) }, position, target.position)) {
+    return false;
+  }
+  return canCreatureTargetHarmfulEffect(bot, target);
+}
+
+function getBotAttackScore(
+  state: CombatState,
+  bot: Creature,
+  action: ActionDefinition,
+  position: GridPosition,
+  target: Creature,
+  profile: BotProfile
+): number {
+  const profileBonus =
+    profile === 'aggressiveMelee' && isMeleeAttackActionDefinition(action)
+      ? 12
+      : profile === 'rangedAttacker' && isRangedAttackActionDefinition(action)
+        ? 12
+        : 0;
+  return (
+    profileBonus +
+    getEffectiveAttackBonus(action, bot, state) +
+    getEstimatedActionDamage(action) -
+    getEffectiveAC(target, state) * 0.15 -
+    getDistanceFeet(position, target.position) * 0.05
+  );
+}
+
+function getEstimatedActionDamage(action: ActionDefinition): number {
+  return estimateDiceAverage(action.damage?.dice ?? action.effects.find((effect) => effect.damage)?.damage?.dice ?? '');
+}
+
+function estimateDiceAverage(dice: string): number {
+  const match = dice.match(/(\d+)d(\d+)(?:\s*([+-])\s*(\d+))?/i);
+  if (!match) {
+    return 0;
+  }
+  const count = Number(match[1]);
+  const sides = Number(match[2]);
+  const sign = match[3] === '-' ? -1 : 1;
+  const modifier = match[4] ? Number(match[4]) * sign : 0;
+  return count * (sides + 1) / 2 + modifier;
+}
+
+function getLivingEnemies(state: CombatState, creature: Creature): Creature[] {
+  return state.creatures.filter((candidate) => candidate.id !== creature.id && candidate.team !== creature.team && !isDefeated(candidate));
+}
+
+function getLivingAllies(state: CombatState, creature: Creature): Creature[] {
+  return state.creatures.filter((candidate) => candidate.team === creature.team && !isDefeated(candidate));
+}
+
+function getMinimumDistanceToCreatures(position: GridPosition, creatures: Creature[]): number {
+  return creatures.length > 0 ? Math.min(...creatures.map((creature) => getDistanceFeet(position, creature.position))) : Number.POSITIVE_INFINITY;
+}
+
+function getBotShapeOrigin(action: ActionDefinition, sourcePosition: GridPosition, targetPosition: GridPosition): GridPosition {
+  if (action.shape?.type === 'line' || action.shape?.type === 'cone') {
+    return sourcePosition;
+  }
+
+  return targetPosition;
+}
+
+function getBotShapeDirection(sourcePosition: GridPosition, targetPosition: GridPosition): CardinalDirection {
+  const dx = targetPosition.x - sourcePosition.x;
+  const dy = targetPosition.y - sourcePosition.y;
+  if (Math.abs(dx) >= Math.abs(dy)) {
+    return dx >= 0 ? 'east' : 'west';
+  }
+  return dy >= 0 ? 'south' : 'north';
+}
+
+function replaceBotPosition(state: CombatState, botId: string, position: GridPosition): Creature[] {
+  return state.creatures.map((creature) => (creature.id === botId ? { ...creature, position } : creature));
+}
+
+function isMeleeAttackActionDefinition(action: ActionDefinition): boolean {
+  const rulesKind = getRulesKind(action);
+  return rulesKind === 'meleeAttack' || action.tags.includes('melee');
+}
+
+function isRangedAttackActionDefinition(action: ActionDefinition): boolean {
+  const rulesKind = getRulesKind(action);
+  return rulesKind === 'rangedAttack' || action.tags.includes('ranged');
+}
+
+function formatBotProfile(profile: BotProfile): string {
+  switch (profile) {
+    case 'aggressiveMelee':
+      return 'Aggressive Melee';
+    case 'rangedAttacker':
+      return 'Ranged Attacker';
+    case 'cowardly':
+      return 'Cowardly';
+    case 'support':
+      return 'Support';
+    case 'passive':
+      return 'Passive/Test Dummy';
+  }
+}
+
 export function getTargetsInShape(
   state: CombatState,
   actionId: string,
@@ -1965,11 +2391,19 @@ function normalizeState(state: CombatState): CombatState {
 function normalizeCreatures(creatures: Creature[], grid?: CombatState['grid']): Creature[] {
   return creatures.map((creature) => ({
     ...creature,
+    controlMode: creature.controlMode === 'bot' ? 'bot' : 'manual',
+    botProfile: normalizeBotProfile(creature.botProfile),
     position: grid ? clampGridPosition(getTilePosition(creature.position, grid), grid) : { ...creature.position, z: creature.position.z ?? 0 },
     conditions: normalizeConditions(creature.conditions),
     skillBonuses: creature.skillBonuses ?? {},
     actions: creature.actions.map(normalizeActionDefinition)
   }));
+}
+
+function normalizeBotProfile(profile: Creature['botProfile']): BotProfile {
+  return profile === 'aggressiveMelee' || profile === 'rangedAttacker' || profile === 'cowardly' || profile === 'support' || profile === 'passive'
+    ? profile
+    : 'passive';
 }
 
 function normalizeRulesSettings(settings: CombatRulesSettings | undefined): CombatRulesSettings {

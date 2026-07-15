@@ -1,5 +1,9 @@
 export type Team = 'players' | 'enemies' | 'neutral';
 
+export type CreatureControlMode = 'manual' | 'bot';
+
+export type BotProfile = 'aggressiveMelee' | 'rangedAttacker' | 'cowardly' | 'support' | 'passive';
+
 export type Ability = 'str' | 'dex' | 'con' | 'int' | 'wis' | 'cha';
 
 export type ConditionId = string;
@@ -418,6 +422,8 @@ export interface Creature {
   id: string;
   name: string;
   team: Team;
+  controlMode?: CreatureControlMode;
+  botProfile?: BotProfile;
   hp: number;
   maxHp: number;
   ac: number;

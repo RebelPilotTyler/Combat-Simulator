@@ -3,6 +3,7 @@ import {
   useMemo,
   useRef,
   useState,
+  useCallback,
   type CSSProperties,
   type Dispatch,
   type MouseEvent,
@@ -42,6 +43,10 @@ import {
   removeCondition,
   resolvePendingReaction,
   rollInitiative,
+  canRunBotTurn,
+  runBotTurnActionStep,
+  runBotTurnEndStep,
+  runBotTurnMovementStep,
   setFlankingEnabled,
   type BasicActionName,
   type HelpMode,
@@ -80,8 +85,9 @@ import {
   sameTilePosition
 } from './engine/shapes';
 import { getDistanceFeet, getLineSquares, hasLineOfSight } from './engine/targeting';
-import type { Ability, ActionDefinition, CardinalDirection, CombatState, Creature, CustomConditionTemplate, GridPosition, ShapeDefinition, TurnState, VisualEvent } from './engine/types';
+import type { Ability, ActionDefinition, BotProfile, CardinalDirection, CombatState, Creature, CustomConditionTemplate, GridPosition, ShapeDefinition, TurnState, VisualEvent } from './engine/types';
 import { getVisibleGridCells, getVisibleGridWindow, type GridWindow } from './ui/gridWindow';
+import { canStartBotTurn, shouldAutoRunBotTurn, shouldRunBotTurnShortcut, shouldStopAutoRunAfterBotAction } from './ui/botTurnControls';
 import { getActionForNumberHotkey, getNumberHotkeyIndex, isTypingShortcutTarget, moveGridCursor } from './ui/keyboard';
 
 const directions: CardinalDirection[] = ['north', 'east', 'south', 'west'];
@@ -98,6 +104,13 @@ type UiDensity = 'comfortable' | 'compact';
 type VisualEffectsMode = 'full' | 'reduced' | 'off';
 type VisualEffectsTextSize = 'small' | 'normal' | 'large';
 type VisualEffectsIntensity = 'low' | 'normal' | 'high' | 'epic';
+type BotTurnPace = 'quick' | 'normal' | 'relaxed';
+
+interface BotTurnSequenceState {
+  running: boolean;
+  step: string;
+  auto: boolean;
+}
 
 interface UiSettings {
   theme: UiTheme;
@@ -111,6 +124,8 @@ interface UiSettings {
   visualEffectsMode: VisualEffectsMode;
   visualEffectsTextSize: VisualEffectsTextSize;
   visualEffectsIntensity: VisualEffectsIntensity;
+  botAutoRunEnabled: boolean;
+  botTurnPace: BotTurnPace;
   invertCameraOrbitX: boolean;
   invertCameraOrbitY: boolean;
   invertCameraPanX: boolean;
@@ -168,11 +183,15 @@ export function App() {
   const [debugOpen, setDebugOpen] = useState(false);
   const [toolsOpen, setToolsOpen] = useState(false);
   const [showHelp, setShowHelp] = useState(false);
+  const [botTurnSequence, setBotTurnSequence] = useState<BotTurnSequenceState>({ running: false, step: '', auto: false });
   const gridRef = useRef<HTMLDivElement>(null);
   const logRef = useRef<HTMLOListElement>(null);
   const targetPanelRef = useRef<HTMLDivElement>(null);
   const debugDetailsRef = useRef<HTMLDetailsElement>(null);
   const toolsDetailsRef = useRef<HTMLDetailsElement>(null);
+  const combatRef = useRef(combat);
+  const botTurnRunningRef = useRef(false);
+  const botTurnCancelRef = useRef(false);
   const hudDragRef = useRef<{
     panel: HudPanel;
     pointerId: number;
@@ -304,6 +323,126 @@ export function App() {
   }, [customConditionLibrary]);
 
   useEffect(() => {
+    combatRef.current = combat;
+  }, [combat]);
+
+  useEffect(() => {
+    return () => {
+      botTurnCancelRef.current = true;
+    };
+  }, []);
+
+  const waitForBotTurnStep = useCallback((delayMs: number) => new Promise<void>((resolve) => {
+    window.setTimeout(resolve, delayMs);
+  }), []);
+
+  const applyBotTurnPhase = useCallback((update: (current: CombatState) => CombatState): boolean => {
+    const current = combatRef.current;
+    if (!canRunBotTurn(current)) {
+      return false;
+    }
+
+    const next = update(current);
+    combatRef.current = next;
+    setCombat(next);
+    return true;
+  }, []);
+
+  const stopBotTurnSequence = useCallback((disableAutoRun = false) => {
+    botTurnCancelRef.current = true;
+    if (disableAutoRun) {
+      setUiSettings((current) => ({ ...current, botAutoRunEnabled: false }));
+    }
+    setBotTurnSequence((current) => (current.running ? { ...current, step: 'Stopping bot turn...' } : current));
+  }, []);
+
+  const runBotTurnSequence = useCallback(async (auto = false) => {
+    const startingCombat = combatRef.current;
+    const startingCreature = startingCombat.activeCreatureId ? findCreature(startingCombat, startingCombat.activeCreatureId) : undefined;
+    if (!canStartBotTurn({ activeView, activeCreatureControlMode: startingCreature?.controlMode, isRunning: botTurnRunningRef.current })) {
+      return;
+    }
+
+    const pace = getBotTurnPaceConfig(uiSettings.botTurnPace);
+    let shouldDisableAutoRun = false;
+    botTurnRunningRef.current = true;
+    botTurnCancelRef.current = false;
+    setBotTurnSequence({ running: true, step: auto ? 'Bot turn starting...' : 'Bot is thinking...', auto });
+
+    try {
+      if (auto) {
+        await waitForBotTurnStep(pace.autoStartDelayMs);
+      }
+      if (botTurnCancelRef.current) {
+        return;
+      }
+
+      setBotTurnSequence({ running: true, step: 'Bot is choosing a target...', auto });
+      await waitForBotTurnStep(pace.stepDelayMs);
+      if (botTurnCancelRef.current) {
+        return;
+      }
+
+      setBotTurnSequence({ running: true, step: 'Bot is moving...', auto });
+      if (!applyBotTurnPhase(runBotTurnMovementStep)) {
+        return;
+      }
+      await waitForBotTurnStep(pace.stepDelayMs);
+      if (botTurnCancelRef.current) {
+        return;
+      }
+
+      setBotTurnSequence({ running: true, step: 'Bot is taking an action...', auto });
+      const beforeActionLogLength = combatRef.current.log.length;
+      if (!applyBotTurnPhase((current) => runBotTurnActionStep(current))) {
+        return;
+      }
+      const newActionLogEntries = combatRef.current.log.slice(0, Math.max(0, combatRef.current.log.length - beforeActionLogLength));
+      shouldDisableAutoRun = auto && shouldStopAutoRunAfterBotAction(newActionLogEntries.map((entry) => entry.message));
+      await waitForBotTurnStep(pace.effectDelayMs);
+      if (botTurnCancelRef.current) {
+        return;
+      }
+
+      setBotTurnSequence({ running: true, step: 'Bot is ending its turn...', auto });
+      applyBotTurnPhase(runBotTurnEndStep);
+      await waitForBotTurnStep(pace.finishDelayMs);
+      if (shouldDisableAutoRun) {
+        setUiSettings((current) => ({ ...current, botAutoRunEnabled: false }));
+        setBotTurnSequence({ running: true, step: 'Auto-run stopped: no valid bot action.', auto });
+        await waitForBotTurnStep(pace.finishDelayMs);
+      }
+    } finally {
+      botTurnRunningRef.current = false;
+      botTurnCancelRef.current = false;
+      setBotTurnSequence({ running: false, step: '', auto: false });
+    }
+  }, [activeView, applyBotTurnPhase, uiSettings.botTurnPace, waitForBotTurnStep]);
+
+  useEffect(() => {
+    if (!shouldAutoRunBotTurn({
+      activeView,
+      activeCreatureControlMode: activeCreature?.controlMode,
+      autoRunEnabled: uiSettings.botAutoRunEnabled,
+      isRunning: botTurnSequence.running
+    })) {
+      return;
+    }
+
+    void runBotTurnSequence(true);
+  }, [
+    activeCreature?.controlMode,
+    activeCreature?.id,
+    activeView,
+    botTurnSequence.running,
+    combat.round,
+    combat.turnIndex,
+    runBotTurnSequence,
+    uiSettings.botAutoRunEnabled,
+    uiSettings.botTurnPace
+  ]);
+
+  useEffect(() => {
     if (activeView !== 'combat') {
       return;
     }
@@ -329,6 +468,17 @@ export function App() {
 
       const key = event.key.toLowerCase();
       const numberIndex = getNumberHotkeyIndex(event.key);
+
+      if (shouldRunBotTurnShortcut(event.key, {
+        activeView,
+        activeCreatureControlMode: activeCreature?.controlMode,
+        shortcutsEnabled: uiSettings.shortcutsEnabled,
+        isRunning: botTurnSequence.running
+      })) {
+        event.preventDefault();
+        void runBotTurnSequence(false);
+        return;
+      }
 
       if (numberIndex !== undefined) {
         const action = getActionForNumberHotkey(activeActions, event.key, event);
@@ -394,6 +544,8 @@ export function App() {
     selectionMode,
     showHelp,
     multiattackTargets,
+    botTurnSequence.running,
+    runBotTurnSequence,
     uiSettings.shortcutsEnabled,
     uiSettings.showMapTools
   ]);
@@ -1165,11 +1317,24 @@ export function App() {
                 <span>Reaction used: {combat.turnState.reactionUsed ? 'yes' : 'no'}</span>
               </div>
               <div className="mode-actions">
+                {activeCreature.controlMode === 'bot' && (
+                  <button className="selected-action" disabled={botTurnSequence.running} onClick={() => void runBotTurnSequence(false)}>
+                    Run Bot Turn (B)
+                  </button>
+                )}
                 <button className={selectionMode === 'move' ? 'selected-action' : ''} onClick={() => resetTargeting()}>
                   Move
                 </button>
                 <button onClick={cancelSelection}>Cancel Selection</button>
               </div>
+              {botTurnSequence.running && (
+                <div className="bot-turn-status" role="status" aria-live="polite">
+                  <span>{botTurnSequence.step}</span>
+                  <button onClick={() => stopBotTurnSequence(botTurnSequence.auto)}>
+                    {botTurnSequence.auto ? 'Stop Auto' : 'Cancel'}
+                  </button>
+                </div>
+              )}
               {uiSettings.showShortcutHints && <p className="keyboard-hint">{keyboardHint}</p>}
 
               <h3>Basic Actions</h3>
@@ -2480,6 +2645,9 @@ function CreatureSummary({ creature, state }: { creature: Creature; state: Comba
     <div className="creature-summary">
       <strong>{creature.name}</strong>
       <span>{creature.team}</span>
+      <span>
+        Control: {creature.controlMode === 'bot' ? `Bot (${formatBotProfileLabel(creature.botProfile ?? 'passive')})` : 'Manual'}
+      </span>
       <HpBar creature={creature} />
       <span>
         HP {creature.hp}/{creature.maxHp}
@@ -2709,6 +2877,8 @@ function KeyboardHelpOverlay({ onClose }: { onClose: () => void }) {
           <p>End turn / next turn</p>
           <span>R</span>
           <p>Roll initiative</p>
+          <span>B</span>
+          <p>Run active bot turn</p>
           <span>M</span>
           <p>Move mode</p>
           <span>Esc</span>
@@ -2862,6 +3032,30 @@ function SettingsDialog({
         </section>
 
         <section className="settings-section">
+          <h3>Bot Turns</h3>
+          <div className="settings-grid">
+            <label>
+              Bot Turn Pace
+              <select value={settings.botTurnPace} onChange={(event) => onChange({ botTurnPace: event.target.value as BotTurnPace })}>
+                <option value="quick">Quick</option>
+                <option value="normal">Normal</option>
+                <option value="relaxed">Relaxed</option>
+              </select>
+            </label>
+          </div>
+          <div className="settings-toggles">
+            <label>
+              <input
+                type="checkbox"
+                checked={settings.botAutoRunEnabled}
+                onChange={(event) => onChange({ botAutoRunEnabled: event.target.checked })}
+              />
+              Automatically run bot turns
+            </label>
+          </div>
+        </section>
+
+        <section className="settings-section">
           <h3>Combat Rules</h3>
           <div className="settings-toggles">
             <label>
@@ -2937,6 +3131,8 @@ function ShortcutReference() {
       <p>End turn</p>
       <span>R</span>
       <p>Roll initiative</p>
+      <span>B</span>
+      <p>Run active bot turn</p>
       <span>M</span>
       <p>Move mode</p>
       <span>Esc</span>
@@ -3154,6 +3350,21 @@ function formatMapToolLabel(tool: MapTool): string {
     return 'Line of Sight';
   }
   return tool.charAt(0).toUpperCase() + tool.slice(1);
+}
+
+function formatBotProfileLabel(profile: BotProfile): string {
+  switch (profile) {
+    case 'aggressiveMelee':
+      return 'Aggressive Melee';
+    case 'rangedAttacker':
+      return 'Ranged Attacker';
+    case 'cowardly':
+      return 'Cowardly';
+    case 'support':
+      return 'Support';
+    case 'passive':
+      return 'Passive/Test Dummy';
+  }
 }
 
 function getTargetOptions(
@@ -3377,6 +3588,18 @@ function getVisualIntensityConfig(intensity: VisualEffectsIntensity): VisualInte
   };
 }
 
+function getBotTurnPaceConfig(pace: BotTurnPace): { autoStartDelayMs: number; stepDelayMs: number; effectDelayMs: number; finishDelayMs: number } {
+  if (pace === 'quick') {
+    return { autoStartDelayMs: 220, stepDelayMs: 180, effectDelayMs: 260, finishDelayMs: 120 };
+  }
+
+  if (pace === 'relaxed') {
+    return { autoStartDelayMs: 600, stepDelayMs: 520, effectDelayMs: 700, finishDelayMs: 220 };
+  }
+
+  return { autoStartDelayMs: 360, stepDelayMs: 320, effectDelayMs: 480, finishDelayMs: 160 };
+}
+
 function getSafeVisualColor(color: string | undefined): string {
   if (!color) {
     return '#7ca7e4';
@@ -3474,7 +3697,9 @@ function loadUiSettings(): UiSettings {
       visualEffectsIntensity:
         parsed.visualEffectsIntensity === 'low' || parsed.visualEffectsIntensity === 'high' || parsed.visualEffectsIntensity === 'epic' || parsed.visualEffectsIntensity === 'normal'
           ? parsed.visualEffectsIntensity
-          : 'normal'
+          : 'normal',
+      botTurnPace: parsed.botTurnPace === 'quick' || parsed.botTurnPace === 'relaxed' || parsed.botTurnPace === 'normal' ? parsed.botTurnPace : 'normal',
+      botAutoRunEnabled: Boolean(parsed.botAutoRunEnabled)
     };
   } catch {
     return defaultUiSettings();
@@ -3502,6 +3727,8 @@ function defaultUiSettings(): UiSettings {
     visualEffectsMode: 'full',
     visualEffectsTextSize: 'normal',
     visualEffectsIntensity: 'normal',
+    botAutoRunEnabled: false,
+    botTurnPace: 'normal',
     invertCameraOrbitX: false,
     invertCameraOrbitY: false,
     invertCameraPanX: false,

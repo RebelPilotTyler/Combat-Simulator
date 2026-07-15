@@ -3,7 +3,7 @@ import { DEFAULT_RULES_SETTINGS } from './combat';
 import { getEffectiveMovementSpeed } from './features';
 import { clampGridPosition, normalizeGridDefinition } from './grid';
 import { getTilePosition } from './shapes';
-import type { ActionDefinition, CombatState, Creature, Resource, ResourceReset, TurnResourceState } from './types';
+import type { ActionDefinition, BotProfile, CombatState, Creature, Resource, ResourceReset, TurnResourceState } from './types';
 
 const RESOURCE_RESET_OPTIONS: ResourceReset[] = ['turnStart', 'shortRest', 'longRest', 'dawn', 'manual', 'never'];
 
@@ -162,6 +162,8 @@ function validateCreatureShape(value: unknown): string | undefined {
 function normalizeImportedCreature(creature: Creature, grid: CombatState['grid']): Creature {
   return {
     ...creature,
+    controlMode: creature.controlMode === 'bot' ? 'bot' : 'manual',
+    botProfile: normalizeBotProfile(creature.botProfile),
     position: clampGridPosition(getTilePosition(creature.position, grid), grid),
     conditions: normalizeConditions(creature.conditions),
     actions: creature.actions.map(normalizeImportedAction),
@@ -177,6 +179,12 @@ function normalizeImportedCreature(creature: Creature, grid: CombatState['grid']
         }
       : {})
   };
+}
+
+function normalizeBotProfile(profile: Creature['botProfile']): BotProfile {
+  return profile === 'aggressiveMelee' || profile === 'rangedAttacker' || profile === 'cowardly' || profile === 'support' || profile === 'passive'
+    ? profile
+    : 'passive';
 }
 
 function normalizeImportedAction(action: ActionDefinition): ActionDefinition {
