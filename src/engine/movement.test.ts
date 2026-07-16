@@ -27,14 +27,29 @@ describe('3D movement', () => {
     const state = createCombatState([creature], 3, 2, [{ x: 1, y: 0 }]);
     const option = getMovementOption(state, 'climber', { x: 2, y: 0 });
 
-    expect(option?.costFeet).toBe(20);
+    expect(option?.costFeet).toBe(10);
     expect(option?.path.map((position) => `${position.x},${position.y},${position.z ?? 0}`)).toEqual([
       '0,0,0',
-      '0,1,0',
       '1,1,0',
-      '2,1,0',
       '2,0,0'
     ]);
+  });
+
+  it('moves one diagonal square for 5 feet', () => {
+    const state = createCombatState([creature], 3, 3);
+    const option = getMovementOption(state, 'climber', { x: 1, y: 1 });
+
+    expect(option?.costFeet).toBe(5);
+    expect(option?.path).toEqual([
+      { x: 0, y: 0, z: 0 },
+      { x: 1, y: 1, z: 0 }
+    ]);
+  });
+
+  it('does not squeeze diagonally through two impassable side squares', () => {
+    const state = createCombatState([creature], 2, 2, [{ x: 1, y: 0 }, { x: 0, y: 1 }]);
+
+    expect(getMovementOption(state, 'climber', { x: 1, y: 1 })).toBeUndefined();
   });
 
   it('does not return destinations when no legal path exists', () => {
@@ -53,7 +68,7 @@ describe('3D movement', () => {
     const moved = moveActiveCreature(state, option.path);
 
     expect(moved.creatures[0].position).toEqual({ x: 2, y: 0, z: 0 });
-    expect(moved.turnState.remainingMovement).toBe(10);
+    expect(moved.turnState.remainingMovement).toBe(20);
   });
 
   it('returns alternate legal paths to the same destination', () => {
@@ -61,8 +76,9 @@ describe('3D movement', () => {
     const options = getMovementOptionsForDestination(state, 'climber', { x: 3, y: 1 });
 
     expect(options.length).toBeGreaterThan(1);
-    expect(options[0].path.map((position) => `${position.x},${position.y}`)).toEqual(['0,0', '1,0', '2,0', '3,0', '3,1']);
-    expect(options.some((option) => option.path.map((position) => `${position.x},${position.y}`).join('|') === '0,0|0,1|1,1|2,1|3,1')).toBe(true);
+    expect(options[0].costFeet).toBe(15);
+    expect(options.every((option) => option.path[0].x === 0 && option.path[0].y === 0)).toBe(true);
+    expect(options.every((option) => option.position.x === 3 && option.position.y === 1)).toBe(true);
   });
 
   it('lets walkers step up 5 feet but not climb higher vertical terrain', () => {

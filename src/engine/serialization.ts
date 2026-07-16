@@ -1,8 +1,10 @@
 import { normalizeConditions } from './conditions';
 import { DEFAULT_RULES_SETTINGS } from './combat';
+import { normalizeDamageTypes } from './damage';
 import { getEffectiveMovementSpeed } from './features';
 import { clampGridPosition, normalizeGridDefinition } from './grid';
 import { getTilePosition } from './shapes';
+import { normalizeTeamDefinitions, normalizeTeamId } from './teams';
 import type { ActionDefinition, BotProfile, BotResourceStrategy, BotTargetPriority, CombatState, Creature, Resource, ResourceReset, TurnResourceState } from './types';
 
 const RESOURCE_RESET_OPTIONS: ResourceReset[] = ['turnStart', 'shortRest', 'longRest', 'dawn', 'manual', 'never'];
@@ -92,6 +94,7 @@ export function normalizeImportedCombatState(state: CombatState): CombatState {
   return {
     ...state,
     creatures,
+    teams: normalizeTeamDefinitions(state.teams, creatures),
     grid,
     initiative: state.initiative ?? [],
     round: state.round ?? 0,
@@ -201,10 +204,14 @@ function validateCreatureShape(value: unknown): string | undefined {
 function normalizeImportedCreature(creature: Creature, grid: CombatState['grid']): Creature {
   return {
     ...creature,
+    team: normalizeTeamId(creature.team),
     controlMode: creature.controlMode === 'bot' ? 'bot' : 'manual',
     botProfile: normalizeBotProfile(creature.botProfile),
     botTargetPriority: normalizeBotTargetPriority(creature.botTargetPriority),
     botResourceStrategy: normalizeBotResourceStrategy(creature.botResourceStrategy),
+    ...(creature.damageResistances ? { damageResistances: normalizeDamageTypes(creature.damageResistances) } : {}),
+    ...(creature.damageImmunities ? { damageImmunities: normalizeDamageTypes(creature.damageImmunities) } : {}),
+    ...(creature.damageVulnerabilities ? { damageVulnerabilities: normalizeDamageTypes(creature.damageVulnerabilities) } : {}),
     position: clampGridPosition(getTilePosition(creature.position, grid), grid),
     conditions: normalizeConditions(creature.conditions),
     actions: creature.actions.map(normalizeImportedAction),

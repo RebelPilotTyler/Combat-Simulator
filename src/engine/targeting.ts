@@ -1,6 +1,7 @@
-import type { ActionDefinition, CombatState, Creature, GridPosition } from './types';
+import type { ActionDefinition, ActionTargetMode, CombatState, Creature, GridPosition } from './types';
 import { canCreatureTakeReaction, hasCondition } from './conditions';
 import { getElevation, getTileHeight, isBlocked, samePosition } from './shapes';
+import { areHostile } from './teams';
 
 export function getDistanceInSquares(a: GridPosition, b: GridPosition): number {
   return Math.max(Math.abs(a.x - b.x), Math.abs(a.y - b.y), Math.abs(getElevation(a) - getElevation(b)));
@@ -11,6 +12,22 @@ export function getDistanceFeet(a: GridPosition, b: GridPosition): number {
 }
 
 export const getDistanceInFeet = getDistanceFeet;
+
+export function getActionTargetMode(action: ActionDefinition): ActionTargetMode {
+  if (action.targetMode) {
+    return action.targetMode;
+  }
+
+  if (action.shape?.type === 'line' || action.shape?.type === 'cone') {
+    return 'self';
+  }
+
+  if ((action.type ?? action.kind) === 'savingThrowEffect' && action.shape?.type === 'radius') {
+    return 'point';
+  }
+
+  return 'creature';
+}
 
 export function isInActionRange(action: ActionDefinition, attacker: GridPosition, target: GridPosition): boolean {
   const distance = getDistanceFeet(attacker, target);
@@ -54,7 +71,7 @@ export function getHostileCreaturesWithinReach(state: CombatState, creature: Cre
   return state.creatures.filter(
     (candidate) =>
       candidate.id !== creature.id &&
-      candidate.team !== creature.team &&
+      areHostile(candidate, creature, state) &&
       !hasCondition(candidate, 'incapacitated') &&
       !hasCondition(candidate, 'stunned') &&
       !hasCondition(candidate, 'unconscious') &&
@@ -83,7 +100,7 @@ export function getOpportunityAttackCandidates(
   return state.creatures.filter(
     (enemy) =>
       enemy.id !== mover.id &&
-      enemy.team !== mover.team &&
+      areHostile(enemy, mover, state) &&
       enemy.hp > 0 &&
       !hasCondition(enemy, 'defeated') &&
       !hasCondition(enemy, 'incapacitated') &&

@@ -80,10 +80,12 @@ function buildRawShape(
     for (let y = Math.max(0, origin.y - radius); y <= Math.min(grid.height - 1, origin.y + radius); y += 1) {
       for (let x = Math.max(0, origin.x - radius); x <= Math.min(grid.width - 1, origin.x + radius); x += 1) {
         const square = getTilePosition({ x, y }, grid);
-        const dx = square.x - origin.x;
-        const dy = square.y - origin.y;
-        const dz = getElevation(square) - getElevation(origin);
-        if (dx * dx + dy * dy + dz * dz <= radius * radius) {
+        const distance = Math.max(
+          Math.abs(square.x - origin.x),
+          Math.abs(square.y - origin.y),
+          Math.abs(getElevation(square) - getElevation(origin))
+        );
+        if (distance <= radius) {
           squares.push(square);
         }
       }

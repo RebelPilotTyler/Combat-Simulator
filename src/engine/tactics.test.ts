@@ -154,6 +154,17 @@ describe('tactics helpers', () => {
     expect(getTargetableCreaturesForAction(state, attacker, bow, { requireLineOfSight: false }).map((target) => target.id)).toEqual(['c']);
   });
 
+  it('targets other numbered teams while excluding allies and neutral creatures', () => {
+    const state = createCombatState([
+      creature({ id: 'a', name: 'Alpha', team: 'team-3', position: { x: 0, y: 0 } }),
+      creature({ id: 'hostile', name: 'Hostile', team: 'team-1', position: { x: 2, y: 0 } }),
+      creature({ id: 'ally', name: 'Ally', team: 'team-3', position: { x: 1, y: 0 } }),
+      creature({ id: 'neutral', name: 'Neutral', team: 'neutral', position: { x: 3, y: 0 } })
+    ], 5, 2);
+
+    expect(getTargetableCreaturesForAction(state, state.creatures[0], bow).map((target) => target.id)).toEqual(['hostile']);
+  });
+
   it('returns targetable grid positions for ranged and spell origins', () => {
     const state = createCombatState([creature({ id: 'a', name: 'Alpha', position: { x: 0, y: 0 } })], 4, 1);
     const attacker = state.creatures[0];

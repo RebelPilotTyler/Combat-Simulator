@@ -1,14 +1,18 @@
 import { rollDamageDice, type RandomSource } from './dice';
 import {
+  applyBeforeDamageModifiers,
   applyConditionToCreature,
   createAppliedCondition,
   getConditionDefinition,
   hasCondition,
   mergeRollModifiers,
-  removeConditionFromCreature
+  removeConditionFromCreature,
+  runAfterDamageHooks
 } from './conditions';
+import { applyDamageTraits, damageTypeMatches, getActionDamageType, getNativeDamageTraits } from './damage';
 import { getEnabledFeatures, getResource } from './features';
 import { getDistanceFeet } from './targeting';
+import { areAllies, areHostile } from './teams';
 import { enqueueVisualEvent } from './visualEvents';
 import type {
   Ability,
@@ -45,6 +49,7 @@ interface RuleEventContext {
   critical?: boolean;
   success?: boolean;
   random?: RandomSource;
+  damageType?: string;
 }
 
 export interface AttackRollRuleContext {
@@ -64,6 +69,7 @@ export interface DamageRuleContext {
   target: Creature;
   action: ActionDefinition;
   amount: number;
+  damageType?: string;
   random: RandomSource;
 }
 
@@ -111,6 +117,7 @@ export function applyBeforeDamageRules(state: CombatState, context: DamageRuleCo
     actionTarget: context.target,
     damageTarget: context.target,
     action: context.action,
+    damageType: context.damageType ?? getActionDamageType(context.action),
     random: context.random
   }, context.amount);
 }
@@ -121,7 +128,8 @@ export function runAfterDamageRules(state: CombatState, context: Omit<DamageRule
     source: context.source,
     actionTarget: context.target,
     damageTarget: context.target,
-    action: context.action
+    action: context.action,
+    damageType: context.damageType ?? getActionDamageType(context.action)
   });
 }
 
@@ -227,6 +235,11 @@ function runRollModifierRules(state: CombatState, event: RuleEventContext): Roll
 
 function runDamageRules(state: CombatState, event: RuleEventContext, baseAmount: number): number {
   let amount = baseAmount;
+  const damageType = event.damageType ?? (event.action ? getActionDamageType(event.action) : undefined);
+  const nativeTraits = event.damageTarget
+    ? getNativeDamageTraits(event.damageTarget, damageType)
+    : { resistant: false, immune: false, vulnerable: false };
+  const traits = { ...nativeTraits };
 
   getTriggeredRules(state, event).forEach((entry) => {
     const selected = resolveTargetsForRule(state, entry, event);
@@ -251,6 +264,15 @@ function runDamageRules(state: CombatState, event: RuleEventContext, baseAmount:
       } else if (effect.type === 'setDamageMinimum' && sourceSelected) {
         amount = Math.max(amount, effect.amount);
         used = true;
+      } else if (effect.type === 'grantDamageResistance' && targetSelected && damageTypeMatches(effect.damageType, damageType)) {
+        traits.resistant = true;
+        used = true;
+      } else if (effect.type === 'grantDamageImmunity' && targetSelected && damageTypeMatches(effect.damageType, damageType)) {
+        traits.immune = true;
+        used = true;
+      } else if (effect.type === 'grantDamageVulnerability' && targetSelected && damageTypeMatches(effect.damageType, damageType)) {
+        traits.vulnerable = true;
+        used = true;
       }
     });
 
@@ -259,7 +281,7 @@ function runDamageRules(state: CombatState, event: RuleEventContext, baseAmount:
     }
   });
 
-  return amount;
+  return applyDamageTraits(amount, traits);
 }
 
 function runRules(state: CombatState, event: RuleEventContext): void {
@@ -336,16 +358,28 @@ function applyRuleEffect(
   }
 
   if (effect.type === 'dealDamage') {
-    let changed = false;
+    let affected = false;
     selected.forEach((creature) => {
       if (creature.hp <= 0 || hasCondition(creature, 'defeated')) {
         return;
       }
       const damage = rollDamageDice(effect.dice, event.random ?? Math.random);
+      const source = event.source ?? entry.owner;
+      const damageAction = createRuleDamageAction(entry, effect);
+      let appliedAmount = Math.max(0, applyBeforeDamageModifiers(state, source, creature, damageAction, damage.total));
+      appliedAmount = Math.max(0, runDamageRules(state, {
+        trigger: 'beforeDamage',
+        source,
+        actionTarget: creature,
+        damageTarget: creature,
+        action: damageAction,
+        damageType: effect.damageType,
+        random: event.random
+      }, appliedAmount));
       const before = creature.hp;
-      creature.hp = Math.max(0, creature.hp - damage.total);
+      creature.hp = Math.max(0, creature.hp - appliedAmount);
+      affected = true;
       if (creature.hp !== before) {
-        changed = true;
         enqueueVisualEvent(state, {
           kind: 'damageDealt',
           creatureId: creature.id,
@@ -355,9 +389,15 @@ function applyRuleEffect(
         });
         logRuleMessage(
           state,
-          `${creature.name} takes ${damage.total} ${effect.damageType ?? 'damage'} from ${effect.note ?? entry.rule.name ?? entry.label}.`
+          `${creature.name} takes ${appliedAmount} ${effect.damageType ?? 'damage'} from ${effect.note ?? entry.rule.name ?? entry.label}.`
+        );
+      } else {
+        logRuleMessage(
+          state,
+          `${creature.name} takes 0 ${effect.damageType ?? 'damage'} from ${effect.note ?? entry.rule.name ?? entry.label}.`
         );
       }
+      runAfterDamageHooks(state, source, creature, damageAction, appliedAmount);
       if (creature.hp === 0 && !hasCondition(creature, 'defeated')) {
         applyConditionToCreature(creature, createAppliedCondition('defeated'));
         logRuleMessage(state, `${creature.name} is defeated.`);
@@ -369,7 +409,7 @@ function applyRuleEffect(
         });
       }
     });
-    return changed;
+    return affected;
   }
 
   if (effect.type === 'spendResource' || effect.type === 'restoreResource') {
@@ -412,6 +452,24 @@ function applyRuleEffect(
   }
 
   return false;
+}
+
+function createRuleDamageAction(
+  entry: RuleSource,
+  effect: Extract<RuleEffectOperation, { type: 'dealDamage' }>
+): ActionDefinition {
+  return {
+    id: `${entry.rule.id}-damage`,
+    name: effect.note ?? entry.rule.name ?? entry.label,
+    kind: 'custom',
+    actionCost: 'free',
+    targetMode: 'creature',
+    tags: ['condition', 'damage', ...(effect.damageType ? [effect.damageType.toLowerCase()] : [])],
+    range: 0,
+    damage: { dice: effect.dice, type: effect.damageType },
+    shape: { type: 'single' },
+    effects: []
+  };
 }
 
 function getTriggeredRules(state: CombatState, event: RuleEventContext): RuleSource[] {
@@ -490,7 +548,7 @@ function resolveSelectors(
           return false;
         }
         const inRange = getDistanceFeet(owner.position, creature.position) <= range;
-        const teamMatches = selector.type === 'alliesWithinRange' ? creature.team === owner.team : creature.team !== owner.team;
+        const teamMatches = selector.type === 'alliesWithinRange' ? areAllies(creature, owner, state) : areHostile(creature, owner, state);
         return inRange && teamMatches;
       });
     })

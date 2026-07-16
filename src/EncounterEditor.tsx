@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState, type ReactNode } from 'react';
 import { sampleCreatures } from './data/sampleEncounter';
 import { createCombatState } from './engine/combat';
 import { crCalculationTable, estimateCreatureCR, getCrXp } from './engine/cr';
+import { normalizeDamageTypes } from './engine/damage';
 import {
   EXAMPLE_CUSTOM_CONDITION_TEMPLATES,
   REFERENCE_CONDITION_TEMPLATES,
@@ -22,12 +23,21 @@ import {
 } from './engine/customConditions';
 import { MAX_GRID_SIZE, normalizeGridDefinition } from './engine/grid';
 import { parseCombatStateJson } from './engine/serialization';
+import { getActionTargetMode } from './engine/targeting';
+import {
+  createNextTeamDefinition,
+  getTeamColor,
+  getTeamLabel,
+  normalizeTeamDefinitions,
+  normalizeTeamId
+} from './engine/teams';
 import { getTileHeight, getTilePosition, positionKey, sameTilePosition } from './engine/shapes';
 import type {
   Ability,
   ActionCost,
   ActionDefinition,
   ActionKind,
+  ActionTargetMode,
   ActionTag,
   BotProfile,
   BotResourceStrategy,
@@ -54,7 +64,8 @@ import type {
   ShapeType,
   StatModifiers,
   StackBehavior,
-  Team
+  Team,
+  TeamDefinition
 } from './engine/types';
 
 const CREATURE_LIBRARY_KEY = 'dnd5e-combat.creatureLibrary.v1';
@@ -62,9 +73,9 @@ const ENCOUNTER_LIBRARY_KEY = 'dnd5e-combat.encounterLibrary.v1';
 const ACTION_LIBRARY_KEY = 'dnd5e-combat.actionLibrary.v1';
 const FEATURE_LIBRARY_KEY = 'dnd5e-combat.featureLibrary.v1';
 const RESOURCE_LIBRARY_KEY = 'dnd5e-combat.resourceLibrary.v1';
+const TEAM_LIBRARY_KEY = 'dnd5e-combat.teamLibrary.v1';
 
 const abilities: Ability[] = ['str', 'dex', 'con', 'int', 'wis', 'cha'];
-const teams: Team[] = ['players', 'enemies', 'neutral'];
 const controlModes: CreatureControlMode[] = ['manual', 'bot'];
 const botProfiles: BotProfile[] = ['aggressiveMelee', 'rangedAttacker', 'cowardly', 'support', 'passive'];
 const botTargetPriorities: BotTargetPriority[] = ['balanced', 'nearest', 'weakest', 'lowestHp', 'easiestToHit'];
@@ -99,6 +110,9 @@ const effectTypes: EffectOperationType[] = [
   'multiplyDamage',
   'reduceDamage',
   'setDamageMinimum',
+  'grantDamageResistance',
+  'grantDamageImmunity',
+  'grantDamageVulnerability',
   'multiplyMovementCost',
   'modifyArmorClass',
   'modifySpeed',
@@ -115,7 +129,7 @@ const effectTypes: EffectOperationType[] = [
 ];
 const stackBehaviors: StackBehavior[] = ['none', 'refresh', 'stackCount', 'stackIntensity'];
 type EditorMode = 'creatures' | 'encounters';
-type EncounterBalanceLeader = 'players' | 'enemies' | 'even' | 'unopposed';
+type EncounterBalanceLeader = Team | 'even' | 'unopposed';
 
 interface EncounterBalanceTeamSummary {
   team: Team;
@@ -139,6 +153,7 @@ export interface SavedEncounter {
   grid: GridDefinition;
   instances: SavedEncounterCreatureInstance[];
   creatures?: Creature[];
+  teams?: TeamDefinition[];
   updatedAt: string;
 }
 
@@ -161,6 +176,9 @@ export function EncounterEditor({
   const [actionLibrary, setActionLibrary] = useState<ActionDefinition[]>(loadActionLibrary);
   const [featureLibrary, setFeatureLibrary] = useState<FeatureDefinition[]>(loadFeatureLibrary);
   const [resourceLibrary, setResourceLibrary] = useState<Resource[]>(loadResourceLibrary);
+  const [teamDefinitions, setTeamDefinitions] = useState<TeamDefinition[]>(() =>
+    loadTeamDefinitions(currentCombat, creatureLibrary)
+  );
   const [customConditionLibrary, setCustomConditionLibrary] = useState<CustomConditionTemplate[]>(loadCustomConditionLibrary);
   const [selectedCreatureId, setSelectedCreatureId] = useState<string>(() => creatureLibrary[0]?.id ?? '');
   const [creatureDraft, setCreatureDraft] = useState<Creature>(() => cloneCreature(creatureLibrary[0] ?? createBlankCreature()));
@@ -226,7 +244,7 @@ export function EncounterEditor({
   );
   const builderCreatures = hydratedBuilder.creatures;
   const encounterTemplateWarnings = hydratedBuilder.warnings;
-  const encounterBalance = useMemo(() => estimateEncounterBalance(builderCreatures), [builderCreatures]);
+  const encounterBalance = useMemo(() => estimateEncounterBalance(builderCreatures, teamDefinitions), [builderCreatures, teamDefinitions]);
   const selectedInstance = builderCreatures.find((creature) => creature.id === selectedInstanceId);
   const selectedTemplate = creatureLibrary.find((creature) => creature.id === selectedTemplateId) ?? creatureLibrary[0];
   const filteredCreatureLibrary = useMemo(
@@ -263,6 +281,10 @@ export function EncounterEditor({
   useEffect(() => {
     saveJson(RESOURCE_LIBRARY_KEY, resourceLibrary);
   }, [resourceLibrary]);
+
+  useEffect(() => {
+    saveJson(TEAM_LIBRARY_KEY, teamDefinitions);
+  }, [teamDefinitions]);
 
   useEffect(() => {
     registerCustomConditionTemplates(customConditionLibrary);
@@ -327,6 +349,13 @@ export function EncounterEditor({
     setCreatureJsonMessage('Blank creature added to the library.');
   }
 
+  function addTeam() {
+    const team = createNextTeamDefinition(teamDefinitions);
+    setTeamDefinitions((current) => [...current, team]);
+    setCreatureDraft((current) => ({ ...current, team: team.id }));
+    setCreatureJsonMessage(`${team.name} added and selected.`);
+  }
+
   function duplicateSelectedCreature() {
     const source = creatureLibrary.find((creature) => creature.id === selectedCreatureId) ?? sampleCreatures[0];
     const duplicate = {
@@ -380,6 +409,7 @@ export function EncounterEditor({
 
     const creatures = imported.creatures.map(normalizeCreatureDraft);
     setCreatureLibrary((current) => mergeCreatures(current, creatures));
+    setTeamDefinitions((current) => normalizeTeamDefinitions(current, creatures));
     setSelectedCreatureId(creatures[0]?.id ?? selectedCreatureId);
     setCreatureJsonMessage(`${creatures.length} creature${creatures.length === 1 ? '' : 's'} imported.`);
   }
@@ -718,17 +748,19 @@ export function EncounterEditor({
     setBuilderInstances(currentCombat.creatures.map((creature) => createEncounterInstanceFromCreature(creature, creatureLibrary)));
     setSelectedInstanceId(currentCombat.creatures[0]?.id);
     setSelectedEncounterId(undefined);
+    setTeamDefinitions((current) => normalizeTeamDefinitions([...current, ...currentCombat.teams], currentCombat.creatures));
     setEncounterJsonMessage('Active combat copied into the builder.');
   }
 
   function loadSavedEncounter(encounter: SavedEncounter) {
+    const hydrated = hydrateEncounterCreatures(encounter.instances, creatureLibrary);
     setBuilderName(encounter.name);
     setBuilderGrid(cloneJson(encounter.grid));
     setBuilderInstances(encounter.instances.map(normalizeEncounterInstance));
     setSelectedInstanceId(encounter.instances[0]?.id);
     setSelectedEncounterId(encounter.id);
-    const warnings = hydrateEncounterCreatures(encounter.instances, creatureLibrary).warnings;
-    setEncounterJsonMessage(`${encounter.name} loaded into the builder.${warnings.length > 0 ? ` ${warnings.length} template warning(s).` : ''}`);
+    setTeamDefinitions((current) => normalizeTeamDefinitions([...current, ...(encounter.teams ?? [])], hydrated.creatures));
+    setEncounterJsonMessage(`${encounter.name} loaded into the builder.${hydrated.warnings.length > 0 ? ` ${hydrated.warnings.length} template warning(s).` : ''}`);
   }
 
   function saveBuilderEncounter() {
@@ -737,6 +769,7 @@ export function EncounterEditor({
       name: builderName.trim() || 'Untitled Encounter',
       grid: normalizeGrid(builderGrid),
       instances: builderInstances.map(normalizeEncounterInstance),
+      teams: teamDefinitions,
       updatedAt: new Date().toISOString()
     };
 
@@ -760,7 +793,7 @@ export function EncounterEditor({
   function loadBuilderIntoCombat() {
     const grid = normalizeGrid(builderGrid);
     const hydrated = hydrateEncounterCreatures(builderInstances, creatureLibrary);
-    const state = createCombatState(hydrated.creatures.map(normalizeCreatureDraft), grid.width, grid.height, grid.blocked, grid.heights ?? []);
+    const state = createCombatState(hydrated.creatures.map(normalizeCreatureDraft), grid.width, grid.height, grid.blocked, grid.heights ?? [], teamDefinitions);
     onLoadEncounter(state);
   }
 
@@ -770,6 +803,7 @@ export function EncounterEditor({
       name: builderName.trim() || 'Untitled Encounter',
       grid: normalizeGrid(builderGrid),
       instances: builderInstances.map(normalizeEncounterInstance),
+      teams: teamDefinitions,
       updatedAt: new Date().toISOString()
     };
     setEncounterJson(JSON.stringify(encounter, null, 2));
@@ -911,7 +945,7 @@ export function EncounterEditor({
                 onClick={() => setSelectedCreatureId(creature.id)}
               >
                 <strong>{creature.name}</strong>
-                <span>{creature.team}</span>
+                <span>{getTeamLabel({ teams: teamDefinitions }, creature.team)}</span>
                 <small>HP {creature.hp}/{creature.maxHp}</small>
                 <small>AC {creature.ac}</small>
                 <small>Speed {creature.speed}</small>
@@ -933,18 +967,49 @@ export function EncounterEditor({
                 </label>
                 <label>
                   Team
-                  <select value={creatureDraft.team} onChange={(event) => updateDraftCreature({ team: event.target.value as Team })}>
-                    {teams.map((team) => (
-                      <option key={team} value={team}>
-                        {team}
+                  <select value={creatureDraft.team} onChange={(event) => updateDraftCreature({ team: event.target.value })}>
+                    {teamDefinitions.map((team) => (
+                      <option key={team.id} value={team.id}>
+                        {team.name}
                       </option>
                     ))}
                   </select>
                 </label>
+                <button type="button" onClick={addTeam}>Add Team</button>
                 <NumberInput label="HP" value={creatureDraft.hp} onChange={(value) => updateDraftCreature({ hp: value })} />
                 <NumberInput label="Max HP" value={creatureDraft.maxHp} onChange={(value) => updateDraftCreature({ maxHp: value })} />
                 <NumberInput label="AC" value={creatureDraft.ac} onChange={(value) => updateDraftCreature({ ac: value })} />
                 <NumberInput label="Proficiency" value={creatureDraft.proficiencyBonus} onChange={(value) => updateDraftCreature({ proficiencyBonus: value })} />
+              </div>
+            </details>
+
+            <details className="editor-section editor-subsection">
+              <summary>Damage Defenses</summary>
+              <div className="form-grid">
+                <label className="wide-field">
+                  Resistances
+                  <input
+                    placeholder="fire, cold, poison"
+                    value={(creatureDraft.damageResistances ?? []).join(', ')}
+                    onChange={(event) => updateDraftCreature({ damageResistances: parseCsv(event.target.value) })}
+                  />
+                </label>
+                <label className="wide-field">
+                  Immunities
+                  <input
+                    placeholder="poison, psychic"
+                    value={(creatureDraft.damageImmunities ?? []).join(', ')}
+                    onChange={(event) => updateDraftCreature({ damageImmunities: parseCsv(event.target.value) })}
+                  />
+                </label>
+                <label className="wide-field">
+                  Vulnerabilities
+                  <input
+                    placeholder="radiant"
+                    value={(creatureDraft.damageVulnerabilities ?? []).join(', ')}
+                    onChange={(event) => updateDraftCreature({ damageVulnerabilities: parseCsv(event.target.value) })}
+                  />
+                </label>
               </div>
             </details>
 
@@ -1547,16 +1612,16 @@ export function EncounterEditor({
               <h3>Encounter Balance</h3>
               <strong>{encounterBalance.message}</strong>
               <div className="encounter-balance-grid">
-                {teams.map((team) => (
-                  <span key={team}>
-                    <strong>{team}</strong>
-                    {encounterBalance.teams[team].xp.toLocaleString()} XP
-                    <small>{encounterBalance.teams[team].count} creature(s)</small>
+                {teamDefinitions.map((team) => (
+                  <span key={team.id}>
+                    <strong>{team.name}</strong>
+                    {encounterBalance.teams[team.id]?.xp.toLocaleString() ?? 0} XP
+                    <small>{encounterBalance.teams[team.id]?.count ?? 0} creature(s)</small>
                   </span>
                 ))}
               </div>
               <p className="editor-muted">
-                Based on estimated final CR converted to XP weight. Neutral creatures are listed but not counted for the player/enemy edge.
+                Based on estimated final CR converted to XP weight. Neutral factions are listed but excluded from the comparison.
               </p>
             </section>
 
@@ -1571,7 +1636,7 @@ export function EncounterEditor({
                   >
                     <strong>{creature.name}</strong>
                     <span>
-                      {creature.team} {creature.position.x},{creature.position.y},{creature.position.z ?? 0}
+                      {getTeamLabel({ teams: teamDefinitions }, creature.team)} {creature.position.x},{creature.position.y},{creature.position.z ?? 0}
                     </span>
                   </button>
                 ))}
@@ -1585,10 +1650,10 @@ export function EncounterEditor({
                   </label>
                   <label>
                     Team
-                    <select value={selectedInstance.team} onChange={(event) => updateSelectedInstance({ team: event.target.value as Team })}>
-                      {teams.map((team) => (
-                        <option key={team} value={team}>
-                          {team}
+                    <select value={selectedInstance.team} onChange={(event) => updateSelectedInstance({ team: event.target.value })}>
+                      {teamDefinitions.map((team) => (
+                        <option key={team.id} value={team.id}>
+                          {team.name}
                         </option>
                       ))}
                     </select>
@@ -1631,7 +1696,11 @@ export function EncounterEditor({
                     >
                       <span className="coord">{x},{y}</span>
                       {tileHeight !== 0 && <span className="height-marker">z{tileHeight}</span>}
-                      {creature && <span className={`token ${creature.team}`}>{getCreatureShortLabel(creature)}</span>}
+                      {creature && (
+                        <span className="token" style={{ backgroundColor: getTeamColor({ teams: teamDefinitions }, creature.team) }}>
+                          {getCreatureShortLabel(creature)}
+                        </span>
+                      )}
                     </button>
                   );
                 })
@@ -1859,6 +1928,14 @@ function ActionEditor({
               onChange={(event) => action.save && onChange({ save: { ...action.save, halfDamageOnSuccess: event.target.checked } })}
             />
             Half damage on success
+          </label>
+          <label>
+            Target
+            <select value={getActionTargetMode(action)} onChange={(event) => onChange({ targetMode: event.target.value as ActionTargetMode })}>
+              <option value="creature">Creature</option>
+              <option value="point">Point within range</option>
+              <option value="self">Self / action origin</option>
+            </select>
           </label>
           <label>
             Shape
@@ -2408,6 +2485,19 @@ function renderEffectFields(
   if (effect.type === 'multiplyDamage') {
     return <NumberInput disabled={readOnly} label="Factor" value={effect.factor} min={0} onChange={(factor) => onChange({ ...effect, factor })} />;
   }
+  if (effect.type === 'grantDamageResistance' || effect.type === 'grantDamageImmunity' || effect.type === 'grantDamageVulnerability') {
+    return (
+      <label>
+        Damage Type
+        <input
+          disabled={readOnly}
+          placeholder="fire or all"
+          value={effect.damageType}
+          onChange={(event) => onChange({ ...effect, damageType: event.target.value })}
+        />
+      </label>
+    );
+  }
   if (effect.type === 'addDamageDice' || effect.type === 'dealDamage') {
     return (
       <>
@@ -2689,47 +2779,51 @@ export function filterCreaturesForEditor(creatures: Creature[], query: string): 
   });
 }
 
-export function estimateEncounterBalance(creatures: Creature[]): EncounterBalanceSummary {
-  const teamsSummary: Record<Team, EncounterBalanceTeamSummary> = {
-    players: { team: 'players', count: 0, xp: 0, crLabels: [] },
-    enemies: { team: 'enemies', count: 0, xp: 0, crLabels: [] },
-    neutral: { team: 'neutral', count: 0, xp: 0, crLabels: [] }
-  };
+export function estimateEncounterBalance(
+  creatures: Creature[],
+  definitions: TeamDefinition[] = normalizeTeamDefinitions(undefined, creatures)
+): EncounterBalanceSummary {
+  const normalizedDefinitions = normalizeTeamDefinitions(definitions, creatures);
+  const teamsSummary = Object.fromEntries(
+    normalizedDefinitions.map((team) => [team.id, { team: team.id, count: 0, xp: 0, crLabels: [] }])
+  ) as Record<Team, EncounterBalanceTeamSummary>;
 
   creatures.forEach((creature) => {
     const estimate = estimateCreatureCR(creature, encounterBalanceCrOptions);
-    const teamSummary = teamsSummary[creature.team];
+    const teamSummary = teamsSummary[normalizeTeamId(creature.team)];
     teamSummary.count += 1;
     teamSummary.xp += getCrXp(estimate.finalCr);
     teamSummary.crLabels.push(estimate.finalCr);
   });
 
-  const playerXp = teamsSummary.players.xp;
-  const enemyXp = teamsSummary.enemies.xp;
-  const contestTotal = playerXp + enemyXp;
+  const competingTeams = normalizedDefinitions
+    .filter((team) => !team.neutral)
+    .map((team) => ({ definition: team, summary: teamsSummary[team.id] }))
+    .filter((team) => team.summary.xp > 0)
+    .sort((a, b) => b.summary.xp - a.summary.xp);
 
-  if (contestTotal === 0) {
+  if (competingTeams.length === 0) {
     return {
       teams: teamsSummary,
       leader: 'unopposed',
       ratio: 0,
-      message: 'No player or enemy creatures placed yet.'
+      message: 'No non-neutral creatures placed yet.'
     };
   }
 
-  if (playerXp === 0 || enemyXp === 0) {
-    const leader = playerXp > enemyXp ? 'players' : 'enemies';
+  if (competingTeams.length === 1) {
     return {
       teams: teamsSummary,
       leader: 'unopposed',
       ratio: 0,
-      message: `${capitalizeTeam(leader)} are currently unopposed.`
+      message: `${competingTeams[0].definition.name} is currently unopposed.`
     };
   }
 
-  const strongerTeam: Team = playerXp >= enemyXp ? 'players' : 'enemies';
-  const strongerXp = Math.max(playerXp, enemyXp);
-  const weakerXp = Math.min(playerXp, enemyXp);
+  const strongerTeam = competingTeams[0];
+  const weakerTeam = competingTeams[1];
+  const strongerXp = strongerTeam.summary.xp;
+  const weakerXp = weakerTeam.summary.xp;
   const ratio = strongerXp / weakerXp;
 
   if (ratio <= 1.15) {
@@ -2737,21 +2831,17 @@ export function estimateEncounterBalance(creatures: Creature[]): EncounterBalanc
       teams: teamsSummary,
       leader: 'even',
       ratio,
-      message: 'Roughly even by estimated CR weight.'
+      message: `${strongerTeam.definition.name} and ${weakerTeam.definition.name} are roughly even by estimated CR weight.`
     };
   }
 
   const edge = ratio <= 1.5 ? 'slight edge' : ratio <= 2 ? 'clear advantage' : 'overwhelming advantage';
   return {
     teams: teamsSummary,
-    leader: strongerTeam,
+    leader: strongerTeam.definition.id,
     ratio,
-    message: `${capitalizeTeam(strongerTeam)} have a ${edge}.`
+    message: `${strongerTeam.definition.name} has a ${edge}.`
   };
-}
-
-function capitalizeTeam(team: Team): string {
-  return team.charAt(0).toUpperCase() + team.slice(1);
 }
 
 function loadCreatureLibrary(): Creature[] {
@@ -2773,6 +2863,12 @@ function loadFeatureLibrary(): FeatureDefinition[] {
 function loadResourceLibrary(): Resource[] {
   const stored = readJson<unknown>(RESOURCE_LIBRARY_KEY);
   return Array.isArray(stored) ? stored.map(coerceResource).filter(isDefined) : [];
+}
+
+function loadTeamDefinitions(currentCombat: CombatState, creatureLibrary: Creature[]): TeamDefinition[] {
+  const stored = readJson<unknown>(TEAM_LIBRARY_KEY);
+  const imported = Array.isArray(stored) ? stored.map(coerceTeamDefinition).filter(isDefined) : [];
+  return normalizeTeamDefinitions([...currentCombat.teams, ...imported], [...currentCombat.creatures, ...creatureLibrary]);
 }
 
 function loadEncounterLibrary(): SavedEncounter[] {
@@ -2809,6 +2905,7 @@ function parseEncounterImport(text: string, creatureLibrary: Creature[] = []): {
         name: 'Imported Combat',
         grid: combatResult.state.grid,
         instances: combatResult.state.creatures.map((creature) => createEncounterInstanceFromCreature(creature, creatureLibrary)),
+        teams: combatResult.state.teams,
         updatedAt: new Date().toISOString()
       }
     };
@@ -2845,6 +2942,10 @@ function coerceEncounter(value: unknown): SavedEncounter | undefined {
     grid: normalizeGrid(isRecord(value.grid) ? (value.grid as Partial<GridDefinition>) : { width: 10, height: 10, blocked: [] }),
     instances,
     creatures: legacyCreatures.length > 0 ? legacyCreatures : undefined,
+    teams: normalizeTeamDefinitions(
+      Array.isArray(value.teams) ? value.teams.map(coerceTeamDefinition).filter(isDefined) : undefined,
+      legacyCreatures
+    ),
     updatedAt: typeof value.updatedAt === 'string' ? value.updatedAt : new Date().toISOString()
   };
 }
@@ -2881,7 +2982,7 @@ function coerceCreature(value: unknown): Creature | undefined {
     ...blank,
     id: typeof value.id === 'string' ? value.id : createId(value.name, 'creature'),
     name: value.name,
-    team: isTeam(value.team) ? value.team : blank.team,
+    team: normalizeTeamId(value.team ?? blank.team),
     controlMode: isCreatureControlMode(value.controlMode) ? value.controlMode : blank.controlMode,
     botProfile: isBotProfile(value.botProfile) ? value.botProfile : blank.botProfile,
     botTargetPriority: isBotTargetPriority(value.botTargetPriority) ? value.botTargetPriority : blank.botTargetPriority,
@@ -2894,6 +2995,9 @@ function coerceCreature(value: unknown): Creature | undefined {
     speed: numberOr(value.speed, blank.speed),
     climbSpeed: numberOr(value.climbSpeed, blank.climbSpeed ?? 0),
     flySpeed: numberOr(value.flySpeed, blank.flySpeed ?? 0),
+    damageResistances: Array.isArray(value.damageResistances) ? value.damageResistances.filter((type): type is string => typeof type === 'string') : [],
+    damageImmunities: Array.isArray(value.damageImmunities) ? value.damageImmunities.filter((type): type is string => typeof type === 'string') : [],
+    damageVulnerabilities: Array.isArray(value.damageVulnerabilities) ? value.damageVulnerabilities.filter((type): type is string => typeof type === 'string') : [],
     position: {
       x: numberOr(position.x, blank.position.x),
       y: numberOr(position.y, blank.position.y),
@@ -2974,7 +3078,7 @@ function createBlankCreature(): Creature {
   return {
     id: createId('new-creature', 'creature'),
     name: 'New Creature',
-    team: 'enemies',
+    team: 'team-2',
     controlMode: 'manual',
     botProfile: 'passive',
     botTargetPriority: 'balanced',
@@ -2987,6 +3091,9 @@ function createBlankCreature(): Creature {
     speed: 30,
     climbSpeed: 0,
     flySpeed: 0,
+    damageResistances: [],
+    damageImmunities: [],
+    damageVulnerabilities: [],
     position: { x: 0, y: 0, z: 0 },
     conditions: [],
     actions: [createBlankAction()],
@@ -3003,6 +3110,7 @@ function createBlankAction(): ActionDefinition {
     kind: 'meleeAttack',
     type: 'meleeAttack',
     actionCost: 'action',
+    targetMode: 'creature',
     tags: ['attack', 'melee'],
     range: 1,
     reach: 5,
@@ -3213,6 +3321,12 @@ function normalizeEncounterOverrides(overrides: Partial<Creature>): Partial<Crea
   delete normalized.speed;
   delete normalized.climbSpeed;
   delete normalized.flySpeed;
+  delete normalized.damageResistances;
+  delete normalized.damageImmunities;
+  delete normalized.damageVulnerabilities;
+  if (normalized.team) {
+    normalized.team = normalizeTeamId(normalized.team);
+  }
   if (normalized.id) {
     normalized.id = toId(normalized.id);
   }
@@ -3232,6 +3346,7 @@ function normalizeCreatureDraft(creature: Creature): Creature {
     ...creature,
     id: toId(creature.id || creature.name || 'creature'),
     name: creature.name.trim() || 'Unnamed Creature',
+    team: normalizeTeamId(creature.team),
     controlMode: creature.controlMode === 'bot' ? 'bot' : 'manual',
     botProfile: isBotProfile(creature.botProfile) ? creature.botProfile : 'passive',
     botTargetPriority: isBotTargetPriority(creature.botTargetPriority) ? creature.botTargetPriority : 'balanced',
@@ -3243,6 +3358,9 @@ function normalizeCreatureDraft(creature: Creature): Creature {
     speed: Math.max(0, numberOr(creature.speed, 30)),
     climbSpeed: Math.max(0, numberOr(creature.climbSpeed, 0)),
     flySpeed: Math.max(0, numberOr(creature.flySpeed, 0)),
+    damageResistances: normalizeDamageTypes(creature.damageResistances),
+    damageImmunities: normalizeDamageTypes(creature.damageImmunities),
+    damageVulnerabilities: normalizeDamageTypes(creature.damageVulnerabilities),
     position: {
       x: Math.max(0, numberOr(creature.position?.x, 0)),
       y: Math.max(0, numberOr(creature.position?.y, 0)),
@@ -3270,6 +3388,7 @@ function normalizeAction(action: ActionDefinition): ActionDefinition {
     type,
     actionCost: action.actionCost ?? 'action',
     tags: action.tags ?? inferTags(kind, []),
+    targetMode: action.targetMode ?? getActionTargetMode(action),
     range: Math.max(0, numberOr(action.range, 1)),
     effects: action.effects ?? [],
     shape: action.shape ?? { type: 'single' },
@@ -3418,6 +3537,9 @@ function createBlankEffect(type: EffectOperationType = 'addFlatModifier', update
   }
   if (type === 'multiplyDamage') {
     return { factor: 2, ...update, type } as RuleEffectOperation;
+  }
+  if (type === 'grantDamageResistance' || type === 'grantDamageImmunity' || type === 'grantDamageVulnerability') {
+    return { damageType: 'fire', ...update, type } as RuleEffectOperation;
   }
   if (type === 'multiplyMovementCost') {
     return { factor: 2, ...update, type } as RuleEffectOperation;
@@ -3585,8 +3707,21 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null;
 }
 
-function isTeam(value: unknown): value is Team {
-  return teams.includes(value as Team);
+function isTeamDefinitionLike(value: unknown): value is Record<string, unknown> & { id: string } {
+  return isRecord(value) && typeof value.id === 'string';
+}
+
+function coerceTeamDefinition(value: unknown): TeamDefinition | undefined {
+  if (!isTeamDefinitionLike(value)) {
+    return undefined;
+  }
+  return {
+    id: value.id,
+    name: typeof value.name === 'string' ? value.name : value.id,
+    color: typeof value.color === 'string' ? value.color : '#666666',
+    neutral: value.neutral === true,
+    ...(isRecord(value.relationships) ? { relationships: cloneJson(value.relationships) as TeamDefinition['relationships'] } : {})
+  };
 }
 
 function isCreatureControlMode(value: unknown): value is CreatureControlMode {

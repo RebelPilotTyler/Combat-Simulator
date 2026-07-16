@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { getActionCostForNumberHotkey, getActionForNumberHotkey, getNumberHotkeyIndex, isTypingShortcutTarget, moveGridCursor } from './keyboard';
+import { getActionCostForNumberHotkey, getActionForNumberHotkey, getActionsForHotkeyCost, getNumberHotkeyIndex, isTypingShortcutTarget, moveGridCursor } from './keyboard';
 
 describe('keyboard shortcut helpers', () => {
   it('maps number hotkeys to zero-based action indexes', () => {
@@ -42,6 +42,24 @@ describe('keyboard shortcut helpers', () => {
     ];
 
     expect(getActionForNumberHotkey(actions, '1', { shiftKey: false, ctrlKey: true, metaKey: false })?.id).toBe('free-note');
+  });
+
+  it('pages action hotkeys in groups of five and renumbers the visible page', () => {
+    const actions = Array.from({ length: 6 }, (_, index) => ({
+      id: `action-${index + 1}`,
+      actionCost: 'action' as const
+    }));
+    const event = { shiftKey: false, ctrlKey: false, metaKey: false };
+
+    expect(getActionsForHotkeyCost(actions, 'action', 0).map((action) => action.id)).toEqual([
+      'action-1',
+      'action-2',
+      'action-3',
+      'action-4',
+      'action-5'
+    ]);
+    expect(getActionForNumberHotkey(actions, '1', event, { action: 1 })?.id).toBe('action-6');
+    expect(getActionForNumberHotkey(actions, '2', event, { action: 1 })).toBeUndefined();
   });
 
   it('detects editable targets so shortcuts do not interrupt typing', () => {

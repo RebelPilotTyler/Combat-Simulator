@@ -4,6 +4,7 @@ import { getActionShapeSquares, getOpportunityAttackCandidatesForMovementPath } 
 import { getReachableMovementSquares, type MovementOption } from './movement';
 import { getTilePosition, samePosition } from './shapes';
 import { getDistanceFeet, getMeleeReach, hasLineOfSight, isInActionRange } from './targeting';
+import { areHostile } from './teams';
 import type { ActionDefinition, CardinalDirection, CombatState, Creature, GridPosition } from './types';
 
 const CARDINAL_DIRECTIONS: CardinalDirection[] = ['north', 'east', 'south', 'west'];
@@ -67,7 +68,7 @@ export function getThreateningCreatures(
   return state.creatures.filter(
     (candidate) =>
       candidate.id !== creature.id &&
-      candidate.team !== creature.team &&
+      areHostile(candidate, creature, state) &&
       canThreatenPosition(state, candidate, normalizedPosition, options)
   );
 }
@@ -134,7 +135,7 @@ export function getTargetableCreaturesForAction(
   }
 
   return state.creatures.filter((target) => {
-    if (target.id === attacker.id || (!options.includeAllies && target.team === attacker.team)) {
+    if (target.id === attacker.id || (!options.includeAllies && !areHostile(attacker, target, state))) {
       return false;
     }
 
@@ -333,7 +334,7 @@ function getCreaturesInActionArea(
   const affectedSquares = getActionShapeSquares(state, action, origin, direction);
 
   return state.creatures.filter((target) => {
-    if (target.id === source.id || (!options.includeAllies && target.team === source.team)) {
+    if (target.id === source.id || (!options.includeAllies && !areHostile(source, target, state))) {
       return false;
     }
 

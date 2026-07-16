@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { createCombatState } from './combat';
-import { getDistanceFeet, getLineSquares, hasLineOfSight, isInActionRange } from './targeting';
+import { getActionTargetMode, getDistanceFeet, getLineSquares, hasLineOfSight, isInActionRange } from './targeting';
 import type { ActionDefinition, Creature } from './types';
 
 const bow: ActionDefinition = {
@@ -34,7 +34,15 @@ const scout: Creature = {
 };
 
 describe('3D targeting', () => {
+  it('distinguishes point-centered areas from creature and self targeting', () => {
+    expect(getActionTargetMode({ ...bow, targetMode: 'point', shape: { type: 'radius', radius: 4 } })).toBe('point');
+    expect(getActionTargetMode({ ...bow, shape: { type: 'single' } })).toBe('creature');
+    expect(getActionTargetMode({ ...bow, shape: { type: 'cone', length: 3 } })).toBe('self');
+  });
+
   it('counts elevation when measuring grid distance', () => {
+    expect(getDistanceFeet({ x: 0, y: 0 }, { x: 1, y: 1 })).toBe(5);
+    expect(getDistanceFeet({ x: 0, y: 0 }, { x: 3, y: 3 })).toBe(15);
     expect(getDistanceFeet({ x: 0, y: 0, z: 0 }, { x: 0, y: 0, z: 3 })).toBe(15);
     expect(getDistanceFeet({ x: 0, y: 0, z: 0 }, { x: 4, y: 1, z: 2 })).toBe(20);
   });

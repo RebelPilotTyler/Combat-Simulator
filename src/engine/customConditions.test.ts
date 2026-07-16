@@ -210,6 +210,22 @@ describe('custom condition templates', () => {
     expect(state.log.some((entry) => entry.message.includes('fire'))).toBe(true);
   });
 
+  it('applies native immunity to typed damage dealt by a custom condition hook', () => {
+    const burning = EXAMPLE_CUSTOM_CONDITION_TEMPLATES.find((template) => template.id === 'burning-example')!;
+    const state = createCombatState([
+      creature({
+        id: 'a',
+        damageImmunities: ['fire'],
+        conditions: [createAppliedConditionFromTemplate(burning)]
+      })
+    ]);
+
+    runTurnRules(state, state.creatures[0], 'onTurnStart');
+
+    expect(state.creatures[0].hp).toBe(10);
+    expect(state.log.some((entry) => entry.message.includes('takes 0 fire'))).toBe(true);
+  });
+
   it('slowed example doubles movement cost while active', () => {
     const slowed = EXAMPLE_CUSTOM_CONDITION_TEMPLATES.find((template) => template.id === 'slowed-example')!;
     const state = createCombatState([

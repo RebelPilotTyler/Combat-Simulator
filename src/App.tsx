@@ -83,13 +83,15 @@ import {
   getShapeSquares,
   getTileHeight,
   getTilePosition,
+  isBlocked,
   isInBounds,
   position3DKey,
   positionKey,
   samePosition,
   sameTilePosition
 } from './engine/shapes';
-import { getDistanceFeet, getLineSquares, hasLineOfSight } from './engine/targeting';
+import { getActionTargetMode, getDistanceFeet, getLineSquares, hasLineOfSight, isInActionRange } from './engine/targeting';
+import { darkenColor, getTeamColor, getTeamLabel } from './engine/teams';
 import type {
   Ability,
   ActionDefinition,
@@ -107,7 +109,7 @@ import type {
 } from './engine/types';
 import { getVisibleGridCells, getVisibleGridWindow, type GridWindow } from './ui/gridWindow';
 import { canStartBotTurn, shouldAutoRunBotTurn, shouldRunBotTurnShortcut, shouldStopAutoRunAfterBotAction } from './ui/botTurnControls';
-import { getActionForNumberHotkey, getNumberHotkeyIndex, isTypingShortcutTarget, moveGridCursor } from './ui/keyboard';
+import { HOTBAR_PAGE_SIZE, getActionForNumberHotkey, getNumberHotkeyIndex, isTypingShortcutTarget, moveGridCursor } from './ui/keyboard';
 
 const directions: CardinalDirection[] = ['north', 'east', 'south', 'west'];
 type SelectionMode = 'move' | 'target';
@@ -200,6 +202,7 @@ export function App() {
   const [jsonError, setJsonError] = useState<string | undefined>();
   const [multiattackTargets, setMultiattackTargets] = useState<Record<string, string>>({});
   const [actionTab, setActionTab] = useState<ActionDefinition['actionCost']>('action');
+  const [actionPages, setActionPages] = useState<Partial<Record<ActionDefinition['actionCost'], number>>>({});
   const [gridCursor, setGridCursor] = useState<GridPosition>(combat.creatures[0]?.position ?? { x: 0, y: 0 });
   const [visualEffectNow, setVisualEffectNow] = useState(() => Date.now());
   const [debugOpen, setDebugOpen] = useState(false);
@@ -238,11 +241,19 @@ export function App() {
       return selectionMode === 'move' ? movementOptions.map((option) => option.position) : [];
     }
 
+    if (getActionTargetMode(selectedAction) === 'point' && !areaOrigin) {
+      return getPointTargetSquares(combat, activeCreature, selectedAction);
+    }
+
     const origin = getShapeOrigin(selectedAction, activeCreature.position, areaOrigin);
     return getActionShapeSquares(combat, selectedAction, origin, direction);
   }, [activeCreature, areaOrigin, combat, direction, movementOptions, selectedAction, selectionMode]);
 
   const highlightedKeys = useMemo(() => new Set(highlightedSquares.map(positionKey)), [highlightedSquares]);
+
+  useEffect(() => {
+    setActionPages({});
+  }, [activeCreature?.id]);
   const mapToolSquares = useMemo(
     () =>
       uiSettings.showMapTools
@@ -524,8 +535,14 @@ export function App() {
         return;
       }
 
+      if (key === '+' || key === '-') {
+        event.preventDefault();
+        changeActionPage(key === '+' ? 1 : -1);
+        return;
+      }
+
       if (numberIndex !== undefined) {
-        const action = getActionForNumberHotkey(activeActions, event.key, event);
+        const action = getActionForNumberHotkey(activeActions, event.key, event, actionPages);
         if (action && activeCreature && !getActionDisabledReason(activeCreature, action, combat.turnState)) {
           event.preventDefault();
           setActionTab(action.actionCost);
@@ -576,6 +593,7 @@ export function App() {
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, [
     actionTab,
+    actionPages,
     activeView,
     activeActions,
     activeCreature,
@@ -601,6 +619,14 @@ export function App() {
         ...current,
         z: Math.max(tileHeight, getElevation(current) + delta)
       };
+    });
+  }
+
+  function changeActionPage(delta: number) {
+    const pageCount = getActionPageCount(activeActions, actionTab);
+    setActionPages((current) => {
+      const page = Math.min(pageCount - 1, Math.max(0, (current[actionTab] ?? 0) + delta));
+      return page === (current[actionTab] ?? 0) ? current : { ...current, [actionTab]: page };
     });
   }
 
@@ -646,6 +672,18 @@ export function App() {
       return;
     }
 
+    if (selectedAction && activeCreature && getActionTargetMode(selectedAction) === 'point') {
+      if (!isValidPointTarget(combat, activeCreature, selectedAction, gridCursor)) {
+        return;
+      }
+      if (areaOrigin && samePosition(areaOrigin, gridCursor)) {
+        applySelectedAction();
+      } else {
+        setAreaOrigin(gridCursor);
+      }
+      return;
+    }
+
     if (selectedAction && creature && creature.id !== activeCreature?.id) {
       setSelectedCreatureId(creature.id);
       setBasicTargetId(creature.id);
@@ -670,7 +708,7 @@ export function App() {
 
       if (selectedTargetId === creature.id) {
         applySelectedAction();
-      } else if (selectedAction.shape?.type === 'single' || isMultiattackAction(selectedAction)) {
+      } else if (getActionTargetMode(selectedAction) === 'creature' || isMultiattackAction(selectedAction)) {
         setSelectedTargetId(creature.id);
         setAreaOrigin(creature.position);
       }
@@ -682,7 +720,7 @@ export function App() {
       return;
     }
 
-    if (selectedAction?.type === 'savingThrowEffect') {
+    if (selectedAction && getActionTargetMode(selectedAction) === 'point') {
       if (areaOrigin && samePosition(areaOrigin, gridCursor)) {
         applySelectedAction();
       } else {
@@ -709,6 +747,13 @@ export function App() {
       return;
     }
 
+    if (selectedAction && activeCreature && getActionTargetMode(selectedAction) === 'point') {
+      if (isValidPointTarget(combat, activeCreature, selectedAction, position)) {
+        setAreaOrigin(position);
+      }
+      return;
+    }
+
     const creature = combat.creatures.find((candidate) => sameTilePosition(candidate.position, position));
     if (creature) {
       setSelectedCreatureId(creature.id);
@@ -725,16 +770,13 @@ export function App() {
         setAreaOrigin(creature.position);
         return;
       }
-      if (selectedAction && (selectedAction.shape?.type === 'single' || isMultiattackAction(selectedAction))) {
+      if (selectedAction && (getActionTargetMode(selectedAction) === 'creature' || isMultiattackAction(selectedAction))) {
         setSelectedTargetId(creature.id);
         setAreaOrigin(creature.position);
       }
       return;
     }
 
-    if (selectedAction?.type === 'savingThrowEffect') {
-      setAreaOrigin(position);
-    }
   }
 
   function selectMapTool(tool: MapTool) {
@@ -1150,7 +1192,7 @@ export function App() {
                   onClick={() => setSelectedCreatureId(creature.id)}
                   title={getConditionLabels(creature)}
                 >
-                  <span className={`team-dot ${creature.team}`} />
+                  <span className="team-dot" style={{ backgroundColor: getTeamColor(combat, creature.team) }} />
                   <strong>{creature.name}</strong>
                   <small>{creature.controlMode === 'bot' ? 'Bot' : 'Manual'}</small>
                   <HpBar creature={creature} compact />
@@ -1286,7 +1328,9 @@ export function App() {
             <strong>{selectedAction ? selectedAction.name : selectionMode === 'move' ? 'Movement' : 'Map'}</strong>
             <span>
               {selectedAction
-                ? `Choose target${selectedAction.shape?.type && selectedAction.shape.type !== 'single' ? ' or area' : ''}, then apply.`
+                ? getActionTargetMode(selectedAction) === 'point'
+                  ? 'Choose a point within range, then confirm or apply.'
+                  : `Choose target${selectedAction.shape?.type && selectedAction.shape.type !== 'single' ? ' or area' : ''}, then apply.`
                 : uiSettings.showShortcutHints
                   ? keyboardHint
                   : selectionMode === 'move'
@@ -1465,7 +1509,7 @@ export function App() {
                       ))}
                     </div>
                   )}
-                  {!isMultiattackAction(selectedAction) && (
+                  {!isMultiattackAction(selectedAction) && getActionTargetMode(selectedAction) === 'creature' && (
                     <label>
                       Target
                       <select value={selectedTargetId ?? ''} onChange={(event) => setSelectedTargetId(event.target.value || undefined)}>
@@ -1478,10 +1522,13 @@ export function App() {
                         </select>
                       </label>
                     )}
+                  {getActionTargetMode(selectedAction) === 'point' && (
+                    <p>Point: {areaOrigin ? formatPosition(areaOrigin) : 'choose a map cell within range'}</p>
+                  )}
                   <p>Area targets: {targetsInArea.map((target) => target.name).join(', ') || 'none'}</p>
                   <button
-                    disabled={Boolean(getTargetPanelDisabledReason(activeCreature, selectedAction, combat.turnState, multiattackTargets, selectedTargetId))}
-                    title={getTargetPanelDisabledReason(activeCreature, selectedAction, combat.turnState, multiattackTargets, selectedTargetId)}
+                    disabled={Boolean(getTargetPanelDisabledReason(activeCreature, selectedAction, combat.turnState, multiattackTargets, selectedTargetId, areaOrigin))}
+                    title={getTargetPanelDisabledReason(activeCreature, selectedAction, combat.turnState, multiattackTargets, selectedTargetId, areaOrigin)}
                     onClick={applySelectedAction}
                   >
                     Apply Action
@@ -1705,8 +1752,10 @@ export function App() {
                 {/* Combat: creature actions */}
                 <CreatureActionGroups
                   actions={activeActions}
+                  page={actionPages[actionTab] ?? 0}
                   selectedActionId={selectedActionId}
                   selectedTab={actionTab}
+                  onChangePage={(page) => setActionPages((current) => ({ ...current, [actionTab]: page }))}
                   onSelectTab={setActionTab}
                   getDisabledReason={(action) => getActionDisabledReason(activeCreature, action, combat.turnState)}
                   onSelect={handleCreatureActionSelect}
@@ -1952,7 +2001,10 @@ function Battlefield2DView({
               {tileHeight !== 0 && <span className="height-marker">z{tileHeight}</span>}
               {creature && (
                 <span className="token-stack" title={`${creature.name} at ${formatPosition(creature.position)} HP ${creature.hp}/${creature.maxHp} ${getConditionLabels(creature)}`}>
-                  <span className={`token ${creature.team} ${isDefeated(creature) ? 'defeated' : ''} ${getTokenVisualClass(creatureVisualEvents, visualEffectsMode)}`}>
+                  <span
+                    className={`token ${isDefeated(creature) ? 'defeated' : ''} ${getTokenVisualClass(creatureVisualEvents, visualEffectsMode)}`}
+                    style={{ backgroundColor: getTeamColor(combat, creature.team) }}
+                  >
                     {getCreatureShortLabel(creature)}
                   </span>
                   <VisualEventOverlay events={creatureVisualEvents} mode={visualEffectsMode} textSize={visualEffectsTextSize} />
@@ -2503,7 +2555,7 @@ function Battlefield3DView({
                 className="creature-3d-side"
                 cx={center.x}
                 cy={center.y + 7}
-                fill={darkenTeamColor(creature.team)}
+                fill={darkenColor(getTeamColor(combat, creature.team))}
                 rx={cellSize * 0.3}
                 ry={cellSize * 0.12}
               />
@@ -2511,7 +2563,7 @@ function Battlefield3DView({
                 className={selected || active ? 'creature-3d-top emphasized' : 'creature-3d-top'}
                 cx={center.x}
                 cy={center.y}
-                fill={getTeamColor(creature.team)}
+                fill={getTeamColor(combat, creature.team)}
                 rx={cellSize * 0.31}
                 ry={cellSize * 0.14}
               />
@@ -2695,30 +2747,6 @@ function getCameraRelativeArrowKey(key: string, yawDegrees: number): string {
   return best.key;
 }
 
-function getTeamColor(team: Creature['team']): string {
-  if (team === 'players') {
-    return '#2367d1';
-  }
-
-  if (team === 'enemies') {
-    return '#b3261e';
-  }
-
-  return '#666';
-}
-
-function darkenTeamColor(team: Creature['team']): string {
-  if (team === 'players') {
-    return '#17448d';
-  }
-
-  if (team === 'enemies') {
-    return '#751812';
-  }
-
-  return '#3f3f3f';
-}
-
 function CreatureSummary({ creature, state }: { creature: Creature; state: CombatState }) {
   const effectiveAc = getEffectiveAC(creature, state);
   const effectiveSpeed = getEffectiveSpeed(creature, state);
@@ -2728,7 +2756,7 @@ function CreatureSummary({ creature, state }: { creature: Creature; state: Comba
   return (
     <div className="creature-summary">
       <strong>{creature.name}</strong>
-      <span>{creature.team}</span>
+      <span>{getTeamLabel(state, creature.team)}</span>
       <span>
         Control: {creature.controlMode === 'bot' ? `Bot (${formatBotProfileLabel(creature.botProfile ?? 'passive')})` : 'Manual'}
       </span>
@@ -2745,6 +2773,9 @@ function CreatureSummary({ creature, state }: { creature: Creature; state: Comba
       <span>Speed {formatBaseEffectiveNumber(creature.speed, effectiveSpeed)}</span>
       {effectiveClimbSpeed > 0 && <span>Climb {formatBaseEffectiveNumber(creature.climbSpeed ?? 0, effectiveClimbSpeed)}</span>}
       {effectiveFlySpeed > 0 && <span>Fly {formatBaseEffectiveNumber(creature.flySpeed ?? 0, effectiveFlySpeed)}</span>}
+      {(creature.damageResistances ?? []).length > 0 && <span>Resist: {creature.damageResistances?.join(', ')}</span>}
+      {(creature.damageImmunities ?? []).length > 0 && <span>Immune: {creature.damageImmunities?.join(', ')}</span>}
+      {(creature.damageVulnerabilities ?? []).length > 0 && <span>Vulnerable: {creature.damageVulnerabilities?.join(', ')}</span>}
       {(creature.resources ?? []).length > 0 && (
         <span>Resources: {(creature.resources ?? []).map((resource) => `${resource.name} ${resource.current}/${resource.max}`).join(', ')}</span>
       )}
@@ -2859,15 +2890,19 @@ function BotTurnPreviewPanel({ preview }: { preview: BotTurnPreview }) {
 
 function CreatureActionGroups({
   actions,
+  page,
   selectedActionId,
   selectedTab,
+  onChangePage,
   onSelectTab,
   getDisabledReason,
   onSelect
 }: {
   actions: ActionDefinition[];
+  page: number;
   selectedActionId?: string;
   selectedTab: ActionDefinition['actionCost'];
+  onChangePage: (page: number) => void;
   onSelectTab: (tab: ActionDefinition['actionCost']) => void;
   getDisabledReason: (action: ActionDefinition) => string | undefined;
   onSelect: (action: ActionDefinition) => void;
@@ -2878,6 +2913,10 @@ function CreatureActionGroups({
     ['Reaction', 'reaction'],
     ['Free', 'free']
   ];
+  const selectedActions = actions.filter((action) => action.actionCost === selectedTab);
+  const pageCount = Math.max(1, Math.ceil(selectedActions.length / HOTBAR_PAGE_SIZE));
+  const currentPage = Math.min(page, pageCount - 1);
+  const visibleActions = selectedActions.slice(currentPage * HOTBAR_PAGE_SIZE, (currentPage + 1) * HOTBAR_PAGE_SIZE);
 
   return (
     <section className="ability-panel action-bar-abilities">
@@ -2897,11 +2936,9 @@ function CreatureActionGroups({
         })}
       </div>
       <div className="action-grid">
-        {actions
-          .filter((action) => action.actionCost === selectedTab)
-          .map((action, index) => {
+        {visibleActions.map((action, index) => {
             const disabledReason = getDisabledReason(action);
-            const hotkey = index < 9 ? getActionHotkeyLabel(selectedTab, index) : undefined;
+            const hotkey = getActionHotkeyLabel(selectedTab, index);
             const actionMeta = getActionMeta(action);
             return (
               <button
@@ -2918,8 +2955,33 @@ function CreatureActionGroups({
             );
           })}
       </div>
+      {pageCount > 1 && (
+        <div className="hotbar-pagination" aria-label={`${formatActionCost(selectedTab)} action pages`}>
+          <button
+            aria-label="Previous action page"
+            disabled={currentPage === 0}
+            title="Previous action page (-)"
+            onClick={() => onChangePage(currentPage - 1)}
+          >
+            -
+          </button>
+          <span aria-live="polite">{currentPage + 1}/{pageCount}</span>
+          <button
+            aria-label="Next action page"
+            disabled={currentPage === pageCount - 1}
+            title="Next action page (+)"
+            onClick={() => onChangePage(currentPage + 1)}
+          >
+            +
+          </button>
+        </div>
+      )}
     </section>
   );
+}
+
+function getActionPageCount(actions: ActionDefinition[], actionCost: ActionDefinition['actionCost']): number {
+  return Math.max(1, Math.ceil(actions.filter((action) => action.actionCost === actionCost).length / HOTBAR_PAGE_SIZE));
 }
 
 function describeAction(action: ActionDefinition): string {
@@ -3062,12 +3124,14 @@ function KeyboardHelpOverlay({ onClose }: { onClose: () => void }) {
           <p>Move the grid cursor</p>
           <span>Enter</span>
           <p>Select cursor cell, choose target, or confirm selected target</p>
-          <span>1-9</span>
+          <span>1-5</span>
           <p>Use visible Action hotbar buttons</p>
-          <span>Shift+1-9</span>
+          <span>Shift+1-5</span>
           <p>Use visible Bonus Action buttons</p>
-          <span>Ctrl/Cmd+1-9</span>
+          <span>Ctrl/Cmd+1-5</span>
           <p>Use visible Reaction/Free buttons</p>
+          <span>+ / -</span>
+          <p>Change the current action page</p>
           <span>G / T / L</span>
           <p>Focus grid, target panel, or combat log</p>
           <span>D / I</span>
@@ -3316,12 +3380,14 @@ function ShortcutReference() {
       <p>Move the grid cursor</p>
       <span>Enter</span>
       <p>Select the cursor square or confirm the selected action</p>
-      <span>1-9</span>
+      <span>1-5</span>
       <p>Use visible action buttons</p>
-      <span>Shift+1-9</span>
+      <span>Shift+1-5</span>
       <p>Use visible bonus action buttons</p>
-      <span>Ctrl/Cmd+1-9</span>
+      <span>Ctrl/Cmd+1-5</span>
       <p>Use visible reaction or free buttons</p>
+      <span>+ / -</span>
+      <p>Change the current action page</p>
       <span>G / T / L</span>
       <p>Focus grid, target panel, or combat log</p>
       <span>? / H</span>
@@ -3373,7 +3439,8 @@ function getTargetPanelDisabledReason(
   action: ActionDefinition,
   turnState: TurnState,
   multiattackTargets: Record<string, string>,
-  selectedTargetId: string | undefined
+  selectedTargetId: string | undefined,
+  areaOrigin: GridPosition | undefined
 ): string | undefined {
   const actionReason = getActionDisabledReason(creature, action, turnState);
   if (actionReason) {
@@ -3384,6 +3451,14 @@ function getTargetPanelDisabledReason(
     return 'Choose a target for each multiattack step.';
   }
 
+  if (getActionTargetMode(action) === 'point' && !areaOrigin) {
+    return 'Choose a point within range.';
+  }
+
+  if (getActionTargetMode(action) === 'creature' && !isMultiattackAction(action) && !selectedTargetId) {
+    return 'Choose a target.';
+  }
+
   return undefined;
 }
 
@@ -3392,7 +3467,7 @@ function getShapeOrigin(
   activePosition: GridPosition,
   areaOrigin?: GridPosition
 ): GridPosition {
-  if (action.shape?.type === 'line' || action.shape?.type === 'cone') {
+  if (getActionTargetMode(action) === 'self' || action.shape?.type === 'line' || action.shape?.type === 'cone') {
     return activePosition;
   }
 
@@ -3407,7 +3482,7 @@ function getTargetsForAction(
   areaOrigin?: GridPosition,
   direction?: CardinalDirection
 ): Creature[] {
-  if (action.shape?.type === 'single') {
+  if (getActionTargetMode(action) === 'creature' && action.shape?.type === 'single') {
     return selectedTargetId ? [findCreature(combat, selectedTargetId)] : [];
   }
 
@@ -3417,6 +3492,39 @@ function getTargetsForAction(
   }
 
   return [];
+}
+
+function getPointTargetSquares(
+  combat: CombatState,
+  activeCreature: Creature,
+  action: ActionDefinition
+): GridPosition[] {
+  const squares: GridPosition[] = [];
+
+  for (let y = 0; y < combat.grid.height; y += 1) {
+    for (let x = 0; x < combat.grid.width; x += 1) {
+      const position = getTilePosition({ x, y }, combat.grid);
+      if (isValidPointTarget(combat, activeCreature, action, position)) {
+        squares.push(position);
+      }
+    }
+  }
+
+  return squares;
+}
+
+function isValidPointTarget(
+  combat: CombatState,
+  activeCreature: Creature,
+  action: ActionDefinition,
+  position: GridPosition
+): boolean {
+  const requiresLineOfSight = action.tags.includes('spell') || action.kind === 'spell';
+  return (
+    !isBlocked(position, combat.grid) &&
+    isInActionRange(action, activeCreature.position, position) &&
+    (!requiresLineOfSight || hasLineOfSight(combat, activeCreature.position, position))
+  );
 }
 
 function getPreferredMovementOption(

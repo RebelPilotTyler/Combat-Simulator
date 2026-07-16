@@ -2,6 +2,7 @@ import type { CombatState, Creature, GridPosition } from './types';
 import { canCreatureMove, getMovementCostMultiplier, normalizeConditions } from './conditions';
 import { getElevation, getTileHeight, getTilePosition, isBlocked, isInBounds, position3DKey, samePosition } from './shapes';
 import { getEffectiveClimbSpeed, getEffectiveFlySpeed, getEffectiveMovementSpeed, getEffectiveSpeed } from './features';
+import { areAllies, areHostile } from './teams';
 
 export const FEET_PER_SQUARE = 5;
 
@@ -108,12 +109,48 @@ export function getMovementOptionForPath(state: CombatState, creatureId: string,
     return undefined;
   }
 
+  creature.conditions = normalizeConditions(creature.conditions);
+  if (!canCreatureMove(state, creature)) {
+    return undefined;
+  }
+
   const startingPosition = getTilePosition(creature.position, state.grid);
   const normalizedPath = samePosition(getTilePosition(path[0], state.grid), startingPosition)
     ? path.map((position) => getTilePosition(position, state.grid))
     : [startingPosition, ...path.map((position) => getTilePosition(position, state.grid))];
+  const destination = normalizedPath[normalizedPath.length - 1];
+  if (normalizedPath.length < 2 || isOccupied(state, destination, creature.id)) {
+    return undefined;
+  }
 
-  return getReachableMovementSquares(state, creatureId).find((option) => samePath(option.path, normalizedPath));
+  const maxFeet = state.turnState.creatureId === creatureId ? state.turnState.remainingMovement : getEffectiveMovementSpeed(creature, state);
+  const costMultiplier = getMovementCostMultiplier(state, creature);
+  const validOptions = getAvailableMovementModes(state, creature, maxFeet).flatMap((mode) => {
+    let steps = 0;
+
+    for (let index = 1; index < normalizedPath.length; index += 1) {
+      const from = normalizedPath[index - 1];
+      const to = normalizedPath[index];
+      const isNeighbor = getNeighborPositions(state, from, mode.mode).some((candidate) => samePosition(candidate, to));
+      if (
+        !isNeighbor ||
+        normalizedPath.slice(0, index).some((position) => samePosition(position, to)) ||
+        !canEnterPosition(state, creature, to) ||
+        !canTraverseDiagonal(state, creature, from, to, mode.mode) ||
+        !canTraverseElevation(from, to, mode.mode)
+      ) {
+        return [];
+      }
+
+      steps += getStepCost(state, creature, from, to, costMultiplier);
+    }
+
+    return steps * FEET_PER_SQUARE <= mode.maxFeet
+      ? [{ position: destination, costFeet: steps * FEET_PER_SQUARE, path: normalizedPath }]
+      : [];
+  });
+
+  return validOptions.sort((a, b) => a.costFeet - b.costFeet)[0];
 }
 
 function getMovementOptionsForDestinationByMode(
@@ -142,6 +179,7 @@ function getMovementOptionsForDestinationByMode(
       if (
         current.path.some((position) => samePosition(position, next)) ||
         !canEnterPosition(state, creature, next) ||
+        !canTraverseDiagonal(state, creature, currentPosition, next, mode.mode) ||
         !canTraverseElevation(currentPosition, next, mode.mode)
       ) {
         continue;
@@ -181,9 +219,13 @@ export function isOccupied(state: CombatState, position: GridPosition, ignoredCr
 function neighbors(position: GridPosition): GridPosition[] {
   return [
     { x: position.x, y: position.y - 1 },
+    { x: position.x + 1, y: position.y - 1 },
     { x: position.x + 1, y: position.y },
+    { x: position.x + 1, y: position.y + 1 },
     { x: position.x, y: position.y + 1 },
-    { x: position.x - 1, y: position.y }
+    { x: position.x - 1, y: position.y + 1 },
+    { x: position.x - 1, y: position.y },
+    { x: position.x - 1, y: position.y - 1 }
   ];
 }
 
@@ -225,7 +267,11 @@ function getReachableByMode(
     }
 
     for (const next of getNeighborPositions(state, currentPosition, mode.mode)) {
-      if (!canEnterPosition(state, creature, next) || !canTraverseElevation(currentPosition, next, mode.mode)) {
+      if (
+        !canEnterPosition(state, creature, next) ||
+        !canTraverseDiagonal(state, creature, currentPosition, next, mode.mode) ||
+        !canTraverseElevation(currentPosition, next, mode.mode)
+      ) {
         continue;
       }
 
@@ -310,22 +356,41 @@ function canTraverseElevation(from: GridPosition, to: GridPosition, mode: Moveme
   return getElevation(to) - getElevation(from) <= 1;
 }
 
+function canTraverseDiagonal(
+  state: CombatState,
+  creature: Creature,
+  from: GridPosition,
+  to: GridPosition,
+  mode: MovementMode
+): boolean {
+  if (Math.abs(to.x - from.x) !== 1 || Math.abs(to.y - from.y) !== 1) {
+    return true;
+  }
+
+  return [
+    { x: to.x, y: from.y, z: getElevation(to) },
+    { x: from.x, y: to.y, z: getElevation(to) }
+  ].some(
+    (side) =>
+      canEnterPosition(state, creature, side) &&
+      !isOccupied(state, side, creature.id) &&
+      canTraverseElevation(from, side, mode)
+  );
+}
+
 function getStepCost(state: CombatState, creature: Creature, from: GridPosition, to: GridPosition, costMultiplier: number): number {
   const baseCost = Math.max(1, Math.abs(getElevation(to) - getElevation(from))) * costMultiplier;
   return isOccupiedByAlliedCreature(state, creature, to) ? baseCost + 1 : baseCost;
 }
 
-function samePath(a: GridPosition[], b: GridPosition[]): boolean {
-  return a.length === b.length && a.every((position, index) => samePosition(position, b[index]));
-}
-
 function isOccupiedByHostileCreature(state: CombatState, mover: Creature, position: GridPosition): boolean {
   const occupyingCreature = getOccupyingCreature(state, position, mover.id);
-  return occupyingCreature !== undefined && occupyingCreature.team !== mover.team;
+  return occupyingCreature !== undefined && areHostile(occupyingCreature, mover, state);
 }
 
 function isOccupiedByAlliedCreature(state: CombatState, mover: Creature, position: GridPosition): boolean {
-  return getOccupyingCreature(state, position, mover.id)?.team === mover.team;
+  const occupyingCreature = getOccupyingCreature(state, position, mover.id);
+  return occupyingCreature !== undefined && areAllies(occupyingCreature, mover, state);
 }
 
 function getOccupyingCreature(state: CombatState, position: GridPosition, ignoredCreatureId?: string): Creature | undefined {

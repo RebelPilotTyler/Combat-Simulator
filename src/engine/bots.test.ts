@@ -168,6 +168,24 @@ describe('bot turns', () => {
     expect(result.log.some((entry) => entry.message.includes('found no good target') || entry.message.includes('waits'))).toBe(true);
   });
 
+  it('attacks a different numbered team while ignoring allies and neutral creatures', () => {
+    const state = rollInitiative(
+      createCombatState([
+        bot('rangedAttacker', { team: 'team-3', actions: [bowShot], position: { x: 0, y: 0 } }),
+        creature({ id: 'ally', name: 'Ally', team: 'team-3', hp: 20, position: { x: 1, y: 0 } }),
+        creature({ id: 'neutral', name: 'Neutral', team: 'neutral', hp: 20, position: { x: 2, y: 0 } }),
+        creature({ id: 'hostile', name: 'Hostile', team: 'team-1', hp: 20, position: { x: 3, y: 0 } })
+      ], 6, 3),
+      sequence([0.9, 0.2, 0.1, 0.05])
+    );
+
+    const result = runBotTurn(state, sequence([0.7, 0]));
+
+    expect(findCreature(result, 'ally').hp).toBe(20);
+    expect(findCreature(result, 'neutral').hp).toBe(20);
+    expect(findCreature(result, 'hostile').hp).toBeLessThan(20);
+  });
+
   it('safely ends when no valid target exists', () => {
     const state = rollInitiative(createCombatState([bot('passive')]), sequence([0.9]));
 

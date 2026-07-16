@@ -12,6 +12,7 @@ import type {
   SavingThrowModifierContext,
   StackBehavior
 } from './types';
+import { areAllies } from './teams';
 
 export const CORE_CONDITION_IDS = [
   'blinded',
@@ -299,7 +300,7 @@ conditionRegistry.helpedTarget = {
       }
 
       const helper = context.state.creatures.find((creature) => creature.id === context.condition.sourceCreatureId);
-      return helper && helper.team === context.attacker.team && helper.id !== context.attacker.id ? { advantage: true } : undefined;
+      return helper && areAllies(helper, context.attacker, context.state) && helper.id !== context.attacker.id ? { advantage: true } : undefined;
     }
   }
 };

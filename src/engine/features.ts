@@ -1,6 +1,7 @@
 import { abilityModifier } from './dice';
 import { getConditionDefinition, hasCondition, normalizeConditions } from './conditions';
 import { getDistanceFeet } from './targeting';
+import { areAllies, areHostile } from './teams';
 import type {
   Ability,
   ActionDefinition,
@@ -228,7 +229,7 @@ function passiveSelectorTargetsCreature(
     if (owner.id === target.id || target.hp <= 0 || hasCondition(target, 'defeated')) {
       return false;
     }
-    const teamMatches = selector.type === 'alliesWithinRange' ? target.team === owner.team : target.team !== owner.team;
+    const teamMatches = selector.type === 'alliesWithinRange' ? areAllies(target, owner, state) : areHostile(target, owner, state);
     return teamMatches && getDistanceFeet(owner.position, target.position) <= (selector.range ?? 0);
   }
   return false;

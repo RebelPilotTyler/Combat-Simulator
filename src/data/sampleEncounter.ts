@@ -84,6 +84,7 @@ const cracklingPulse: ActionDefinition = {
   kind: 'spell',
   type: 'savingThrowEffect',
   actionCost: 'action',
+  targetMode: 'point',
   tags: ['spell', 'area'],
   range: 6,
   damage: { dice: '2d6', type: 'lightning' },
@@ -157,7 +158,7 @@ export const sampleCreatures: Creature[] = [
   {
     id: 'hero-guard',
     name: 'Hero Guard',
-    team: 'players',
+    team: 'team-1',
     hp: 24,
     maxHp: 24,
     ac: 16,
@@ -192,7 +193,7 @@ export const sampleCreatures: Creature[] = [
   {
     id: 'ember-apprentice',
     name: 'Ember Apprentice',
-    team: 'players',
+    team: 'team-1',
     hp: 17,
     maxHp: 17,
     ac: 13,
@@ -260,7 +261,7 @@ export const sampleCreatures: Creature[] = [
   {
     id: 'training-brute',
     name: 'Training Brute',
-    team: 'enemies',
+    team: 'team-2',
     hp: 30,
     maxHp: 30,
     ac: 13,
@@ -321,7 +322,7 @@ export const sampleCreatures: Creature[] = [
   {
     id: 'target-skirmisher',
     name: 'Target Skirmisher',
-    team: 'enemies',
+    team: 'team-2',
     hp: 18,
     maxHp: 18,
     ac: 14,

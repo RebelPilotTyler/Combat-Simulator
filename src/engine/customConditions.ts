@@ -83,7 +83,7 @@ export const REFERENCE_CONDITION_TEMPLATES: CustomConditionTemplate[] = [
       { type: 'grantAdvantage', note: 'Target is petrified' }
     ]),
     rule('petrified-resistance', 'Damage against petrified creature is halved', 'beforeDamage', [{ type: 'actionTarget' }], [{ type: 'targetHasCondition', conditionId: 'petrified' }], [
-      { type: 'multiplyDamage', factor: 0.5, note: 'Petrified resistance' }
+      { type: 'grantDamageResistance', damageType: 'all', note: 'Petrified resistance' }
     ])
   ]),
   conditionTemplate('poisoned', 'Poisoned', 'Disadvantage on attack rolls and ability checks. Custom rules can express the attack-roll part.', ['core', 'poison'], [
@@ -270,6 +270,12 @@ export function getRuleEffectPlainEnglish(effect: RuleEffectOperation): string {
       return `Reduce damage against the selected target by ${effect.amount}.`;
     case 'setDamageMinimum':
       return `Raise damage dealt by the selected source to at least ${effect.amount}.`;
+    case 'grantDamageResistance':
+      return `Grant resistance to ${effect.damageType} damage.`;
+    case 'grantDamageImmunity':
+      return `Grant immunity to ${effect.damageType} damage.`;
+    case 'grantDamageVulnerability':
+      return `Grant vulnerability to ${effect.damageType} damage.`;
     case 'multiplyMovementCost':
       return `Movement costs ${effect.factor}x as much while this condition is active.`;
     case 'modifyArmorClass':
@@ -309,6 +315,12 @@ export function getRuleEffectWarnings(effect: RuleEffectOperation): string[] {
   }
   if (effect.type === 'multiplyDamage' && effect.factor < 0) {
     warnings.push('Damage multiplier should not be negative.');
+  }
+  if (
+    (effect.type === 'grantDamageResistance' || effect.type === 'grantDamageImmunity' || effect.type === 'grantDamageVulnerability') &&
+    !effect.damageType.trim()
+  ) {
+    warnings.push('Damage type is required. Use "all" to match every damage type.');
   }
   if (effect.type === 'multiplyMovementCost' && effect.factor <= 0) {
     warnings.push('Movement cost multiplier must be greater than 0.');
@@ -490,6 +502,12 @@ function normalizeEffect(effect: RuleEffectOperation): RuleEffectOperation | und
       return typeof effect.dice === 'string' && effect.dice.trim() ? effect : undefined;
     case 'multiplyDamage':
       return typeof effect.factor === 'number' ? effect : undefined;
+    case 'grantDamageResistance':
+    case 'grantDamageImmunity':
+    case 'grantDamageVulnerability':
+      return typeof effect.damageType === 'string' && effect.damageType.trim()
+        ? { ...effect, damageType: effect.damageType.trim().toLowerCase() }
+        : undefined;
     case 'multiplyMovementCost':
       return typeof effect.factor === 'number' && effect.factor > 0 ? effect : undefined;
     case 'applyCondition':

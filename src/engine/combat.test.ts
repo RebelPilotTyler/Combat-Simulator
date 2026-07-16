@@ -1882,6 +1882,77 @@ describe('combat engine', () => {
     expect(result.log[0].message).toContain('takes 1 damage');
   });
 
+  it.each([
+    ['resistance', { damageResistances: ['fire'] }, 18],
+    ['immunity', { damageImmunities: ['fire'] }, 20],
+    ['vulnerability', { damageVulnerabilities: ['fire'] }, 10],
+    ['resistance and vulnerability', { damageResistances: ['fire'], damageVulnerabilities: ['fire'] }, 15]
+  ])('applies native fire %s to typed action damage', (_label, defenses, expectedHp) => {
+    const fireStrike: ActionDefinition = {
+      ...baseCreature.actions[0],
+      id: 'fire-strike',
+      damage: { dice: '1d6+2', type: 'fire' }
+    };
+    const state = rollInitiative(
+      createCombatState([
+        creature({ id: 'a', name: 'Alpha', actions: [fireStrike] }),
+        creature({
+          id: 'b',
+          name: 'Bravo',
+          team: 'enemies',
+          hp: 20,
+          maxHp: 20,
+          position: { x: 1, y: 0 },
+          ...defenses
+        })
+      ]),
+      sequence([0.9, 0.1])
+    );
+
+    const result = performAttackAction(state, 'fire-strike', 'b', sequence([0.5, 0.49]));
+
+    expect(findCreatureForTest(result, 'b').hp).toBe(expectedHp);
+  });
+
+  it('allows a custom condition hook to grant typed damage immunity', () => {
+    const fireStrike: ActionDefinition = {
+      ...baseCreature.actions[0],
+      id: 'fire-strike',
+      damage: { dice: '1d6+2', type: 'fire' }
+    };
+    const fireWard = normalizeCustomConditionTemplate({
+      id: 'fire-ward',
+      name: 'Fire Ward',
+      rules: [
+        {
+          id: 'fire-ward-immunity',
+          trigger: 'beforeDamage',
+          selectors: [{ type: 'self' }],
+          effects: [{ type: 'grantDamageImmunity', damageType: 'fire' }]
+        }
+      ]
+    });
+    const state = rollInitiative(
+      createCombatState([
+        creature({ id: 'a', name: 'Alpha', actions: [fireStrike] }),
+        creature({
+          id: 'b',
+          name: 'Bravo',
+          team: 'enemies',
+          hp: 20,
+          maxHp: 20,
+          position: { x: 1, y: 0 },
+          conditions: [createAppliedConditionFromTemplate(fireWard)]
+        })
+      ]),
+      sequence([0.9, 0.1])
+    );
+
+    const result = performAttackAction(state, 'fire-strike', 'b', sequence([0.5, 0.49]));
+
+    expect(findCreatureForTest(result, 'b').hp).toBe(20);
+  });
+
   it('runs Aura-style flat modifiers for nearby allies', () => {
     const state = rollInitiative(
       createCombatState([
@@ -2493,6 +2564,47 @@ describe('combat engine', () => {
 
     expect(parsed.ok).toBe(true);
     expect(parsed.state).toEqual(state);
+  });
+
+  it('migrates legacy creature teams when importing saves without faction definitions', () => {
+    const legacyState = createCombatState([
+      creature({ id: 'a', name: 'Alpha', team: 'team-1' }),
+      creature({ id: 'b', name: 'Bravo', team: 'team-2' }),
+      creature({ id: 'c', name: 'Charlie', team: 'neutral' })
+    ]);
+    const legacySave = JSON.parse(serializeCombatState(legacyState)) as Record<string, unknown>;
+    delete legacySave.teams;
+    const legacyCreatures = legacySave.creatures as Array<Record<string, unknown>>;
+    legacyCreatures[0].team = 'players';
+    legacyCreatures[1].team = 'enemies';
+
+    const parsed = parseCombatStateJson(JSON.stringify(legacySave));
+
+    expect(parsed.ok).toBe(true);
+    expect(parsed.state?.creatures.map((candidate) => candidate.team)).toEqual(['team-1', 'team-2', 'neutral']);
+    expect(parsed.state?.teams.map((team) => team.id)).toEqual(expect.arrayContaining(['team-1', 'team-2', 'neutral']));
+  });
+
+  it('preserves custom faction definitions through combat import and export', () => {
+    const state = createCombatState(
+      [creature({ id: 'a', name: 'Alpha', team: 'team-3' })],
+      10,
+      10,
+      [],
+      [],
+      [{ id: 'team-3', name: 'Emerald Guard', color: '#16825d', relationships: { 'team-1': 'allied' } }]
+    );
+
+    const parsed = parseCombatStateJson(serializeCombatState(state));
+
+    expect(parsed.ok).toBe(true);
+    expect(parsed.state?.teams.find((team) => team.id === 'team-3')).toEqual({
+      id: 'team-3',
+      name: 'Emerald Guard',
+      color: '#16825d',
+      neutral: false,
+      relationships: { 'team-1': 'allied' }
+    });
   });
 
   it('bad JSON returns a friendly validation error', () => {

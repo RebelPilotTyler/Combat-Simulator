@@ -1,4 +1,6 @@
 import { abilityModifier, rollDamageDice, rollDice, type RandomSource } from './dice';
+import { getActionDamageType } from './damage';
+import { areAllies, areHostile, normalizeTeamDefinitions, normalizeTeamId } from './teams';
 import type {
   ActionDefinition,
   CardinalDirection,
@@ -19,7 +21,8 @@ import type {
   CombatRulesSettings,
   BotProfile,
   BotResourceStrategy,
-  BotTargetPriority
+  BotTargetPriority,
+  TeamDefinition
 } from './types';
 import { getElevation, getShapeSquares, getTilePosition, isBlocked, isInBounds, samePosition } from './shapes';
 import { getMovementOption, getMovementOptionForPath, getReachableMovementSquares, isOccupied, type MovementOption } from './movement';
@@ -47,6 +50,7 @@ import {
   tickRoundDurations
 } from './conditions';
 import {
+  getDistanceInSquares,
   getDistanceFeet,
   getHostileCreaturesWithinReach,
   getOpportunityAttackCandidates,
@@ -189,12 +193,14 @@ export function createCombatState(
   width = 10,
   height = 10,
   blocked: GridPosition[] = [],
-  heights: GridPosition[] = []
+  heights: GridPosition[] = [],
+  teams?: TeamDefinition[]
 ): CombatState {
   const grid = normalizeGridDefinition({ width, height, blocked, heights });
   const normalizedCreatures = normalizeCreatures(creatures, grid);
   return {
     creatures: normalizedCreatures,
+    teams: normalizeTeamDefinitions(teams, normalizedCreatures),
     grid,
     initiative: [],
     round: 0,
@@ -1622,7 +1628,7 @@ function getBotActionDecisions(
       }
       const simulated = { ...state, creatures: replaceBotPosition(state, bot.id, position) };
       const targets = getTargetsInActionShape(simulated, action, { ...bot, position }, origin, direction)
-        .filter((candidate) => candidate.team !== bot.team && candidate.id !== bot.id);
+        .filter((candidate) => areHostile(candidate, bot, simulated) && candidate.id !== bot.id);
       if (!targets.some((candidate) => candidate.id === target.id)) {
         return [];
       }
@@ -1860,7 +1866,7 @@ function isBotAttackValidFromPosition(
   position: GridPosition,
   target: Creature
 ): boolean {
-  if (target.team === bot.team || target.id === bot.id || isDefeated(target)) {
+  if (!areHostile(target, bot, state) || target.id === bot.id || isDefeated(target)) {
     return false;
   }
   if (!isInActionRange(action, position, target.position)) {
@@ -1949,7 +1955,7 @@ function getBotSavingThrowScoreDetails(
   const save = action.save ?? action.effects.find((effect) => effect.save)?.save;
   const damage = estimateDiceParts(action.damage?.dice ?? action.effects.find((effect) => effect.damage)?.damage?.dice ?? '');
   const allTargets = getTargetsInActionShape(state, action, bot, origin, direction).filter((target) => target.id !== bot.id);
-  const allyTargets = allTargets.filter((target) => target.team === bot.team);
+  const allyTargets = allTargets.filter((target) => areAllies(target, bot, state));
   const saveDc = save ? getEffectiveSaveDc(action, bot, state) ?? save.dc : undefined;
   const enemyExpectedDamage = save && saveDc
     ? enemyTargets.reduce((total, target) => {
@@ -2249,11 +2255,11 @@ function estimateDiceAverage(dice: string): number {
 }
 
 function getLivingEnemies(state: CombatState, creature: Creature): Creature[] {
-  return state.creatures.filter((candidate) => candidate.id !== creature.id && candidate.team !== creature.team && !isDefeated(candidate));
+  return state.creatures.filter((candidate) => candidate.id !== creature.id && areHostile(candidate, creature, state) && !isDefeated(candidate));
 }
 
 function getLivingAllies(state: CombatState, creature: Creature): Creature[] {
-  return state.creatures.filter((candidate) => candidate.team === creature.team && !isDefeated(candidate));
+  return state.creatures.filter((candidate) => areAllies(candidate, creature, state) && !isDefeated(candidate));
 }
 
 function getMinimumDistanceToCreatures(position: GridPosition, creatures: Creature[]): number {
@@ -2483,10 +2489,7 @@ function isPositionInActionShape(
 
   if (shape.type === 'radius') {
     const radius = shape.radius ?? 1;
-    const dx = normalizedPosition.x - normalizedOrigin.x;
-    const dy = normalizedPosition.y - normalizedOrigin.y;
-    const dz = getElevation(normalizedPosition) - getElevation(normalizedOrigin);
-    return dx * dx + dy * dy + dz * dz <= radius * radius;
+    return getDistanceInSquares(normalizedOrigin, normalizedPosition) <= radius;
   }
 
   return getActionShapeSquares(state, action, normalizedOrigin, direction).some((square) => samePosition(square, normalizedPosition));
@@ -2545,7 +2548,7 @@ function isFlankingAttack(state: CombatState, attacker: Creature, target: Creatu
     if (
       ally.id === attacker.id ||
       ally.id === target.id ||
-      ally.team !== attacker.team ||
+      !areAllies(ally, attacker, state) ||
       isDefeated(ally) ||
       !canCreatureTakeReaction(state, ally) ||
       isBlocked(ally.position, state.grid)
@@ -2648,7 +2651,14 @@ function applyDamage(
   const source = findCreature(state, sourceId);
   const target = findCreature(state, targetId);
   let modifiedAmount = Math.max(0, applyBeforeDamageModifiers(state, source, target, action, amount));
-  modifiedAmount = Math.max(0, applyBeforeDamageRules(state, { source, target, action, amount: modifiedAmount, random }));
+  modifiedAmount = Math.max(0, applyBeforeDamageRules(state, {
+    source,
+    target,
+    action,
+    amount: modifiedAmount,
+    damageType: getActionDamageType(action),
+    random
+  }));
   hooks.beforeDamage?.(state, { source, target, action, amount: modifiedAmount });
 
   target.hp = Math.max(0, target.hp - modifiedAmount);
@@ -3069,7 +3079,7 @@ function consumeHelpAfterAttack(state: CombatState, attacker: Creature, target: 
   }
 
   const helper = state.creatures.find((creature) => creature.id === helpedTarget.sourceCreatureId);
-  if (helper && helper.team === attacker.team && helper.id !== attacker.id && removeConditionFromCreature(target, 'helpedTarget')) {
+  if (helper && areAllies(helper, attacker, state) && helper.id !== attacker.id && removeConditionFromCreature(target, 'helpedTarget')) {
     addLog(state, 'condition', `Help against ${target.name} consumed.`);
   }
 }
@@ -3230,6 +3240,7 @@ function normalizeState(state: CombatState): CombatState {
     heights: state.grid.heights ?? []
   };
   state.creatures = normalizeCreatures(state.creatures, state.grid);
+  state.teams = normalizeTeamDefinitions(state.teams, state.creatures);
   state.turnResources = state.turnResources ?? {};
   state.creatures.forEach((creature) => {
     const existing = state.turnResources[creature.id];
@@ -3261,6 +3272,7 @@ function normalizeState(state: CombatState): CombatState {
 function normalizeCreatures(creatures: Creature[], grid?: CombatState['grid']): Creature[] {
   return creatures.map((creature) => ({
     ...creature,
+    team: normalizeTeamId(creature.team),
     controlMode: creature.controlMode === 'bot' ? 'bot' : 'manual',
     botProfile: normalizeBotProfile(creature.botProfile),
     botTargetPriority: normalizeBotTargetPriority(creature.botTargetPriority),

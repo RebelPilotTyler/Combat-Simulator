@@ -6,7 +6,7 @@ const creatures: Creature[] = [
   {
     id: 'ember-apprentice',
     name: 'Ember Apprentice',
-    team: 'players',
+    team: 'team-1',
     hp: 17,
     maxHp: 17,
     ac: 13,
@@ -32,7 +32,7 @@ const creatures: Creature[] = [
   {
     id: 'training-brute',
     name: 'Training Brute',
-    team: 'enemies',
+    team: 'team-2',
     hp: 30,
     maxHp: 30,
     ac: 12,
@@ -63,7 +63,13 @@ describe('filterCreaturesForEditor', () => {
   });
 
   it('filters by creature stats and team', () => {
-    expect(filterCreaturesForEditor(creatures, 'players ac 13').map((creature) => creature.id)).toEqual(['ember-apprentice']);
+    expect(filterCreaturesForEditor(creatures, 'team-1 ac 13').map((creature) => creature.id)).toEqual(['ember-apprentice']);
+  });
+
+  it('filters creature editor entries by a custom numbered team id', () => {
+    const thirdTeamCreature = { ...creatures[0], id: 'third-team-scout', team: 'team-3' };
+
+    expect(filterCreaturesForEditor([...creatures, thirdTeamCreature], 'team-3').map((creature) => creature.id)).toEqual(['third-team-scout']);
   });
 
   it('filters by action tags and feature names', () => {
@@ -180,7 +186,7 @@ describe('estimateEncounterBalance', () => {
     const hero = balanceCreature({
       id: 'hero',
       name: 'Hero',
-      team: 'players',
+      team: 'team-1',
       maxHp: 72,
       hp: 72,
       ac: 15,
@@ -190,7 +196,7 @@ describe('estimateEncounterBalance', () => {
     const brute = balanceCreature({
       id: 'brute',
       name: 'Brute',
-      team: 'enemies',
+      team: 'team-2',
       maxHp: 120,
       hp: 120,
       ac: 15,
@@ -210,18 +216,18 @@ describe('estimateEncounterBalance', () => {
 
     const balance = estimateEncounterBalance([hero, brute, bystander]);
 
-    expect(balance.teams.players.xp).toBe(200);
-    expect(balance.teams.enemies.xp).toBe(700);
+    expect(balance.teams['team-1'].xp).toBe(200);
+    expect(balance.teams['team-2'].xp).toBe(700);
     expect(balance.teams.neutral.count).toBe(1);
-    expect(balance.leader).toBe('enemies');
-    expect(balance.message).toContain('Enemies');
+    expect(balance.leader).toBe('team-2');
+    expect(balance.message).toContain('Team 2 / Enemies');
   });
 
   it('reports roughly even when player and enemy CR weight is close', () => {
     const hero = balanceCreature({
       id: 'hero',
       name: 'Hero',
-      team: 'players',
+      team: 'team-1',
       maxHp: 72,
       hp: 72,
       ac: 15,
@@ -231,7 +237,7 @@ describe('estimateEncounterBalance', () => {
     const rival = balanceCreature({
       id: 'rival',
       name: 'Rival',
-      team: 'enemies',
+      team: 'team-2',
       maxHp: 72,
       hp: 72,
       ac: 15,
@@ -243,6 +249,24 @@ describe('estimateEncounterBalance', () => {
 
     expect(balance.leader).toBe('even');
     expect(balance.ratio).toBe(1);
+  });
+
+  it('includes additional numbered teams in balance summaries', () => {
+    const thirdTeam = balanceCreature({
+      id: 'third-team',
+      name: 'Third Team',
+      team: 'team-3',
+      maxHp: 72,
+      hp: 72,
+      ac: 15,
+      attackBonus: 5,
+      damageDice: '1d8+3'
+    });
+
+    const balance = estimateEncounterBalance([thirdTeam]);
+
+    expect(balance.teams['team-3'].count).toBe(1);
+    expect(balance.message).toContain('Team 3');
   });
 });
 

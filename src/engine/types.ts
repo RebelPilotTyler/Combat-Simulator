@@ -1,4 +1,16 @@
-export type Team = 'players' | 'enemies' | 'neutral';
+export type TeamId = string;
+
+export type Team = TeamId;
+
+export type TeamRelationship = 'allied' | 'hostile' | 'neutral';
+
+export interface TeamDefinition {
+  id: TeamId;
+  name: string;
+  color: string;
+  neutral?: boolean;
+  relationships?: Partial<Record<TeamId, TeamRelationship>>;
+}
 
 export type CreatureControlMode = 'manual' | 'bot';
 
@@ -30,6 +42,8 @@ export type ActionKind = 'meleeAttack' | 'rangedAttack' | 'savingThrowEffect' | 
 
 export type ActionCost = 'action' | 'bonusAction' | 'reaction' | 'free';
 
+export type ActionTargetMode = 'creature' | 'point' | 'self';
+
 export type ResourceReset = 'turnStart' | 'shortRest' | 'longRest' | 'dawn' | 'manual' | 'never';
 
 export type ResourceDisplay = 'pips' | 'number' | 'bar';
@@ -60,6 +74,9 @@ export type EffectOperationType =
   | 'multiplyDamage'
   | 'reduceDamage'
   | 'setDamageMinimum'
+  | 'grantDamageResistance'
+  | 'grantDamageImmunity'
+  | 'grantDamageVulnerability'
   | 'multiplyMovementCost'
   | 'modifyArmorClass'
   | 'modifySpeed'
@@ -116,6 +133,9 @@ export type RuleEffectOperation =
   | { type: 'multiplyDamage'; factor: number; note?: string }
   | { type: 'reduceDamage'; amount: number; note?: string }
   | { type: 'setDamageMinimum'; amount: number; note?: string }
+  | { type: 'grantDamageResistance'; damageType: string; note?: string }
+  | { type: 'grantDamageImmunity'; damageType: string; note?: string }
+  | { type: 'grantDamageVulnerability'; damageType: string; note?: string }
   | { type: 'multiplyMovementCost'; factor: number; note?: string }
   | { type: 'modifyArmorClass'; amount: number; note?: string }
   | { type: 'modifySpeed'; amount: number; note?: string }
@@ -394,6 +414,7 @@ export interface ActionDefinition {
   kind: ActionKind;
   type?: ActionType;
   actionCost: ActionCost;
+  targetMode?: ActionTargetMode;
   tags: ActionTag[];
   range: number;
   reach?: number;
@@ -438,6 +459,9 @@ export interface Creature {
   speed: number;
   climbSpeed?: number;
   flySpeed?: number;
+  damageResistances?: string[];
+  damageImmunities?: string[];
+  damageVulnerabilities?: string[];
   position: GridPosition;
   conditions: AppliedCondition[];
   actions: ActionDefinition[];
@@ -554,6 +578,7 @@ export interface BotMemoryEntry {
 
 export interface CombatState {
   creatures: Creature[];
+  teams: TeamDefinition[];
   grid: GridDefinition;
   initiative: InitiativeEntry[];
   round: number;

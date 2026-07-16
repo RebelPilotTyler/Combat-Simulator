@@ -1,5 +1,7 @@
 import type { ActionCost, GridPosition } from '../engine/types';
 
+export const HOTBAR_PAGE_SIZE = 5;
+
 export interface HotkeyActionLike {
   actionCost: ActionCost;
 }
@@ -46,14 +48,19 @@ export function getActionCostForNumberHotkey(event: Pick<KeyboardEvent, 'shiftKe
   return 'action';
 }
 
-export function getActionsForHotkeyCost<Action extends HotkeyActionLike>(actions: Action[], actionCost: ActionCost): Action[] {
-  return actions.filter((action) => action.actionCost === actionCost).slice(0, 9);
+export function getActionsForHotkeyCost<Action extends HotkeyActionLike>(actions: Action[], actionCost: ActionCost, page = 0): Action[] {
+  const matchingActions = actions.filter((action) => action.actionCost === actionCost);
+  const pageCount = Math.max(1, Math.ceil(matchingActions.length / HOTBAR_PAGE_SIZE));
+  const currentPage = Math.min(pageCount - 1, Math.max(0, page));
+  const start = currentPage * HOTBAR_PAGE_SIZE;
+  return matchingActions.slice(start, start + HOTBAR_PAGE_SIZE);
 }
 
 export function getActionForNumberHotkey<Action extends HotkeyActionLike>(
   actions: Action[],
   key: string,
-  event: Pick<KeyboardEvent, 'shiftKey' | 'ctrlKey' | 'metaKey'>
+  event: Pick<KeyboardEvent, 'shiftKey' | 'ctrlKey' | 'metaKey'>,
+  pages: Partial<Record<ActionCost, number>> = {}
 ): Action | undefined {
   const index = getNumberHotkeyIndex(key);
   if (index === undefined) {
@@ -61,7 +68,8 @@ export function getActionForNumberHotkey<Action extends HotkeyActionLike>(
   }
 
   const cost = getActionCostForNumberHotkey(event);
-  return getActionsForHotkeyCost(actions, cost)[index] ?? ((event.ctrlKey || event.metaKey) ? getActionsForHotkeyCost(actions, 'free')[index] : undefined);
+  return getActionsForHotkeyCost(actions, cost, pages[cost])[index] ??
+    ((event.ctrlKey || event.metaKey) ? getActionsForHotkeyCost(actions, 'free', pages.free)[index] : undefined);
 }
 
 export function moveGridCursor(
