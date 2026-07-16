@@ -4,6 +4,10 @@ export type CreatureControlMode = 'manual' | 'bot';
 
 export type BotProfile = 'aggressiveMelee' | 'rangedAttacker' | 'cowardly' | 'support' | 'passive';
 
+export type BotTargetPriority = 'balanced' | 'nearest' | 'weakest' | 'lowestHp' | 'easiestToHit';
+
+export type BotResourceStrategy = 'normal' | 'conserve' | 'spendFreely';
+
 export type Ability = 'str' | 'dex' | 'con' | 'int' | 'wis' | 'cha';
 
 export type ConditionId = string;
@@ -424,6 +428,8 @@ export interface Creature {
   team: Team;
   controlMode?: CreatureControlMode;
   botProfile?: BotProfile;
+  botTargetPriority?: BotTargetPriority;
+  botResourceStrategy?: BotResourceStrategy;
   hp: number;
   maxHp: number;
   ac: number;
@@ -537,6 +543,15 @@ export interface CombatRulesSettings {
   };
 }
 
+export interface BotMemoryEntry {
+  lastTargetId?: string;
+  lastTargetRound?: number;
+  lastAttackerId?: string;
+  lastAttackedRound?: number;
+  lastDamagedById?: string;
+  lastDamagedRound?: number;
+}
+
 export interface CombatState {
   creatures: Creature[];
   grid: GridDefinition;
@@ -549,6 +564,7 @@ export interface CombatState {
   pendingReactions: PendingReaction[];
   rulesSettings?: CombatRulesSettings;
   ruleMemory?: Record<string, { turnKey?: string; round?: number }>;
+  botMemory?: Record<string, BotMemoryEntry>;
   visualEvents?: VisualEvent[];
   log: CombatLogEntry[];
 }

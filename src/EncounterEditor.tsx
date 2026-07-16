@@ -30,6 +30,8 @@ import type {
   ActionKind,
   ActionTag,
   BotProfile,
+  BotResourceStrategy,
+  BotTargetPriority,
   CombatState,
   CreatureControlMode,
   ConditionDurationType,
@@ -65,6 +67,8 @@ const abilities: Ability[] = ['str', 'dex', 'con', 'int', 'wis', 'cha'];
 const teams: Team[] = ['players', 'enemies', 'neutral'];
 const controlModes: CreatureControlMode[] = ['manual', 'bot'];
 const botProfiles: BotProfile[] = ['aggressiveMelee', 'rangedAttacker', 'cowardly', 'support', 'passive'];
+const botTargetPriorities: BotTargetPriority[] = ['balanced', 'nearest', 'weakest', 'lowestHp', 'easiestToHit'];
+const botResourceStrategies: BotResourceStrategy[] = ['normal', 'conserve', 'spendFreely'];
 const actionKinds: ActionKind[] = ['meleeAttack', 'rangedAttack', 'savingThrowEffect', 'basicAction', 'spell', 'multiattack', 'custom'];
 const actionCosts: ActionCost[] = ['action', 'bonusAction', 'reaction', 'free'];
 const actionTags: ActionTag[] = ['attack', 'spell', 'melee', 'ranged', 'area', 'condition', 'movement', 'opportunity', 'bonus', 'reaction', 'placeholder'];
@@ -937,6 +941,16 @@ export function EncounterEditor({
                     ))}
                   </select>
                 </label>
+                <NumberInput label="HP" value={creatureDraft.hp} onChange={(value) => updateDraftCreature({ hp: value })} />
+                <NumberInput label="Max HP" value={creatureDraft.maxHp} onChange={(value) => updateDraftCreature({ maxHp: value })} />
+                <NumberInput label="AC" value={creatureDraft.ac} onChange={(value) => updateDraftCreature({ ac: value })} />
+                <NumberInput label="Proficiency" value={creatureDraft.proficiencyBonus} onChange={(value) => updateDraftCreature({ proficiencyBonus: value })} />
+              </div>
+            </details>
+
+            <details className="editor-section editor-subsection">
+              <summary>Bot Settings</summary>
+              <div className="form-grid">
                 <label>
                   Control
                   <select value={creatureDraft.controlMode ?? 'manual'} onChange={(event) => updateDraftCreature({ controlMode: event.target.value as CreatureControlMode })}>
@@ -957,10 +971,26 @@ export function EncounterEditor({
                     ))}
                   </select>
                 </label>
-                <NumberInput label="HP" value={creatureDraft.hp} onChange={(value) => updateDraftCreature({ hp: value })} />
-                <NumberInput label="Max HP" value={creatureDraft.maxHp} onChange={(value) => updateDraftCreature({ maxHp: value })} />
-                <NumberInput label="AC" value={creatureDraft.ac} onChange={(value) => updateDraftCreature({ ac: value })} />
-                <NumberInput label="Proficiency" value={creatureDraft.proficiencyBonus} onChange={(value) => updateDraftCreature({ proficiencyBonus: value })} />
+                <label>
+                  Target Priority
+                  <select value={creatureDraft.botTargetPriority ?? 'balanced'} onChange={(event) => updateDraftCreature({ botTargetPriority: event.target.value as BotTargetPriority })}>
+                    {botTargetPriorities.map((priority) => (
+                      <option key={priority} value={priority}>
+                        {formatBotTargetPriorityLabel(priority)}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <label>
+                  Resource Use
+                  <select value={creatureDraft.botResourceStrategy ?? 'normal'} onChange={(event) => updateDraftCreature({ botResourceStrategy: event.target.value as BotResourceStrategy })}>
+                    {botResourceStrategies.map((strategy) => (
+                      <option key={strategy} value={strategy}>
+                        {formatBotResourceStrategyLabel(strategy)}
+                      </option>
+                    ))}
+                  </select>
+                </label>
               </div>
             </details>
 
@@ -2854,6 +2884,8 @@ function coerceCreature(value: unknown): Creature | undefined {
     team: isTeam(value.team) ? value.team : blank.team,
     controlMode: isCreatureControlMode(value.controlMode) ? value.controlMode : blank.controlMode,
     botProfile: isBotProfile(value.botProfile) ? value.botProfile : blank.botProfile,
+    botTargetPriority: isBotTargetPriority(value.botTargetPriority) ? value.botTargetPriority : blank.botTargetPriority,
+    botResourceStrategy: isBotResourceStrategy(value.botResourceStrategy) ? value.botResourceStrategy : blank.botResourceStrategy,
     hp: numberOr(value.hp, blank.hp),
     maxHp: numberOr(value.maxHp, numberOr(value.hp, blank.maxHp)),
     ac: numberOr(value.ac, blank.ac),
@@ -2945,6 +2977,8 @@ function createBlankCreature(): Creature {
     team: 'enemies',
     controlMode: 'manual',
     botProfile: 'passive',
+    botTargetPriority: 'balanced',
+    botResourceStrategy: 'normal',
     hp: 10,
     maxHp: 10,
     ac: 12,
@@ -3116,6 +3150,12 @@ function getEncounterOverridesFromCreature(creature: Creature, template?: Creatu
   if (!template || creature.botProfile !== template.botProfile) {
     overrides.botProfile = creature.botProfile;
   }
+  if (!template || creature.botTargetPriority !== template.botTargetPriority) {
+    overrides.botTargetPriority = creature.botTargetPriority;
+  }
+  if (!template || creature.botResourceStrategy !== template.botResourceStrategy) {
+    overrides.botResourceStrategy = creature.botResourceStrategy;
+  }
   if (creature.readiedAction) {
     overrides.readiedAction = cloneJson(creature.readiedAction);
   }
@@ -3194,6 +3234,8 @@ function normalizeCreatureDraft(creature: Creature): Creature {
     name: creature.name.trim() || 'Unnamed Creature',
     controlMode: creature.controlMode === 'bot' ? 'bot' : 'manual',
     botProfile: isBotProfile(creature.botProfile) ? creature.botProfile : 'passive',
+    botTargetPriority: isBotTargetPriority(creature.botTargetPriority) ? creature.botTargetPriority : 'balanced',
+    botResourceStrategy: isBotResourceStrategy(creature.botResourceStrategy) ? creature.botResourceStrategy : 'normal',
     hp: clamp(numberOr(creature.hp, maxHp), 0, maxHp),
     maxHp,
     ac: Math.max(0, numberOr(creature.ac, 10)),
@@ -3555,6 +3597,14 @@ function isBotProfile(value: unknown): value is BotProfile {
   return botProfiles.includes(value as BotProfile);
 }
 
+function isBotTargetPriority(value: unknown): value is BotTargetPriority {
+  return botTargetPriorities.includes(value as BotTargetPriority);
+}
+
+function isBotResourceStrategy(value: unknown): value is BotResourceStrategy {
+  return botResourceStrategies.includes(value as BotResourceStrategy);
+}
+
 function formatBotProfileLabel(profile: BotProfile): string {
   switch (profile) {
     case 'aggressiveMelee':
@@ -3567,6 +3617,32 @@ function formatBotProfileLabel(profile: BotProfile): string {
       return 'Support';
     case 'passive':
       return 'Passive/Test Dummy';
+  }
+}
+
+function formatBotTargetPriorityLabel(priority: BotTargetPriority): string {
+  switch (priority) {
+    case 'nearest':
+      return 'Nearest';
+    case 'weakest':
+      return 'Weakest AC';
+    case 'lowestHp':
+      return 'Lowest HP';
+    case 'easiestToHit':
+      return 'Easiest to Hit';
+    case 'balanced':
+      return 'Balanced';
+  }
+}
+
+function formatBotResourceStrategyLabel(strategy: BotResourceStrategy): string {
+  switch (strategy) {
+    case 'conserve':
+      return 'Conserve Resources';
+    case 'spendFreely':
+      return 'Spend Freely';
+    case 'normal':
+      return 'Normal Resources';
   }
 }
 

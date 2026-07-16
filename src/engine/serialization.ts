@@ -3,7 +3,7 @@ import { DEFAULT_RULES_SETTINGS } from './combat';
 import { getEffectiveMovementSpeed } from './features';
 import { clampGridPosition, normalizeGridDefinition } from './grid';
 import { getTilePosition } from './shapes';
-import type { ActionDefinition, BotProfile, CombatState, Creature, Resource, ResourceReset, TurnResourceState } from './types';
+import type { ActionDefinition, BotProfile, BotResourceStrategy, BotTargetPriority, CombatState, Creature, Resource, ResourceReset, TurnResourceState } from './types';
 
 const RESOURCE_RESET_OPTIONS: ResourceReset[] = ['turnStart', 'shortRest', 'longRest', 'dawn', 'manual', 'never'];
 
@@ -116,8 +116,47 @@ export function normalizeImportedCombatState(state: CombatState): CombatState {
       }
     },
     ruleMemory: state.ruleMemory ?? {},
+    botMemory: normalizeImportedBotMemory(state.botMemory, creatures),
     log: state.log ?? []
   };
+}
+
+function normalizeImportedBotMemory(
+  memory: CombatState['botMemory'] | undefined,
+  creatures: Creature[]
+): NonNullable<CombatState['botMemory']> {
+  const creatureIds = new Set(creatures.map((creature) => creature.id));
+  return Object.fromEntries(
+    Object.entries(memory ?? {})
+      .filter(([creatureId]) => creatureIds.has(creatureId))
+      .map(([creatureId, entry]) => [creatureId, normalizeImportedBotMemoryEntry(entry, creatureIds)])
+  );
+}
+
+function normalizeImportedBotMemoryEntry(
+  entry: NonNullable<CombatState['botMemory']>[string],
+  creatureIds: Set<string>
+): NonNullable<CombatState['botMemory']>[string] {
+  const normalized: NonNullable<CombatState['botMemory']>[string] = {};
+  if (entry.lastTargetId && creatureIds.has(entry.lastTargetId)) {
+    normalized.lastTargetId = entry.lastTargetId;
+    if (typeof entry.lastTargetRound === 'number') {
+      normalized.lastTargetRound = entry.lastTargetRound;
+    }
+  }
+  if (entry.lastAttackerId && creatureIds.has(entry.lastAttackerId)) {
+    normalized.lastAttackerId = entry.lastAttackerId;
+    if (typeof entry.lastAttackedRound === 'number') {
+      normalized.lastAttackedRound = entry.lastAttackedRound;
+    }
+  }
+  if (entry.lastDamagedById && creatureIds.has(entry.lastDamagedById)) {
+    normalized.lastDamagedById = entry.lastDamagedById;
+    if (typeof entry.lastDamagedRound === 'number') {
+      normalized.lastDamagedRound = entry.lastDamagedRound;
+    }
+  }
+  return normalized;
 }
 
 function validateCreatureShape(value: unknown): string | undefined {
@@ -164,6 +203,8 @@ function normalizeImportedCreature(creature: Creature, grid: CombatState['grid']
     ...creature,
     controlMode: creature.controlMode === 'bot' ? 'bot' : 'manual',
     botProfile: normalizeBotProfile(creature.botProfile),
+    botTargetPriority: normalizeBotTargetPriority(creature.botTargetPriority),
+    botResourceStrategy: normalizeBotResourceStrategy(creature.botResourceStrategy),
     position: clampGridPosition(getTilePosition(creature.position, grid), grid),
     conditions: normalizeConditions(creature.conditions),
     actions: creature.actions.map(normalizeImportedAction),
@@ -185,6 +226,16 @@ function normalizeBotProfile(profile: Creature['botProfile']): BotProfile {
   return profile === 'aggressiveMelee' || profile === 'rangedAttacker' || profile === 'cowardly' || profile === 'support' || profile === 'passive'
     ? profile
     : 'passive';
+}
+
+function normalizeBotTargetPriority(priority: Creature['botTargetPriority']): BotTargetPriority {
+  return priority === 'nearest' || priority === 'weakest' || priority === 'lowestHp' || priority === 'easiestToHit' || priority === 'balanced'
+    ? priority
+    : 'balanced';
+}
+
+function normalizeBotResourceStrategy(strategy: Creature['botResourceStrategy']): BotResourceStrategy {
+  return strategy === 'conserve' || strategy === 'spendFreely' || strategy === 'normal' ? strategy : 'normal';
 }
 
 function normalizeImportedAction(action: ActionDefinition): ActionDefinition {

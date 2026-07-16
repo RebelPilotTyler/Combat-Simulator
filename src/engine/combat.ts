@@ -17,7 +17,9 @@ import type {
   RollModifier,
   MultiattackStep,
   CombatRulesSettings,
-  BotProfile
+  BotProfile,
+  BotResourceStrategy,
+  BotTargetPriority
 } from './types';
 import { getElevation, getShapeSquares, getTilePosition, isBlocked, isInBounds, samePosition } from './shapes';
 import { getMovementOption, getMovementOptionForPath, getReachableMovementSquares, isOccupied, type MovementOption } from './movement';
@@ -127,6 +129,57 @@ export interface AttackDebugStats {
   targetAc: number;
 }
 
+export interface BotTurnPreview {
+  canRun: boolean;
+  botId?: string;
+  botName?: string;
+  profile?: BotProfile;
+  targetPriority?: BotTargetPriority;
+  resourceStrategy?: BotResourceStrategy;
+  order?: BotTurnOrder;
+  summary: string;
+  movement?: {
+    from: GridPosition;
+    to: GridPosition;
+    costFeet: number;
+    steps: number;
+  };
+  action?: {
+    actionId: string;
+    actionName: string;
+    targetIds: string[];
+    targetNames: string[];
+    score: number;
+    scoreDetails: BotActionScoreDetails;
+  };
+  bonusAction?: {
+    actionId: string;
+    actionName: string;
+    targetIds: string[];
+    targetNames: string[];
+    score: number;
+  };
+  willDodgeOrWait: boolean;
+  notes: string[];
+}
+
+export interface BotActionScoreDetails {
+  total: number;
+  expectedDamage: number;
+  hitChance?: number;
+  critChance?: number;
+  saveFailureChance?: number;
+  enemyTargets: number;
+  allyTargets: number;
+  profileBonus: number;
+  targetPriorityBonus: number;
+  memoryBonus: number;
+  positioningAdjustment: number;
+  resourcePenalty: number;
+  friendlyFirePenalty: number;
+  notes: string[];
+}
+
 export const DEFAULT_RULES_SETTINGS: CombatRulesSettings = {
   flanking: { enabled: false, benefit: 'advantage' }
 };
@@ -152,6 +205,7 @@ export function createCombatState(
     pendingReactions: [],
     rulesSettings: cloneJson(DEFAULT_RULES_SETTINGS),
     ruleMemory: {},
+    botMemory: {},
     log: []
   };
 }
@@ -943,6 +997,7 @@ function resolveAttackAction(
 
   hooks.afterAttackRoll?.(next, { attacker, target, action, attackTotal });
   runAfterAttackRollRules(next, { attacker, target, action, attackTotal, hit, critical });
+  rememberAttackTarget(next, attacker.id, target.id);
   addLog(
     next,
     'attack',
@@ -1035,6 +1090,7 @@ export function performSavingThrowAction(
   if (action.tags.includes('spell') || action.kind === 'spell') {
     addLog(next, 'action', `${source.name} casts ${action.name}.`);
   }
+  validTargets.forEach((target) => rememberAttackTarget(next, source.id, target.id));
 
   enqueueVisualEvent(next, {
     kind: 'shapeEffect',
@@ -1067,6 +1123,8 @@ export function runBotTurn(state: CombatState, random: RandomSource = Math.rando
 
   let next = runBotTurnMovementStep(prepared);
   next = runBotTurnActionStep(next, random);
+  next = runBotTurnBonusActionStep(next, random);
+  next = runBotTurnPostMovementStep(next);
   return runBotTurnEndStep(next);
 }
 
@@ -1076,6 +1134,104 @@ export function canRunBotTurn(state: CombatState): boolean {
   }
 
   return findCreature(state, state.activeCreatureId).controlMode === 'bot';
+}
+
+export function getBotTurnPreview(state: CombatState): BotTurnPreview {
+  const next = ensureTurnState(normalizeState(cloneState(state)));
+  if (!next.activeCreatureId) {
+    return {
+      canRun: false,
+      summary: 'No active creature.',
+      willDodgeOrWait: false,
+      notes: ['Roll initiative or select a valid active turn before running a bot.']
+    };
+  }
+
+  const bot = getActiveCreature(next);
+  if (bot.controlMode !== 'bot') {
+    return {
+      canRun: false,
+      botId: bot.id,
+      botName: bot.name,
+      profile: bot.botProfile ?? 'passive',
+      targetPriority: bot.botTargetPriority ?? 'balanced',
+      resourceStrategy: bot.botResourceStrategy ?? 'normal',
+      summary: `${bot.name} is manual-controlled.`,
+      willDodgeOrWait: false,
+      notes: ['Only bot-controlled creatures can produce a bot turn preview.']
+    };
+  }
+
+  const profile = bot.botProfile ?? 'passive';
+  if (profile === 'passive') {
+    return {
+      canRun: true,
+      botId: bot.id,
+      botName: bot.name,
+      profile,
+      targetPriority: bot.botTargetPriority ?? 'balanced',
+      resourceStrategy: bot.botResourceStrategy ?? 'normal',
+      summary: `${bot.name} will wait.`,
+      willDodgeOrWait: true,
+      notes: ['Passive/Test Dummy profile takes no actions.']
+    };
+  }
+
+  const plan = chooseBotTurnPlan(next, bot, profile);
+  const movement = plan.preMovement;
+  const previewPosition = movement?.position ?? bot.position;
+  const actionState = movement ? { ...next, creatures: replaceBotPosition(next, bot.id, previewPosition) } : next;
+  const previewBot = movement ? { ...bot, position: previewPosition } : bot;
+  const decision = plan.mainAction && !movement ? plan.mainAction : chooseBotAction(actionState, previewBot, profile);
+  const bonusDecision = decision ? chooseBotBonusAction(actionState, previewBot, profile) : undefined;
+  const waitLabel = !next.turnState.actionUsed && canCreatureTakeAction(next, bot) ? 'Dodge' : 'wait';
+  const summary = decision
+    ? plan.order === 'move-then-action' && movement
+      ? `${bot.name} plans to move ${movement.costFeet} ft, then use ${decision.action.name} on ${decision.targets.map((target) => target.name).join(', ')}.`
+      : plan.order === 'action-then-move'
+        ? `${bot.name} plans to use ${decision.action.name} on ${decision.targets.map((target) => target.name).join(', ')}, then reposition.`
+        : `${bot.name} plans to use ${decision.action.name} on ${decision.targets.map((target) => target.name).join(', ')}.`
+    : `${bot.name} plans to ${waitLabel}.`;
+
+  return {
+    canRun: true,
+    botId: bot.id,
+    botName: bot.name,
+    profile,
+    targetPriority: bot.botTargetPriority ?? 'balanced',
+    resourceStrategy: bot.botResourceStrategy ?? 'normal',
+    order: plan.order,
+    summary,
+    movement: movement
+      ? {
+          from: bot.position,
+          to: movement.position,
+          costFeet: movement.costFeet,
+          steps: Math.max(0, movement.path.length - 1)
+        }
+      : undefined,
+    action: decision
+      ? {
+          actionId: decision.action.id,
+        actionName: decision.action.name,
+        targetIds: decision.targets.map((target) => target.id),
+        targetNames: decision.targets.map((target) => target.name),
+        score: Math.round(decision.score * 10) / 10,
+        scoreDetails: roundBotScoreDetails(decision.scoreDetails)
+      }
+    : undefined,
+    bonusAction: bonusDecision
+      ? {
+          actionId: bonusDecision.action.id,
+          actionName: bonusDecision.action.name,
+          targetIds: bonusDecision.targets.map((target) => target.id),
+          targetNames: bonusDecision.targets.map((target) => target.name),
+          score: Math.round(bonusDecision.score * 10) / 10
+        }
+      : undefined,
+    willDodgeOrWait: !decision,
+    notes: getBotPreviewNotes(next, bot, profile, movement, decision, actionState, previewBot, plan, bonusDecision)
+  };
 }
 
 export function runBotTurnMovementStep(state: CombatState): CombatState {
@@ -1096,10 +1252,11 @@ export function runBotTurnMovementStep(state: CombatState): CombatState {
     return next;
   }
 
-  const beforeMovement = chooseBotMovement(next, bot, profile);
-  if (beforeMovement) {
+  const plan = chooseBotTurnPlan(next, bot, profile);
+  if (plan.preMovement) {
+    addLog(next, 'action', `${bot.name} bot plan: ${formatBotTurnOrder(plan.order)}. ${plan.reason}`);
     addLog(next, 'action', `${bot.name} bot moves toward a better ${formatBotProfile(profile)} position.`);
-    next = moveActiveCreature(next, beforeMovement.path);
+    next = moveActiveCreature(next, plan.preMovement.path);
   }
 
   return next;
@@ -1124,7 +1281,12 @@ export function runBotTurnActionStep(state: CombatState, random: RandomSource = 
     return next;
   }
 
-  const decision = chooseBotAction(next, activeBot, profile);
+  const plan = chooseBotTurnPlan(next, activeBot, profile);
+  if (plan.order !== 'move-then-action') {
+    addLog(next, 'action', `${activeBot.name} bot plan: ${formatBotTurnOrder(plan.order)}. ${plan.reason}`);
+  }
+
+  const decision = plan.mainAction ?? chooseBotAction(next, activeBot, profile);
   if (decision) {
     addLog(next, 'action', `${activeBot.name} bot chooses ${decision.action.name} against ${decision.targets.map((target) => target.name).join(', ')}.`);
     next = executeBotAction(next, decision, random);
@@ -1133,6 +1295,54 @@ export function runBotTurnActionStep(state: CombatState, random: RandomSource = 
     next = waited.state;
   }
 
+  return next;
+}
+
+export function runBotTurnBonusActionStep(state: CombatState, random: RandomSource = Math.random): CombatState {
+  let next = ensureTurnState(normalizeState(cloneState(state)));
+  if (!next.activeCreatureId) {
+    return next;
+  }
+
+  const bot = getActiveCreature(next);
+  const profile = bot.botProfile ?? 'passive';
+  if (bot.controlMode !== 'bot' || profile === 'passive') {
+    return next;
+  }
+
+  const decision = chooseBotBonusAction(next, bot, profile);
+  if (!decision) {
+    addLog(next, 'action', `${bot.name} bot skips bonus action: no useful bonus action found.`);
+    return next;
+  }
+
+  addLog(
+    next,
+    'action',
+    `${bot.name} bot uses bonus action ${decision.action.name}${decision.targets.length > 0 ? ` against ${decision.targets.map((target) => target.name).join(', ')}` : ''}.`
+  );
+  return executeBotAction(next, decision, random);
+}
+
+export function runBotTurnPostMovementStep(state: CombatState): CombatState {
+  let next = ensureTurnState(normalizeState(cloneState(state)));
+  if (!next.activeCreatureId) {
+    return next;
+  }
+
+  const bot = getActiveCreature(next);
+  const profile = bot.botProfile ?? 'passive';
+  if (bot.controlMode !== 'bot' || profile === 'passive') {
+    return next;
+  }
+
+  const movement = chooseBotPostActionMovement(next, bot, profile);
+  if (!movement) {
+    return next;
+  }
+
+  addLog(next, 'action', `${bot.name} bot repositions after acting because ${getBotPostMovementReason(next, bot, profile)}.`);
+  next = moveActiveCreature(next, movement.path);
   return next;
 }
 
@@ -1155,6 +1365,55 @@ interface BotActionDecision {
   origin?: GridPosition;
   direction?: CardinalDirection;
   score: number;
+  scoreDetails: BotActionScoreDetails;
+}
+
+export type BotTurnOrder = 'move-then-action' | 'action-then-move' | 'action-only' | 'hold-position';
+
+interface BotTurnPlan {
+  order: BotTurnOrder;
+  reason: string;
+  preMovement?: MovementOption;
+  mainAction?: BotActionDecision;
+}
+
+function chooseBotTurnPlan(state: CombatState, bot: Creature, profile: BotProfile): BotTurnPlan {
+  const currentAction = chooseBotAction(state, bot, profile);
+  const threatened = getMinimumDistanceToCreatures(bot.position, getLivingEnemies(state, bot)) <= 5;
+
+  if (profile === 'rangedAttacker' && currentAction) {
+    return {
+      order: threatened ? 'action-then-move' : 'action-only',
+      reason: threatened
+        ? 'ranged bot has a valid shot now and is threatened, so it attacks before repositioning.'
+        : 'ranged bot already has a valid target and holds position to attack.',
+      mainAction: currentAction
+    };
+  }
+
+  if (currentAction) {
+    return {
+      order: 'action-only',
+      reason: isMeleeAttackActionDefinition(currentAction.action)
+        ? 'bot already has a valid melee target, so it attacks before risking unnecessary movement.'
+        : 'bot already has a valid action from its current position.',
+      mainAction: currentAction
+    };
+  }
+
+  const movement = chooseBotMovement(state, bot, profile);
+  if (movement) {
+    return {
+      order: 'move-then-action',
+      reason: 'bot needs a better position before it can make a useful action.',
+      preMovement: movement
+    };
+  }
+
+  return {
+    order: 'hold-position',
+    reason: 'bot found no useful action or reachable tactical movement.'
+  };
 }
 
 function chooseBotMovement(state: CombatState, bot: Creature, profile: BotProfile): MovementOption | undefined {
@@ -1217,7 +1476,7 @@ function chooseBotMovement(state: CombatState, bot: Creature, profile: BotProfil
 }
 
 function chooseBotAction(state: CombatState, bot: Creature, profile: BotProfile): BotActionDecision | undefined {
-  const actions = getBotUsableActions(state, bot);
+  const actions = getBotUsableActions(state, bot).filter(isBotMainActionCost);
   if (profile === 'support') {
     const supportDecision = chooseSupportBotAction(state, bot, actions);
     if (supportDecision) {
@@ -1230,6 +1489,92 @@ function chooseBotAction(state: CombatState, bot: Creature, profile: BotProfile)
   }
 
   return chooseBestBotActionFromPosition(state, bot, profile, bot.position, actions);
+}
+
+function chooseBotBonusAction(state: CombatState, bot: Creature, profile: BotProfile): BotActionDecision | undefined {
+  const actions = getBotUsableActions(state, bot).filter((action) => action.actionCost === 'bonusAction');
+  const offensiveDecision = chooseBestBotActionFromPosition(state, bot, profile, bot.position, actions);
+  const utilityDecisions = actions.flatMap((action) => getBotBonusUtilityDecision(state, bot, profile, action));
+  return [offensiveDecision, ...utilityDecisions]
+    .filter(isDefined)
+    .sort((a, b) => b.score - a.score)[0];
+}
+
+function getBotBonusUtilityDecision(state: CombatState, bot: Creature, profile: BotProfile, action: ActionDefinition): BotActionDecision[] {
+  if (isBotActionCandidate(action)) {
+    return [];
+  }
+
+  const threatened = getMinimumDistanceToCreatures(bot.position, getLivingEnemies(state, bot)) <= 5;
+  const postMovement = chooseBotPostActionMovement(state, bot, profile);
+  const isDisengage = action.baseActionName === 'Disengage' || action.tags.includes('disengage');
+  const isMobility = action.baseActionName === 'Dash' || action.tags.includes('movement');
+  const score = isDisengage && threatened && postMovement
+    ? 9
+    : isMobility && postMovement
+      ? 3
+      : 0;
+
+  if (score <= 0) {
+    return [];
+  }
+
+  return [{
+    action,
+    targets: [],
+    score,
+    scoreDetails: createUtilityBotScoreDetails(score, isDisengage ? 'Bonus disengage supports a safe reposition.' : 'Bonus mobility supports a better position.')
+  }];
+}
+
+function chooseBotPostActionMovement(state: CombatState, bot: Creature, profile: BotProfile): MovementOption | undefined {
+  if (profile !== 'rangedAttacker' || !canCreatureMove(state, bot)) {
+    return undefined;
+  }
+
+  const enemies = getLivingEnemies(state, bot);
+  if (enemies.length === 0 || getMinimumDistanceToCreatures(bot.position, enemies) > 5) {
+    return undefined;
+  }
+
+  const reachable = getReachableMovementSquares(state, bot.id);
+  if (reachable.length === 0) {
+    return undefined;
+  }
+
+  const currentDistance = getMinimumDistanceToCreatures(bot.position, enemies);
+  return reachable
+    .map((option) => ({
+      option,
+      opportunityAttackCount: getOpportunityAttackCandidatesForMovementPath(state, bot, option.path).length,
+      distance: getMinimumDistanceToCreatures(option.position, enemies)
+    }))
+    .filter((candidate) => candidate.distance > currentDistance)
+    .sort((a, b) => a.opportunityAttackCount - b.opportunityAttackCount || b.distance - a.distance || a.option.costFeet - b.option.costFeet)[0]?.option;
+}
+
+function getBotPostMovementReason(state: CombatState, bot: Creature, profile: BotProfile): string {
+  if (profile === 'rangedAttacker' && getMinimumDistanceToCreatures(bot.position, getLivingEnemies(state, bot)) <= 5) {
+    return 'a hostile creature is too close for a ranged attacker';
+  }
+
+  return 'a better post-action position is available';
+}
+
+function createUtilityBotScoreDetails(score: number, note: string): BotActionScoreDetails {
+  return {
+    total: score,
+    expectedDamage: 0,
+    enemyTargets: 0,
+    allyTargets: 0,
+    profileBonus: 0,
+    targetPriorityBonus: 0,
+    memoryBonus: 0,
+    positioningAdjustment: score,
+    resourcePenalty: 0,
+    friendlyFirePenalty: 0,
+    notes: [note]
+  };
 }
 
 function chooseBestBotActionFromPosition(
@@ -1254,11 +1599,15 @@ function getBotActionDecisions(
   if (isAttackActionDefinition(action)) {
     return enemies
       .filter((target) => isBotAttackValidFromPosition(state, bot, action, position, target))
-      .map((target) => ({
-        action,
-        targets: [target],
-        score: getBotAttackScore(state, bot, action, position, target, profile)
-      }));
+      .map((target) => {
+        const scoreDetails = getBotAttackScoreDetails(state, bot, action, position, target, profile);
+        return {
+          action,
+          targets: [target],
+          score: scoreDetails.total,
+          scoreDetails
+        };
+      });
   }
 
   if (getRulesKind(action) === 'savingThrowEffect' && action.save && (action.damage || action.effects.some((effect) => effect.type === 'damage'))) {
@@ -1278,12 +1627,14 @@ function getBotActionDecisions(
         return [];
       }
 
+      const scoreDetails = getBotSavingThrowScoreDetails(simulated, { ...bot, position }, action, position, targets, profile, origin, direction);
       return [{
         action,
         targets,
         origin,
         direction,
-        score: targets.length * 8 + getEstimatedActionDamage(action)
+        score: scoreDetails.total,
+        scoreDetails
       }];
     });
   }
@@ -1309,7 +1660,20 @@ function chooseSupportBotAction(state: CombatState, bot: Creature, actions: Acti
   return {
     action: supportAction,
     targets: [hurtAlly],
-    score: 100
+    score: 100,
+    scoreDetails: {
+      total: 100,
+      expectedDamage: 0,
+      enemyTargets: 0,
+      allyTargets: 1,
+      profileBonus: 100,
+      targetPriorityBonus: 0,
+      memoryBonus: 0,
+      positioningAdjustment: 0,
+      resourcePenalty: getActionResourcePenalty(bot, supportAction),
+      friendlyFirePenalty: 0,
+      notes: ['Support profile found an injured ally below half HP.']
+    }
   };
 }
 
@@ -1330,7 +1694,7 @@ function executeBotAction(state: CombatState, decision: BotActionDecision, rando
     );
   }
 
-  return state;
+  return performCreatureUtilityAction(state, decision.action.id);
 }
 
 function performBotWait(state: CombatState, bot: Creature): { state: CombatState; waited: boolean } {
@@ -1343,8 +1707,132 @@ function performBotWait(state: CombatState, bot: Creature): { state: CombatState
   return { state, waited: true };
 }
 
+function rememberAttackTarget(state: CombatState, attackerId: string, targetId: string): void {
+  state.botMemory = state.botMemory ?? {};
+  state.botMemory[attackerId] = {
+    ...state.botMemory[attackerId],
+    lastTargetId: targetId,
+    lastTargetRound: state.round
+  };
+  state.botMemory[targetId] = {
+    ...state.botMemory[targetId],
+    lastAttackerId: attackerId,
+    lastAttackedRound: state.round
+  };
+}
+
+function rememberDamage(state: CombatState, sourceId: string, targetId: string, amount: number): void {
+  if (amount <= 0) {
+    return;
+  }
+
+  state.botMemory = state.botMemory ?? {};
+  state.botMemory[sourceId] = {
+    ...state.botMemory[sourceId],
+    lastTargetId: targetId,
+    lastTargetRound: state.round
+  };
+  state.botMemory[targetId] = {
+    ...state.botMemory[targetId],
+    lastAttackerId: sourceId,
+    lastAttackedRound: state.round,
+    lastDamagedById: sourceId,
+    lastDamagedRound: state.round
+  };
+}
+
+function getBotPreviewNotes(
+  state: CombatState,
+  bot: Creature,
+  profile: BotProfile,
+  movement: MovementOption | undefined,
+  decision: BotActionDecision | undefined,
+  actionState: CombatState,
+  previewBot: Creature,
+  plan: BotTurnPlan,
+  bonusDecision: BotActionDecision | undefined
+): string[] {
+  const enemies = getLivingEnemies(state, bot);
+  const notes = [
+    `Profile: ${formatBotProfile(profile)}.`,
+    `Tactics: ${formatBotTargetPriority(bot.botTargetPriority ?? 'balanced')}, ${formatBotResourceStrategy(bot.botResourceStrategy ?? 'normal')}.`,
+    `Order: ${formatBotTurnOrder(plan.order)} because ${plan.reason}`
+  ];
+  notes.push(enemies.length > 0 ? `${enemies.length} living enemy target(s) considered.` : 'No living enemy targets found.');
+
+  if (movement) {
+    notes.push(`Movement: ${movement.costFeet} ft to (${movement.position.x}, ${movement.position.y}${getElevation(movement.position) ? `, z ${getElevation(movement.position)}` : ''}).`);
+  } else if (!canCreatureMove(state, bot)) {
+    notes.push('Movement skipped: movement is not currently allowed.');
+  } else {
+    notes.push('Movement skipped: current position is acceptable or no better reachable square was found.');
+  }
+
+  if (decision) {
+    notes.push(`Action: ${decision.action.name} scored ${Math.round(decision.score * 10) / 10} against ${decision.targets.map((target) => target.name).join(', ')}.`);
+    notes.push(...decision.scoreDetails.notes);
+    if (bonusDecision) {
+      notes.push(`Bonus action: ${bonusDecision.action.name} scored ${Math.round(bonusDecision.score * 10) / 10}.`);
+    }
+  } else if (!state.turnState.actionUsed && canCreatureTakeAction(state, bot)) {
+    notes.push('Action fallback: no valid offensive/support action found, so the bot will Dodge.');
+  } else {
+    notes.push('Action fallback: no valid action remains, so the bot will wait.');
+  }
+
+  return [...notes, ...getBotActionExplanationNotes(actionState, previewBot, profile)].slice(0, 10);
+}
+
+function getBotActionExplanationNotes(state: CombatState, bot: Creature, profile: BotProfile): string[] {
+  const notes: string[] = [];
+  const availableActions = getAvailableActions(bot, state);
+  if (availableActions.length === 0) {
+    return ['No actions are available on this creature.'];
+  }
+
+  availableActions.slice(0, 6).forEach((action) => {
+    const unavailableReason = getUnavailableActionReason(bot, action);
+    if (unavailableReason) {
+      notes.push(`Rejected ${action.name}: ${unavailableReason}`);
+      return;
+    }
+
+    if (!isBotActionCostAvailable(state, bot, action)) {
+      notes.push(`Rejected ${action.name}: ${formatActionCost(action.actionCost)} already spent or blocked.`);
+      return;
+    }
+
+    if (!hasResourcesForAction(bot, action)) {
+      notes.push(`Rejected ${action.name}: required resource is unavailable.`);
+      return;
+    }
+
+    const decisions = getBotActionDecisions(state, bot, profile, bot.position, action);
+    if (decisions.length === 0 && isBotActionCandidate(action)) {
+      notes.push(`Rejected ${action.name}: no enemy target in range or line of sight.`);
+    }
+  });
+
+  return notes;
+}
+
+function isBotActionCandidate(action: ActionDefinition): boolean {
+  return isAttackActionDefinition(action) || (getRulesKind(action) === 'savingThrowEffect' && Boolean(action.save));
+}
+
+function formatActionCost(actionCost: ActionDefinition['actionCost']): string {
+  if (actionCost === 'bonusAction') {
+    return 'bonus action';
+  }
+  return actionCost;
+}
+
 function getBotUsableActions(state: CombatState, bot: Creature): ActionDefinition[] {
   return getAvailableActions(bot, state).filter((action) => isBotActionCostAvailable(state, bot, action) && hasResourcesForAction(bot, action));
+}
+
+function isBotMainActionCost(action: ActionDefinition): boolean {
+  return action.actionCost === 'action' || action.actionCost === 'free';
 }
 
 function isBotActionCostAvailable(state: CombatState, bot: Creature, action: ActionDefinition): boolean {
@@ -1359,6 +1847,10 @@ function isBotActionCostAvailable(state: CombatState, bot: Creature, action: Act
     return !resource.reactionUsed && canCreatureTakeReaction(state, bot);
   }
   return !resource.actionUsed && canCreatureTakeAction(state, bot);
+}
+
+function isDefined<T>(value: T | undefined): value is T {
+  return value !== undefined;
 }
 
 function isBotAttackValidFromPosition(
@@ -1380,43 +1872,380 @@ function isBotAttackValidFromPosition(
   return canCreatureTargetHarmfulEffect(bot, target);
 }
 
-function getBotAttackScore(
+function getBotAttackScoreDetails(
   state: CombatState,
   bot: Creature,
   action: ActionDefinition,
   position: GridPosition,
   target: Creature,
   profile: BotProfile
-): number {
+): BotActionScoreDetails {
+  const simulatedState = { ...state, creatures: replaceBotPosition(state, bot.id, position) };
+  const simulatedBot = { ...bot, position };
+  const actionKind = getRulesKind(action);
+  const targetPosition = target.position;
+  const attackModifier = getBotAttackRollModifier(simulatedState, simulatedBot, target, action, targetPosition);
+  const rollMode = resolveRollMode(attackModifier);
+  const attackBonus = getEffectiveAttackBonus(action, simulatedBot, simulatedState) + (attackModifier.flatModifier ?? 0);
+  const targetAc = getEffectiveAC(target, simulatedState);
+  const outcome = getAttackOutcomeChances(attackBonus, targetAc, rollMode, {
+    autoFail: attackModifier.autoFail,
+    autoSuccess: attackModifier.autoSuccess,
+    automaticCritical: isAutomaticMeleeCritical(simulatedBot, target, targetPosition)
+  });
+  const damage = estimateDiceParts(action.damage?.dice ?? '');
+  const expectedDamage = outcome.hitChance * damage.total + outcome.critChance * damage.dice;
   const profileBonus =
     profile === 'aggressiveMelee' && isMeleeAttackActionDefinition(action)
-      ? 12
+      ? 4
       : profile === 'rangedAttacker' && isRangedAttackActionDefinition(action)
-        ? 12
+        ? 4
         : 0;
-  return (
+  const targetPriorityBonus = getTargetPriorityBonus(simulatedState, simulatedBot, target, expectedDamage, outcome.hitChance);
+  const memoryBonus = getBotMemoryTargetBonus(simulatedState, simulatedBot, target);
+  const positioningAdjustment = -getDistanceFeet(position, target.position) * 0.03;
+  const resourcePenalty = getActionResourcePenalty(bot, action);
+  const total =
+    expectedDamage +
     profileBonus +
-    getEffectiveAttackBonus(action, bot, state) +
-    getEstimatedActionDamage(action) -
-    getEffectiveAC(target, state) * 0.15 -
-    getDistanceFeet(position, target.position) * 0.05
+    targetPriorityBonus +
+    memoryBonus +
+    positioningAdjustment -
+    resourcePenalty;
+
+  return {
+    total,
+    expectedDamage,
+    hitChance: outcome.hitChance,
+    critChance: outcome.critChance,
+    enemyTargets: 1,
+    allyTargets: 0,
+    profileBonus,
+    targetPriorityBonus,
+    memoryBonus,
+    positioningAdjustment,
+    resourcePenalty,
+    friendlyFirePenalty: 0,
+    notes: [
+      `${Math.round(outcome.hitChance * 100)}% hit chance vs AC ${targetAc}.`,
+      `${formatBotNumber(expectedDamage)} expected damage${outcome.critChance > 0 ? `, ${Math.round(outcome.critChance * 100)}% crit chance` : ''}.`,
+      `Target priority: ${formatBotTargetPriority(bot.botTargetPriority ?? 'balanced')}.`,
+      ...(memoryBonus > 0 ? [`Memory: ${getBotMemoryReason(simulatedState, simulatedBot, target)}.`] : []),
+      ...((attackModifier.notes ?? []).map((note) => `Attack modifier: ${note}.`))
+    ]
+  };
+}
+
+function getBotSavingThrowScoreDetails(
+  state: CombatState,
+  bot: Creature,
+  action: ActionDefinition,
+  position: GridPosition,
+  enemyTargets: Creature[],
+  profile: BotProfile,
+  origin: GridPosition,
+  direction: CardinalDirection
+): BotActionScoreDetails {
+  const save = action.save ?? action.effects.find((effect) => effect.save)?.save;
+  const damage = estimateDiceParts(action.damage?.dice ?? action.effects.find((effect) => effect.damage)?.damage?.dice ?? '');
+  const allTargets = getTargetsInActionShape(state, action, bot, origin, direction).filter((target) => target.id !== bot.id);
+  const allyTargets = allTargets.filter((target) => target.team === bot.team);
+  const saveDc = save ? getEffectiveSaveDc(action, bot, state) ?? save.dc : undefined;
+  const enemyExpectedDamage = save && saveDc
+    ? enemyTargets.reduce((total, target) => {
+        const failureChance = getSavingThrowFailureChance(state, bot, target, action, save.ability, saveDc);
+        const successDamage = save.halfDamageOnSuccess ? damage.total * 0.5 : 0;
+        return total + failureChance * damage.total + (1 - failureChance) * successDamage;
+      }, 0)
+    : damage.total * enemyTargets.length;
+  const friendlyExpectedDamage = save && saveDc
+    ? allyTargets.reduce((total, target) => {
+        const failureChance = getSavingThrowFailureChance(state, bot, target, action, save.ability, saveDc);
+        const successDamage = save.halfDamageOnSuccess ? damage.total * 0.5 : 0;
+        return total + failureChance * damage.total + (1 - failureChance) * successDamage;
+      }, 0)
+    : damage.total * allyTargets.length;
+  const representativeFailureChance = save && saveDc && enemyTargets.length > 0
+    ? enemyTargets.reduce((total, target) => total + getSavingThrowFailureChance(state, bot, target, action, save.ability, saveDc), 0) / enemyTargets.length
+    : undefined;
+  const profileBonus = profile === 'rangedAttacker' || profile === 'support' ? 1 : 0;
+  const targetPriorityBonus = enemyTargets.reduce(
+    (total, target) => total + getTargetPriorityBonus(state, bot, target, enemyExpectedDamage / Math.max(1, enemyTargets.length), representativeFailureChance),
+    0
   );
+  const memoryBonus = enemyTargets.reduce((total, target) => total + getBotMemoryTargetBonus(state, bot, target), 0);
+  const positioningAdjustment = -getDistanceFeet(position, origin) * 0.01;
+  const resourcePenalty = getActionResourcePenalty(bot, action);
+  const friendlyFirePenalty = friendlyExpectedDamage * 1.5 + allyTargets.length * 3;
+  const total = enemyExpectedDamage + enemyTargets.length * 2 + profileBonus + targetPriorityBonus + memoryBonus + positioningAdjustment - resourcePenalty - friendlyFirePenalty;
+
+  return {
+    total,
+    expectedDamage: enemyExpectedDamage,
+    saveFailureChance: representativeFailureChance,
+    enemyTargets: enemyTargets.length,
+    allyTargets: allyTargets.length,
+    profileBonus,
+    targetPriorityBonus,
+    memoryBonus,
+    positioningAdjustment,
+    resourcePenalty,
+    friendlyFirePenalty,
+    notes: [
+      `${enemyTargets.length} enemy target(s) in area${allyTargets.length > 0 ? `, ${allyTargets.length} ally target(s) also in shape` : ''}.`,
+      saveDc ? `Average ${Math.round((representativeFailureChance ?? 0) * 100)}% failure chance vs DC ${saveDc}.` : 'No save DC available; using base damage estimate.',
+      `${formatBotNumber(enemyExpectedDamage)} expected enemy damage.`,
+      `Target priority: ${formatBotTargetPriority(bot.botTargetPriority ?? 'balanced')}.`,
+      ...(memoryBonus > 0 ? ['Memory: one or more targets recently attacked or damaged this bot.'] : [])
+    ]
+  };
+}
+
+function getBotAttackRollModifier(
+  state: CombatState,
+  attacker: Creature,
+  target: Creature,
+  action: ActionDefinition,
+  targetPosition: GridPosition
+): RollModifier {
+  const actionKind = getRulesKind(action);
+  let attackModifier = collectAttackRollModifiers(
+    state,
+    attacker,
+    target,
+    action,
+    getDistanceFeet(attacker.position, targetPosition)
+  );
+  attackModifier = mergeRollModifiers(attackModifier, collectBeforeAttackRollRuleModifiers(state, { attacker, target, action }));
+  attackModifier = mergeRollModifiers(attackModifier, getFrightenedRollModifier(state, attacker));
+  if (isFlankingAttack(state, attacker, target, action)) {
+    attackModifier = mergeRollModifiers(attackModifier, { advantage: true, notes: ['flanking'] });
+  }
+  if ((actionKind === 'rangedAttack' || action.tags.includes('ranged')) && getHostileCreaturesWithinReach(state, attacker).length > 0) {
+    attackModifier = mergeRollModifiers(attackModifier, { disadvantage: true, notes: ['hostile creature within 5 ft'] });
+  }
+  if (isBeyondNormalRange(action, attacker.position, targetPosition)) {
+    attackModifier = mergeRollModifiers(attackModifier, { disadvantage: true, notes: ['long range'] });
+  }
+  return attackModifier;
+}
+
+function getAttackOutcomeChances(
+  attackBonus: number,
+  targetAc: number,
+  rollMode: RollMode,
+  options: { autoFail?: boolean; autoSuccess?: boolean; automaticCritical?: boolean }
+): { hitChance: number; critChance: number } {
+  const rolls = getD20OutcomeRolls(rollMode);
+  const outcomes = rolls.map(([first, second]) => {
+    const d20 = chooseD20(first, second, rollMode);
+    const naturalCritical = d20 === 20;
+    const naturalMiss = d20 === 1;
+    const hit = naturalMiss ? false : naturalCritical ? true : options.autoFail ? false : options.autoSuccess ? true : d20 + attackBonus >= targetAc;
+    const critical = naturalCritical || (hit && Boolean(options.automaticCritical));
+    return { hit, critical };
+  });
+  return {
+    hitChance: outcomes.filter((outcome) => outcome.hit).length / outcomes.length,
+    critChance: outcomes.filter((outcome) => outcome.critical).length / outcomes.length
+  };
+}
+
+function getSavingThrowFailureChance(
+  state: CombatState,
+  source: Creature,
+  target: Creature,
+  action: ActionDefinition,
+  ability: Ability,
+  saveDc: number
+): number {
+  const saveRollModifier = mergeRollModifiers(
+    collectSavingThrowModifiers(state, target, ability),
+    collectBeforeSavingThrowRuleModifiers(state, { source, target, action, ability })
+  );
+  const rollMode = resolveRollMode(saveRollModifier);
+  const saveBonus = getEffectiveSaveBonus(target, ability, state) + (saveRollModifier.flatModifier ?? 0);
+  const rolls = getD20OutcomeRolls(rollMode);
+  const failures = rolls.filter(([first, second]) => {
+    const d20 = chooseD20(first, second, rollMode);
+    const success = saveRollModifier.autoFail ? false : saveRollModifier.autoSuccess ? true : d20 + saveBonus >= saveDc;
+    return !success;
+  }).length;
+  return failures / rolls.length;
+}
+
+function getD20OutcomeRolls(rollMode: RollMode): Array<[number, number | undefined]> {
+  const rolls: Array<[number, number | undefined]> = [];
+  for (let first = 1; first <= 20; first += 1) {
+    if (rollMode === 'normal') {
+      rolls.push([first, undefined]);
+    } else {
+      for (let second = 1; second <= 20; second += 1) {
+        rolls.push([first, second]);
+      }
+    }
+  }
+  return rolls;
+}
+
+function getTargetPriorityBonus(
+  state: CombatState,
+  bot: Creature,
+  target: Creature,
+  expectedDamage: number,
+  successChance?: number
+): number {
+  const priority = bot.botTargetPriority ?? 'balanced';
+  const missingHpRatio = target.maxHp > 0 ? 1 - target.hp / target.maxHp : 0;
+  const finishingBonus = expectedDamage >= target.hp ? 5 : 0;
+
+  if (priority === 'nearest') {
+    return finishingBonus + Math.max(0, 8 - getDistanceFeet(bot.position, target.position) / 5) * 0.9;
+  }
+
+  if (priority === 'weakest') {
+    return finishingBonus + Math.max(0, 20 - getEffectiveAC(target, state)) * 0.45;
+  }
+
+  if (priority === 'lowestHp') {
+    return finishingBonus + Math.max(0, 30 - target.hp) * 0.18 + missingHpRatio * 4;
+  }
+
+  if (priority === 'easiestToHit') {
+    return finishingBonus + (successChance ?? 0) * 6;
+  }
+
+  return finishingBonus + missingHpRatio * 3;
+}
+
+function getBotMemoryTargetBonus(state: CombatState, bot: Creature, target: Creature): number {
+  const memory = state.botMemory?.[bot.id];
+  if (!memory) {
+    return 0;
+  }
+
+  let bonus = 0;
+  if (memory.lastDamagedById === target.id) {
+    bonus += 4 * getBotMemoryRecencyMultiplier(state.round, memory.lastDamagedRound);
+  }
+  if (memory.lastAttackerId === target.id) {
+    bonus += 2 * getBotMemoryRecencyMultiplier(state.round, memory.lastAttackedRound);
+  }
+  if (memory.lastTargetId === target.id) {
+    bonus += 1.5 * getBotMemoryRecencyMultiplier(state.round, memory.lastTargetRound);
+  }
+  return bonus;
+}
+
+function getBotMemoryReason(state: CombatState, bot: Creature, target: Creature): string {
+  const memory = state.botMemory?.[bot.id];
+  if (!memory) {
+    return 'no relevant memory';
+  }
+
+  if (memory.lastDamagedById === target.id) {
+    return `${target.name} recently damaged ${bot.name}`;
+  }
+  if (memory.lastAttackerId === target.id) {
+    return `${target.name} recently attacked ${bot.name}`;
+  }
+  if (memory.lastTargetId === target.id) {
+    return `${bot.name} was already focusing ${target.name}`;
+  }
+  return 'no relevant memory';
+}
+
+function getBotMemoryRecencyMultiplier(currentRound: number, memoryRound: number | undefined): number {
+  if (typeof memoryRound !== 'number') {
+    return 0.5;
+  }
+
+  const age = Math.max(0, currentRound - memoryRound);
+  if (age <= 1) {
+    return 1;
+  }
+  if (age === 2) {
+    return 0.65;
+  }
+  if (age === 3) {
+    return 0.35;
+  }
+  return 0.15;
+}
+
+function getActionResourcePenalty(creature: Creature, action: ActionDefinition): number {
+  const basePenalty = (action.resourceCosts ?? []).reduce((total, cost) => {
+    const resource = (creature.resources ?? []).find((candidate) => candidate.id === cost.resourceId);
+    if (!resource || resource.max <= 0) {
+      return total;
+    }
+
+    const scarcity = cost.amount / Math.max(1, resource.current);
+    const resetMultiplier = resource.resetOn === 'turnStart' ? 0.25 : resource.resetOn === 'never' || resource.resetOn === 'manual' ? 1.25 : 0.8;
+    const timingMultiplier = cost.consumeOn === 'use' ? 1 : 0.65;
+    return total + scarcity * resetMultiplier * timingMultiplier * 3;
+  }, 0);
+
+  if (creature.botResourceStrategy === 'conserve') {
+    return basePenalty * 2.25;
+  }
+
+  if (creature.botResourceStrategy === 'spendFreely') {
+    return basePenalty * 0.25;
+  }
+
+  return basePenalty;
+}
+
+function roundBotScoreDetails(details: BotActionScoreDetails): BotActionScoreDetails {
+  return {
+    ...details,
+    total: roundBotNumber(details.total),
+    expectedDamage: roundBotNumber(details.expectedDamage),
+    hitChance: details.hitChance === undefined ? undefined : roundBotNumber(details.hitChance),
+    critChance: details.critChance === undefined ? undefined : roundBotNumber(details.critChance),
+    saveFailureChance: details.saveFailureChance === undefined ? undefined : roundBotNumber(details.saveFailureChance),
+    profileBonus: roundBotNumber(details.profileBonus),
+    targetPriorityBonus: roundBotNumber(details.targetPriorityBonus),
+    memoryBonus: roundBotNumber(details.memoryBonus),
+    positioningAdjustment: roundBotNumber(details.positioningAdjustment),
+    resourcePenalty: roundBotNumber(details.resourcePenalty),
+    friendlyFirePenalty: roundBotNumber(details.friendlyFirePenalty)
+  };
+}
+
+function roundBotNumber(value: number): number {
+  return Math.round(value * 10) / 10;
+}
+
+function formatBotNumber(value: number): string {
+  return roundBotNumber(value).toString();
 }
 
 function getEstimatedActionDamage(action: ActionDefinition): number {
   return estimateDiceAverage(action.damage?.dice ?? action.effects.find((effect) => effect.damage)?.damage?.dice ?? '');
 }
 
-function estimateDiceAverage(dice: string): number {
+function estimateDiceParts(dice: string): { dice: number; modifier: number; total: number } {
   const match = dice.match(/(\d+)d(\d+)(?:\s*([+-])\s*(\d+))?/i);
   if (!match) {
-    return 0;
+    return { dice: 0, modifier: 0, total: 0 };
   }
+
   const count = Number(match[1]);
   const sides = Number(match[2]);
   const sign = match[3] === '-' ? -1 : 1;
   const modifier = match[4] ? Number(match[4]) * sign : 0;
-  return count * (sides + 1) / 2 + modifier;
+  const diceAverage = count * (sides + 1) / 2;
+  return {
+    dice: diceAverage,
+    modifier,
+    total: diceAverage + modifier
+  };
+}
+
+function estimateDiceAverage(dice: string): number {
+  return estimateDiceParts(dice).total;
 }
 
 function getLivingEnemies(state: CombatState, creature: Creature): Creature[] {
@@ -1474,6 +2303,45 @@ function formatBotProfile(profile: BotProfile): string {
       return 'Support';
     case 'passive':
       return 'Passive/Test Dummy';
+  }
+}
+
+function formatBotTargetPriority(priority: BotTargetPriority): string {
+  switch (priority) {
+    case 'nearest':
+      return 'Nearest';
+    case 'weakest':
+      return 'Weakest AC';
+    case 'lowestHp':
+      return 'Lowest HP';
+    case 'easiestToHit':
+      return 'Easiest to Hit';
+    case 'balanced':
+      return 'Balanced';
+  }
+}
+
+function formatBotResourceStrategy(strategy: BotResourceStrategy): string {
+  switch (strategy) {
+    case 'conserve':
+      return 'Conserve Resources';
+    case 'spendFreely':
+      return 'Spend Freely';
+    case 'normal':
+      return 'Normal Resources';
+  }
+}
+
+function formatBotTurnOrder(order: BotTurnOrder): string {
+  switch (order) {
+    case 'move-then-action':
+      return 'move then action';
+    case 'action-then-move':
+      return 'action then move';
+    case 'action-only':
+      return 'action only';
+    case 'hold-position':
+      return 'hold position';
   }
 }
 
@@ -1785,6 +2653,7 @@ function applyDamage(
 
   target.hp = Math.max(0, target.hp - modifiedAmount);
   if (modifiedAmount > 0) {
+    rememberDamage(state, source.id, target.id, modifiedAmount);
     enqueueVisualEvent(state, {
       kind: 'damageDealt',
       creatureId: target.id,
@@ -2377,6 +3246,7 @@ function normalizeState(state: CombatState): CombatState {
   state.pendingReactions = state.pendingReactions ?? [];
   state.rulesSettings = normalizeRulesSettings(state.rulesSettings);
   state.ruleMemory = state.ruleMemory ?? {};
+  state.botMemory = normalizeBotMemory(state);
   if (state.visualEvents) {
     state.visualEvents = pruneVisualEvents(state.visualEvents);
   }
@@ -2393,6 +3263,8 @@ function normalizeCreatures(creatures: Creature[], grid?: CombatState['grid']): 
     ...creature,
     controlMode: creature.controlMode === 'bot' ? 'bot' : 'manual',
     botProfile: normalizeBotProfile(creature.botProfile),
+    botTargetPriority: normalizeBotTargetPriority(creature.botTargetPriority),
+    botResourceStrategy: normalizeBotResourceStrategy(creature.botResourceStrategy),
     position: grid ? clampGridPosition(getTilePosition(creature.position, grid), grid) : { ...creature.position, z: creature.position.z ?? 0 },
     conditions: normalizeConditions(creature.conditions),
     skillBonuses: creature.skillBonuses ?? {},
@@ -2404,6 +3276,48 @@ function normalizeBotProfile(profile: Creature['botProfile']): BotProfile {
   return profile === 'aggressiveMelee' || profile === 'rangedAttacker' || profile === 'cowardly' || profile === 'support' || profile === 'passive'
     ? profile
     : 'passive';
+}
+
+function normalizeBotTargetPriority(priority: Creature['botTargetPriority']): BotTargetPriority {
+  return priority === 'nearest' || priority === 'weakest' || priority === 'lowestHp' || priority === 'easiestToHit' || priority === 'balanced'
+    ? priority
+    : 'balanced';
+}
+
+function normalizeBotResourceStrategy(strategy: Creature['botResourceStrategy']): BotResourceStrategy {
+  return strategy === 'conserve' || strategy === 'spendFreely' || strategy === 'normal' ? strategy : 'normal';
+}
+
+function normalizeBotMemory(state: CombatState): NonNullable<CombatState['botMemory']> {
+  const creatureIds = new Set(state.creatures.map((creature) => creature.id));
+  return Object.fromEntries(
+    Object.entries(state.botMemory ?? {})
+      .filter(([creatureId]) => creatureIds.has(creatureId))
+      .map(([creatureId, memory]) => [creatureId, normalizeBotMemoryEntry(memory, creatureIds)])
+  );
+}
+
+function normalizeBotMemoryEntry(memory: NonNullable<CombatState['botMemory']>[string], creatureIds: Set<string>) {
+  const normalized: NonNullable<CombatState['botMemory']>[string] = {};
+  if (memory.lastTargetId && creatureIds.has(memory.lastTargetId)) {
+    normalized.lastTargetId = memory.lastTargetId;
+    if (typeof memory.lastTargetRound === 'number') {
+      normalized.lastTargetRound = memory.lastTargetRound;
+    }
+  }
+  if (memory.lastAttackerId && creatureIds.has(memory.lastAttackerId)) {
+    normalized.lastAttackerId = memory.lastAttackerId;
+    if (typeof memory.lastAttackedRound === 'number') {
+      normalized.lastAttackedRound = memory.lastAttackedRound;
+    }
+  }
+  if (memory.lastDamagedById && creatureIds.has(memory.lastDamagedById)) {
+    normalized.lastDamagedById = memory.lastDamagedById;
+    if (typeof memory.lastDamagedRound === 'number') {
+      normalized.lastDamagedRound = memory.lastDamagedRound;
+    }
+  }
+  return normalized;
 }
 
 function normalizeRulesSettings(settings: CombatRulesSettings | undefined): CombatRulesSettings {

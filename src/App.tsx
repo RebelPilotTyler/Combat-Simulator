@@ -22,6 +22,7 @@ import {
   findCreature,
   getActionShapeSquares,
   getAttackDebugStats,
+  getBotTurnPreview,
   getOpportunityAttackCandidatesForMovementPath,
   getTargetsInShape,
   isDefeated,
@@ -45,10 +46,14 @@ import {
   rollInitiative,
   canRunBotTurn,
   runBotTurnActionStep,
+  runBotTurnBonusActionStep,
   runBotTurnEndStep,
   runBotTurnMovementStep,
+  runBotTurnPostMovementStep,
   setFlankingEnabled,
   type BasicActionName,
+  type BotTurnOrder,
+  type BotTurnPreview,
   type HelpMode,
   type SearchMode,
   type ShoveOutcome
@@ -85,7 +90,21 @@ import {
   sameTilePosition
 } from './engine/shapes';
 import { getDistanceFeet, getLineSquares, hasLineOfSight } from './engine/targeting';
-import type { Ability, ActionDefinition, BotProfile, CardinalDirection, CombatState, Creature, CustomConditionTemplate, GridPosition, ShapeDefinition, TurnState, VisualEvent } from './engine/types';
+import type {
+  Ability,
+  ActionDefinition,
+  BotProfile,
+  BotResourceStrategy,
+  BotTargetPriority,
+  CardinalDirection,
+  CombatState,
+  Creature,
+  CustomConditionTemplate,
+  GridPosition,
+  ShapeDefinition,
+  TurnState,
+  VisualEvent
+} from './engine/types';
 import { getVisibleGridCells, getVisibleGridWindow, type GridWindow } from './ui/gridWindow';
 import { canStartBotTurn, shouldAutoRunBotTurn, shouldRunBotTurnShortcut, shouldStopAutoRunAfterBotAction } from './ui/botTurnControls';
 import { getActionForNumberHotkey, getNumberHotkeyIndex, isTypingShortcutTarget, moveGridCursor } from './ui/keyboard';
@@ -98,6 +117,7 @@ type MapTool = 'select' | 'distance' | 'lineOfSight' | 'radius' | 'line' | 'cone
 type HudPanel = 'roster' | 'actions' | 'log' | 'data';
 type HudPanelState = Partial<Record<HudPanel, boolean>>;
 type HudPanelOffset = Partial<Record<HudPanel, { x: number; y: number }>>;
+type WorkbenchTab = 'map' | 'roster' | 'actions' | 'log';
 type UiTheme = 'slate' | 'parchment' | 'midnight';
 type TextScale = 'compact' | 'normal' | 'large';
 type UiDensity = 'comfortable' | 'compact';
@@ -162,6 +182,8 @@ export function App() {
   const [battlemapView, setBattlemapView] = useState<BattlemapView>('2d');
   const [openHudPanels, setOpenHudPanels] = useState<HudPanelState>({});
   const [hudPanelOffsets, setHudPanelOffsets] = useState<HudPanelOffset>({});
+  const [workbenchTab, setWorkbenchTab] = useState<WorkbenchTab>('map');
+  const [logExpanded, setLogExpanded] = useState(false);
   const [cameraYaw, setCameraYaw] = useState(-35);
   const [cameraPitch, setCameraPitch] = useState(58);
   const [cameraZoom, setCameraZoom] = useState(1);
@@ -288,6 +310,10 @@ export function App() {
       : undefined;
   const keyboardHint = getKeyboardHint(selectionMode, selectedAction, gridCursor, combat);
   const mapToolResult = uiSettings.showMapTools ? getMapToolResult(combat, mapTool, mapToolStart, mapToolEnd, mapToolSquares) : '';
+  const activeBotPreview = useMemo(
+    () => (activeCreature?.controlMode === 'bot' ? getBotTurnPreview(combat) : undefined),
+    [activeCreature?.controlMode, activeCreature?.id, combat]
+  );
   const activeVisualEvents = useMemo(
     () => (uiSettings.visualEffectsMode === 'off' ? [] : getActiveVisualEvents(combat.visualEvents, visualEffectNow)),
     [combat.visualEvents, uiSettings.visualEffectsMode, visualEffectNow]
@@ -400,6 +426,24 @@ export function App() {
       const newActionLogEntries = combatRef.current.log.slice(0, Math.max(0, combatRef.current.log.length - beforeActionLogLength));
       shouldDisableAutoRun = auto && shouldStopAutoRunAfterBotAction(newActionLogEntries.map((entry) => entry.message));
       await waitForBotTurnStep(pace.effectDelayMs);
+      if (botTurnCancelRef.current) {
+        return;
+      }
+
+      setBotTurnSequence({ running: true, step: 'Bot is checking bonus action...', auto });
+      if (!applyBotTurnPhase((current) => runBotTurnBonusActionStep(current))) {
+        return;
+      }
+      await waitForBotTurnStep(pace.stepDelayMs);
+      if (botTurnCancelRef.current) {
+        return;
+      }
+
+      setBotTurnSequence({ running: true, step: 'Bot is repositioning...', auto });
+      if (!applyBotTurnPhase(runBotTurnPostMovementStep)) {
+        return;
+      }
+      await waitForBotTurnStep(pace.stepDelayMs);
       if (botTurnCancelRef.current) {
         return;
       }
@@ -1033,16 +1077,26 @@ export function App() {
     );
   }
 
-  const is3DView = battlemapView === '3d';
-  const combatLayoutClass = ['cockpit-layout', is3DView ? 'view-3d' : ''].join(' ');
+  const combatLayoutClass = ['combat-hud', `mobile-tab-${workbenchTab}`].join(' ');
+  const visibleLogEntries = logExpanded ? combat.log : combat.log.slice(0, 5);
 
   return (
-    <main className={['app-shell', `theme-${uiSettings.theme}`, `text-${uiSettings.textScale}`, `density-${uiSettings.density}`].join(' ')}>
-      <header className="top-bar">
+    <main className={['app-shell', `view-${activeView}`, `theme-${uiSettings.theme}`, `text-${uiSettings.textScale}`, `density-${uiSettings.density}`].join(' ')}>
+      <header className={activeView === 'combat' ? 'combat-top-bar' : 'top-bar'}>
         <div className="brand-block">
           <h1>Combat Sandbox</h1>
-          <p>Round {combat.round || '-'} · {activeCreature?.name ?? 'No active creature'}</p>
+          <p>Round {combat.round || '-'} - {activeCreature?.name ?? 'No active creature'}</p>
         </div>
+        {activeView === 'combat' && (
+          <section className="combat-status-readout" aria-label="Combat status">
+            <span><strong>Active</strong>{activeCreature?.name ?? 'No initiative'}</span>
+            <span><strong>Selected</strong>{selectedCreature?.name ?? 'None'}</span>
+            <span><strong>Move</strong>{combat.turnState.remainingMovement ?? 0} ft</span>
+            <span className={combat.turnState.actionUsed ? 'spent' : 'ready'}><strong>Action</strong>{combat.turnState.actionUsed ? 'Used' : 'Ready'}</span>
+            <span className={combat.turnState.bonusActionUsed ? 'spent' : 'ready'}><strong>Bonus</strong>{combat.turnState.bonusActionUsed ? 'Used' : 'Ready'}</span>
+            <span className={combat.turnState.reactionUsed ? 'spent' : 'ready'}><strong>Reaction</strong>{combat.turnState.reactionUsed ? 'Used' : 'Ready'}</span>
+          </section>
+        )}
         <div className="top-actions">
           <button className={activeView === 'combat' ? 'selected-action' : ''} onClick={() => setActiveView('combat')}>
             Combat
@@ -1058,26 +1112,16 @@ export function App() {
       </header>
 
       {activeView === 'combat' ? (
+      <>
+      <nav className="workbench-mobile-tabs" aria-label="Combat workbench tabs">
+        {(['map', 'roster', 'actions', 'log'] as const).map((tab) => (
+          <button className={workbenchTab === tab ? 'selected-action' : ''} key={tab} onClick={() => setWorkbenchTab(tab)}>
+            {tab === 'map' ? 'Map' : tab === 'actions' ? 'Actions' : tab === 'roster' ? 'Roster' : 'Log'}
+          </button>
+        ))}
+      </nav>
       <section className={combatLayoutClass}>
-        {is3DView && (
-          <nav className="hud-tabs" aria-label="3D view panels">
-            <button className={openHudPanels.roster ? 'selected-action' : ''} aria-expanded={Boolean(openHudPanels.roster)} onClick={() => toggleHudPanel('roster')}>
-              Roster
-            </button>
-            <button className={openHudPanels.actions ? 'selected-action' : ''} aria-expanded={Boolean(openHudPanels.actions)} onClick={() => toggleHudPanel('actions')}>
-              Actions
-            </button>
-            <button className={openHudPanels.log ? 'selected-action' : ''} aria-expanded={Boolean(openHudPanels.log)} onClick={() => toggleHudPanel('log')}>
-              Log
-            </button>
-            {uiSettings.showAdvancedTools && (
-              <button className={openHudPanels.data ? 'selected-action' : ''} aria-expanded={Boolean(openHudPanels.data)} onClick={() => toggleHudPanel('data')}>
-                Data
-              </button>
-            )}
-          </nav>
-        )}
-        <aside className={['panel', 'left-rail', openHudPanels.roster ? 'hud-open' : ''].join(' ')} style={getHudPanelStyle('roster')} tabIndex={0} aria-label="Initiative and creature list">
+        <aside className={['panel', 'initiative-hud', openHudPanels.roster ? 'hud-open' : ''].join(' ')} tabIndex={0} aria-label="Initiative and creature list">
           {renderHudPanelBar('roster', 'Roster')}
           <div className="round-card">
             <strong>Round {combat.round || '-'}</strong>
@@ -1099,7 +1143,9 @@ export function App() {
                   onClick={() => setSelectedCreatureId(creature.id)}
                   title={getConditionLabels(creature)}
                 >
+                  <span className={`team-dot ${creature.team}`} />
                   <strong>{creature.name}</strong>
+                  <small>{creature.controlMode === 'bot' ? 'Bot' : 'Manual'}</small>
                   <HpBar creature={creature} compact />
                   <span>
                     HP {creature.hp}/{creature.maxHp}
@@ -1108,31 +1154,6 @@ export function App() {
                 </button>
               );
             })}
-          </section>
-
-          <h2>Creatures</h2>
-          <section className="creature-roster">
-            {combat.creatures.map((creature) => (
-              <button
-                className={[
-                  'roster-item',
-                  creature.id === selectedCreatureId ? 'selected-action' : '',
-                  creature.id === combat.activeCreatureId ? 'active-roster' : '',
-                  isDefeated(creature) ? 'defeated-initiative' : ''
-                ].join(' ')}
-                key={creature.id}
-                onClick={() => setSelectedCreatureId(creature.id)}
-                title={getConditionLabels(creature)}
-              >
-                <span className={`team-dot ${creature.team}`} />
-                <strong>{getCreatureShortLabel(creature)}</strong>
-                <span>{creature.name}</span>
-                <span>
-                  {creature.hp}/{creature.maxHp}
-                </span>
-                <ConditionTags creature={creature} compact />
-              </button>
-            ))}
           </section>
 
           {combat.pendingReactions.length > 0 && (
@@ -1149,9 +1170,9 @@ export function App() {
           )}
         </aside>
 
-        <section className="layout">
-        <section className="panel board-panel" aria-label="Battle grid panel">
-          <div className="map-toolbar">
+        <section className="combat-hud-main">
+        <section className="panel map-stage" aria-label="Battle grid panel">
+          <div className="map-overlay-controls">
             <div className="map-toolbar-row">
               <strong>Battlemap</strong>
               <span>
@@ -1251,6 +1272,18 @@ export function App() {
               </>
             )}
           </div>
+          <div className="targeting-prompt" role="status" aria-live="polite">
+            <strong>{selectedAction ? selectedAction.name : selectionMode === 'move' ? 'Movement' : 'Map'}</strong>
+            <span>
+              {selectedAction
+                ? `Choose target${selectedAction.shape?.type && selectedAction.shape.type !== 'single' ? ' or area' : ''}, then apply.`
+                : uiSettings.showShortcutHints
+                  ? keyboardHint
+                  : selectionMode === 'move'
+                    ? 'Select a reachable square.'
+                    : 'Select a target.'}
+            </span>
+          </div>
           {battlemapView === '2d' ? (
             <Battlefield2DView
               combat={combat}
@@ -1304,7 +1337,7 @@ export function App() {
           )}
         </section>
 
-        <aside className={['panel', 'side-panel', openHudPanels.actions ? 'hud-open' : ''].join(' ')} style={getHudPanelStyle('actions')} tabIndex={0} aria-label="Active creature and actions">
+        <aside className={['panel', 'creature-status-hud', openHudPanels.actions ? 'hud-open' : ''].join(' ')} tabIndex={0} aria-label="Active creature and actions">
           {renderHudPanelBar('actions', 'Actions')}
           <h2>Active Creature</h2>
           {activeCreature ? (
@@ -1316,118 +1349,7 @@ export function App() {
                 <span>Bonus action used: {combat.turnState.bonusActionUsed ? 'yes' : 'no'}</span>
                 <span>Reaction used: {combat.turnState.reactionUsed ? 'yes' : 'no'}</span>
               </div>
-              <div className="mode-actions">
-                {activeCreature.controlMode === 'bot' && (
-                  <button className="selected-action" disabled={botTurnSequence.running} onClick={() => void runBotTurnSequence(false)}>
-                    Run Bot Turn (B)
-                  </button>
-                )}
-                <button className={selectionMode === 'move' ? 'selected-action' : ''} onClick={() => resetTargeting()}>
-                  Move
-                </button>
-                <button onClick={cancelSelection}>Cancel Selection</button>
-              </div>
-              {botTurnSequence.running && (
-                <div className="bot-turn-status" role="status" aria-live="polite">
-                  <span>{botTurnSequence.step}</span>
-                  <button onClick={() => stopBotTurnSequence(botTurnSequence.auto)}>
-                    {botTurnSequence.auto ? 'Stop Auto' : 'Cancel'}
-                  </button>
-                </div>
-              )}
-              {uiSettings.showShortcutHints && <p className="keyboard-hint">{keyboardHint}</p>}
-
-              <h3>Basic Actions</h3>
-              <div className="action-list">
-                {BASIC_ACTIONS.map((actionName) => (
-                  <button
-                    disabled={combat.turnState.actionUsed}
-                    key={actionName}
-                    title={getBasicActionDescription(actionName)}
-                    onClick={() => handleBasicAction(actionName)}
-                  >
-                    {actionName}
-                  </button>
-                ))}
-              </div>
-              <details className="compact-details">
-                <summary>Basic action options</summary>
-                <div className="basic-options">
-                  <label>
-                    Basic target
-                    <select value={basicTargetId ?? ''} onChange={(event) => setBasicTargetId(event.target.value || undefined)}>
-                      <option value="">None</option>
-                      {combat.creatures
-                        .filter((creature) => creature.id !== activeCreature.id && !isDefeated(creature))
-                        .map((creature) => (
-                          <option key={creature.id} value={creature.id}>
-                            {creature.name}
-                          </option>
-                        ))}
-                    </select>
-                  </label>
-                  <label>
-                    Help mode
-                    <select value={helpMode} onChange={(event) => setHelpMode(event.target.value as HelpMode)}>
-                      <option value="ally">Help ally</option>
-                      <option value="enemy">Help against enemy</option>
-                    </select>
-                  </label>
-                  <label>
-                    Ready action
-                    <select value={readyActionId ?? activeActions[0]?.id ?? ''} onChange={(event) => setReadyActionId(event.target.value || undefined)}>
-                      {activeActions.map((action) => (
-                        <option key={action.id} value={action.id}>
-                          {action.name}
-                        </option>
-                      ))}
-                    </select>
-                  </label>
-                  <label>
-                    Ready trigger
-                    <input value={readyTrigger} onChange={(event) => setReadyTrigger(event.target.value)} />
-                  </label>
-                  <label>
-                    Search
-                    <select value={searchMode} onChange={(event) => setSearchMode(event.target.value as SearchMode)}>
-                      <option value="perception">WIS / Perception</option>
-                      <option value="investigation">INT / Investigation</option>
-                    </select>
-                  </label>
-                  <label>
-                    Shove
-                    <select value={shoveOutcome} onChange={(event) => setShoveOutcome(event.target.value as ShoveOutcome)}>
-                      <option value="prone">Knock prone</option>
-                      <option value="push">Push 5 ft</option>
-                    </select>
-                  </label>
-                  <label>
-                    Improvised ability
-                    <select value={improvisedAbility} onChange={(event) => setImprovisedAbility(event.target.value as Ability | '')}>
-                      <option value="">No roll</option>
-                      <option value="str">STR</option>
-                      <option value="dex">DEX</option>
-                      <option value="con">CON</option>
-                      <option value="int">INT</option>
-                      <option value="wis">WIS</option>
-                      <option value="cha">CHA</option>
-                    </select>
-                  </label>
-                  <label>
-                    Note
-                    <input value={basicNote} onChange={(event) => setBasicNote(event.target.value)} />
-                  </label>
-                </div>
-              </details>
-
-              <CreatureActionGroups
-                actions={activeActions}
-                selectedActionId={selectedActionId}
-                selectedTab={actionTab}
-                onSelectTab={setActionTab}
-                getDisabledReason={(action) => getActionDisabledReason(activeCreature, action, combat.turnState)}
-                onSelect={handleCreatureActionSelect}
-              />
+              {activeBotPreview && <BotTurnPreviewPanel preview={activeBotPreview} />}
               {selectedAction && (
                 <div className="target-panel" ref={targetPanelRef} tabIndex={0} aria-label="Target panel">
                   <p>{describeAction(selectedAction)}</p>
@@ -1644,11 +1566,144 @@ export function App() {
           )}
         </aside>
 
-        <section className={['panel', 'log-panel', openHudPanels.log ? 'hud-open' : ''].join(' ')} style={getHudPanelStyle('log')}>
+        <section className="panel action-bar" aria-label="Available actions">
+          {activeCreature ? (
+            <>
+              <div className="action-bar-header">
+                <div>
+                  <h2>Actions</h2>
+                  <span>{selectedAction ? selectedAction.name : selectionMode === 'move' ? 'Movement mode' : 'Choose an action'}</span>
+                </div>
+                <div className="mode-actions">
+                  {activeCreature.controlMode === 'bot' && (
+                    <button className="selected-action" disabled={botTurnSequence.running} onClick={() => void runBotTurnSequence(false)}>
+                      Run Bot Turn (B)
+                    </button>
+                  )}
+                  <button className={selectionMode === 'move' ? 'selected-action' : ''} onClick={() => resetTargeting()}>
+                    Move
+                  </button>
+                  <button onClick={cancelSelection}>Cancel</button>
+                </div>
+              </div>
+              {botTurnSequence.running && (
+                <div className="bot-turn-status" role="status" aria-live="polite">
+                  <span>{botTurnSequence.step}</span>
+                  <button onClick={() => stopBotTurnSequence(botTurnSequence.auto)}>
+                    {botTurnSequence.auto ? 'Stop Auto' : 'Cancel'}
+                  </button>
+                </div>
+              )}
+              <div className="action-bar-grid">
+                <section className="basic-action-strip" aria-label="Basic actions">
+                  <h3>Basic</h3>
+                  <div className="action-list">
+                    {BASIC_ACTIONS.map((actionName) => (
+                      <button
+                        disabled={combat.turnState.actionUsed}
+                        key={actionName}
+                        title={getBasicActionDescription(actionName)}
+                        onClick={() => handleBasicAction(actionName)}
+                      >
+                        {actionName}
+                      </button>
+                    ))}
+                  </div>
+                  <details className="compact-details">
+                    <summary>Options</summary>
+                    <div className="basic-options">
+                      <label>
+                        Basic target
+                        <select value={basicTargetId ?? ''} onChange={(event) => setBasicTargetId(event.target.value || undefined)}>
+                          <option value="">None</option>
+                          {combat.creatures
+                            .filter((creature) => creature.id !== activeCreature.id && !isDefeated(creature))
+                            .map((creature) => (
+                              <option key={creature.id} value={creature.id}>
+                                {creature.name}
+                              </option>
+                            ))}
+                        </select>
+                      </label>
+                      <label>
+                        Help mode
+                        <select value={helpMode} onChange={(event) => setHelpMode(event.target.value as HelpMode)}>
+                          <option value="ally">Help ally</option>
+                          <option value="enemy">Help against enemy</option>
+                        </select>
+                      </label>
+                      <label>
+                        Ready action
+                        <select value={readyActionId ?? activeActions[0]?.id ?? ''} onChange={(event) => setReadyActionId(event.target.value || undefined)}>
+                          {activeActions.map((action) => (
+                            <option key={action.id} value={action.id}>
+                              {action.name}
+                            </option>
+                          ))}
+                        </select>
+                      </label>
+                      <label>
+                        Ready trigger
+                        <input value={readyTrigger} onChange={(event) => setReadyTrigger(event.target.value)} />
+                      </label>
+                      <label>
+                        Search
+                        <select value={searchMode} onChange={(event) => setSearchMode(event.target.value as SearchMode)}>
+                          <option value="perception">WIS / Perception</option>
+                          <option value="investigation">INT / Investigation</option>
+                        </select>
+                      </label>
+                      <label>
+                        Shove
+                        <select value={shoveOutcome} onChange={(event) => setShoveOutcome(event.target.value as ShoveOutcome)}>
+                          <option value="prone">Knock prone</option>
+                          <option value="push">Push 5 ft</option>
+                        </select>
+                      </label>
+                      <label>
+                        Improvised ability
+                        <select value={improvisedAbility} onChange={(event) => setImprovisedAbility(event.target.value as Ability | '')}>
+                          <option value="">No roll</option>
+                          <option value="str">STR</option>
+                          <option value="dex">DEX</option>
+                          <option value="con">CON</option>
+                          <option value="int">INT</option>
+                          <option value="wis">WIS</option>
+                          <option value="cha">CHA</option>
+                        </select>
+                      </label>
+                      <label>
+                        Note
+                        <input value={basicNote} onChange={(event) => setBasicNote(event.target.value)} />
+                      </label>
+                    </div>
+                  </details>
+                </section>
+                <CreatureActionGroups
+                  actions={activeActions}
+                  selectedActionId={selectedActionId}
+                  selectedTab={actionTab}
+                  onSelectTab={setActionTab}
+                  getDisabledReason={(action) => getActionDisabledReason(activeCreature, action, combat.turnState)}
+                  onSelect={handleCreatureActionSelect}
+                />
+              </div>
+            </>
+          ) : (
+            <p>Roll initiative to begin.</p>
+          )}
+        </section>
+
+        <section className={['panel', 'combat-feed', openHudPanels.log ? 'hud-open' : ''].join(' ')}>
           {renderHudPanelBar('log', 'Log')}
-          <h2>Combat Log</h2>
+          <div className="panel-heading-row">
+            <h2>Combat Log</h2>
+            <button onClick={() => setLogExpanded((current) => !current)}>
+              {logExpanded ? 'Show Recent' : 'Full History'}
+            </button>
+          </div>
           <ol className="combat-log" ref={logRef} tabIndex={0} aria-label="Combat log">
-            {combat.log.map((entry) => (
+            {visibleLogEntries.map((entry) => (
               <li key={entry.id}>
                 <strong>{entry.type}</strong> {entry.message}
               </li>
@@ -1657,7 +1712,7 @@ export function App() {
         </section>
 
         {uiSettings.showAdvancedTools && (
-        <section className={['panel', 'json-panel', openHudPanels.data ? 'hud-open' : ''].join(' ')} style={getHudPanelStyle('data')}>
+        <section className={['panel', 'json-panel', openHudPanels.data ? 'hud-open' : ''].join(' ')}>
           {renderHudPanelBar('data', 'Data')}
           <details
             className="compact-details"
@@ -1683,6 +1738,7 @@ export function App() {
         )}
         </section>
       </section>
+      </>
       ) : (
         <EncounterEditor currentCombat={combat} onLoadEncounter={loadEncounterFromEditor} />
       )}
@@ -2648,6 +2704,11 @@ function CreatureSummary({ creature, state }: { creature: Creature; state: Comba
       <span>
         Control: {creature.controlMode === 'bot' ? `Bot (${formatBotProfileLabel(creature.botProfile ?? 'passive')})` : 'Manual'}
       </span>
+      {creature.controlMode === 'bot' && (
+        <span>
+          Tactics: {formatBotTargetPriorityLabel(creature.botTargetPriority ?? 'balanced')}, {formatBotResourceStrategyLabel(creature.botResourceStrategy ?? 'normal')}
+        </span>
+      )}
       <HpBar creature={creature} />
       <span>
         HP {creature.hp}/{creature.maxHp}
@@ -2673,6 +2734,100 @@ function CreatureSummary({ creature, state }: { creature: Creature; state: Comba
   );
 }
 
+function BotTurnPreviewPanel({ preview }: { preview: BotTurnPreview }) {
+  return (
+    <section className="bot-turn-preview" aria-label="Bot turn preview">
+      <header>
+        <strong>Bot Intent</strong>
+        {preview.profile && <span>{formatBotProfileLabel(preview.profile)}</span>}
+      </header>
+      {(preview.targetPriority || preview.resourceStrategy) && (
+        <span className="bot-tactics-line">
+          {formatBotTargetPriorityLabel(preview.targetPriority ?? 'balanced')} / {formatBotResourceStrategyLabel(preview.resourceStrategy ?? 'normal')}
+        </span>
+      )}
+      <p>{preview.summary}</p>
+      <div className="bot-turn-preview-grid">
+        <span>Order</span>
+        <strong>{preview.order ? formatBotTurnOrderLabel(preview.order) : 'Default'}</strong>
+        <span>Move</span>
+        <strong>
+          {preview.movement
+            ? `${preview.movement.costFeet} ft to (${preview.movement.to.x}, ${preview.movement.to.y})`
+            : 'Stay put'}
+        </strong>
+        <span>Action</span>
+        <strong>
+          {preview.action
+            ? `${preview.action.actionName} -> ${preview.action.targetNames.join(', ')}`
+            : preview.willDodgeOrWait
+              ? 'Dodge / Wait'
+              : 'None'}
+        </strong>
+        <span>Bonus</span>
+        <strong>
+          {preview.bonusAction
+            ? `${preview.bonusAction.actionName}${preview.bonusAction.targetNames.length > 0 ? ` -> ${preview.bonusAction.targetNames.join(', ')}` : ''}`
+            : 'None'}
+        </strong>
+      </div>
+      {preview.notes.length > 0 && (
+        <details>
+          <summary>Decision notes</summary>
+          {preview.action && (
+            <div className="bot-score-grid">
+              <span>Score</span>
+              <strong>{preview.action.scoreDetails.total}</strong>
+              <span>Expected damage</span>
+              <strong>{preview.action.scoreDetails.expectedDamage}</strong>
+              {preview.action.scoreDetails.hitChance !== undefined && (
+                <>
+                  <span>Hit / crit</span>
+                  <strong>
+                    {formatPercent(preview.action.scoreDetails.hitChance)} / {formatPercent(preview.action.scoreDetails.critChance ?? 0)}
+                  </strong>
+                </>
+              )}
+              {preview.action.scoreDetails.saveFailureChance !== undefined && (
+                <>
+                  <span>Failed save</span>
+                  <strong>{formatPercent(preview.action.scoreDetails.saveFailureChance)}</strong>
+                </>
+              )}
+              <span>Targets</span>
+              <strong>
+                {preview.action.scoreDetails.enemyTargets} enemy{preview.action.scoreDetails.enemyTargets === 1 ? '' : 'ies'}
+                {preview.action.scoreDetails.allyTargets > 0 ? `, ${preview.action.scoreDetails.allyTargets} ally` : ''}
+              </strong>
+              {preview.action.scoreDetails.memoryBonus > 0 && (
+                <>
+                  <span>Memory</span>
+                  <strong>+{preview.action.scoreDetails.memoryBonus}</strong>
+                </>
+              )}
+              {(preview.action.scoreDetails.resourcePenalty > 0 || preview.action.scoreDetails.friendlyFirePenalty > 0) && (
+                <>
+                  <span>Penalties</span>
+                  <strong>
+                    {[
+                      preview.action.scoreDetails.resourcePenalty > 0 ? `resource ${preview.action.scoreDetails.resourcePenalty}` : '',
+                      preview.action.scoreDetails.friendlyFirePenalty > 0 ? `friendly ${preview.action.scoreDetails.friendlyFirePenalty}` : ''
+                    ].filter(Boolean).join(', ')}
+                  </strong>
+                </>
+              )}
+            </div>
+          )}
+          <ul>
+            {preview.notes.map((note, index) => (
+              <li key={`${note}-${index}`}>{note}</li>
+            ))}
+          </ul>
+        </details>
+      )}
+    </section>
+  );
+}
 
 function CreatureActionGroups({
   actions,
@@ -2697,7 +2852,7 @@ function CreatureActionGroups({
   ];
 
   return (
-    <section className="ability-panel">
+    <section className="ability-panel action-bar-abilities">
       <h3>Creature Actions</h3>
       <div className="action-tabs">
         {groups.map(([label, cost]) => {
@@ -3365,6 +3520,49 @@ function formatBotProfileLabel(profile: BotProfile): string {
     case 'passive':
       return 'Passive/Test Dummy';
   }
+}
+
+function formatBotTargetPriorityLabel(priority: BotTargetPriority): string {
+  switch (priority) {
+    case 'nearest':
+      return 'Nearest';
+    case 'weakest':
+      return 'Weakest AC';
+    case 'lowestHp':
+      return 'Lowest HP';
+    case 'easiestToHit':
+      return 'Easiest to Hit';
+    case 'balanced':
+      return 'Balanced';
+  }
+}
+
+function formatBotResourceStrategyLabel(strategy: BotResourceStrategy): string {
+  switch (strategy) {
+    case 'conserve':
+      return 'Conserve Resources';
+    case 'spendFreely':
+      return 'Spend Freely';
+    case 'normal':
+      return 'Normal Resources';
+  }
+}
+
+function formatBotTurnOrderLabel(order: BotTurnOrder): string {
+  switch (order) {
+    case 'move-then-action':
+      return 'Move -> Action';
+    case 'action-then-move':
+      return 'Action -> Move';
+    case 'action-only':
+      return 'Action Only';
+    case 'hold-position':
+      return 'Hold Position';
+  }
+}
+
+function formatPercent(value: number): string {
+  return `${Math.round(value * 100)}%`;
 }
 
 function getTargetOptions(
