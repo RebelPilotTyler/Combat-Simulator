@@ -2884,7 +2884,7 @@ summary:focus-visible {
   backdrop-filter: blur(12px);
   border: 1px solid color-mix(in srgb, var(--border) 76%, transparent);
   border-radius: var(--radius-sm);
-  bottom: 204px;
+  bottom: 144px;
   box-shadow: 0 8px 24px rgba(10, 15, 24, 0.18);
   display: grid;
   gap: 2px;
@@ -2957,39 +2957,61 @@ summary:focus-visible {
   bottom: 10px;
   box-shadow: 0 12px 34px rgba(10, 15, 24, 0.32);
   display: grid;
-  gap: 6px;
+  gap: 4px;
   left: 50%;
-  max-height: 184px;
-  overflow: hidden;
-  padding: 8px;
+  max-height: min(134px, 20vh);
+  overflow: visible;
+  padding: 5px;
   position: absolute;
   transform: translateX(-50%);
-  width: min(920px, calc(100% - 520px));
+  width: min(1080px, calc(100% - 500px));
   z-index: 20;
 }
 
 .action-bar-header {
   align-items: center;
   display: flex;
-  gap: 10px;
+  gap: 8px;
   justify-content: space-between;
+  min-height: 23px;
 }
 
 .action-bar-header h2 {
   margin: 0;
 }
 
+.action-bar-title {
+  align-items: baseline;
+  display: flex;
+  gap: 8px;
+  min-width: 0;
+}
+
 .action-bar-header span {
   color: var(--text-muted);
   font-size: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.action-bar-header .mode-actions {
+  flex: 0 0 auto;
+  flex-wrap: nowrap;
+}
+
+.action-bar-header .mode-actions button {
+  font-size: 11px;
+  min-height: 23px;
+  padding: 2px 7px;
 }
 
 .action-bar-grid {
   display: grid;
-  gap: 6px;
-  grid-template-columns: minmax(210px, 0.42fr) minmax(0, 1fr);
+  gap: 4px;
+  grid-template-columns: minmax(0, 1fr);
   min-height: 0;
-  overflow: hidden;
+  overflow: visible;
 }
 
 .basic-action-strip,
@@ -2997,52 +3019,116 @@ summary:focus-visible {
   background: color-mix(in srgb, var(--panel-muted) 76%, transparent);
   border: 1px solid color-mix(in srgb, var(--border) 72%, transparent);
   border-radius: var(--radius-sm);
+  align-items: center;
   display: grid;
   gap: 4px;
   min-height: 0;
-  overflow: hidden;
-  padding: 5px;
+  overflow: visible;
+  padding: 3px;
+}
+
+.basic-action-strip {
+  grid-template-columns: auto minmax(0, 1fr) auto;
+}
+
+.basic-action-strip h3,
+.action-bar-abilities h3 {
+  font-size: 11px;
+  margin: 0;
+  white-space: nowrap;
 }
 
 .basic-action-strip .action-list {
-  flex-wrap: nowrap;
+  display: grid;
+  gap: 4px;
+  grid-template-columns: repeat(auto-fit, minmax(54px, 1fr));
   max-height: none;
-  overflow: hidden;
+  overflow: visible;
 }
 
 .basic-action-strip .action-list button {
-  flex: 1 1 auto;
-  font-size: 11px;
-  min-height: 30px;
+  font-size: 10px;
+  line-height: 1.1;
+  min-height: 28px;
   min-width: 0;
   padding: 3px 5px;
 }
 
+.basic-action-strip > .compact-details {
+  position: relative;
+}
+
+.basic-action-strip > .compact-details summary {
+  font-size: 11px;
+  min-height: 23px;
+  white-space: nowrap;
+}
+
+.basic-action-strip > .compact-details[open] .basic-options {
+  background: color-mix(in srgb, var(--panel) 96%, transparent);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  bottom: calc(100% + 9px);
+  box-shadow: var(--shadow-md);
+  max-height: min(420px, 56vh);
+  overflow: auto;
+  padding: 8px;
+  position: absolute;
+  right: 0;
+  width: min(620px, calc(100vw - 32px));
+  z-index: 35;
+}
+
 .action-bar-abilities {
+  grid-template-columns: auto auto minmax(0, 1fr);
   margin: 0;
 }
 
+.action-bar-abilities .action-tabs {
+  flex-wrap: nowrap;
+  gap: 3px;
+}
+
+.action-bar-abilities .action-tabs button {
+  font-size: 10px;
+  min-height: 22px;
+  padding: 2px 5px;
+  white-space: nowrap;
+}
+
 .action-bar-abilities .action-grid {
-  display: flex;
-  gap: 5px;
-  overflow-x: auto;
-  overflow-y: hidden;
-  padding: 0 0 2px;
-  scrollbar-width: thin;
+  display: grid;
+  gap: 4px;
+  grid-template-columns: repeat(auto-fill, minmax(104px, 132px));
+  justify-content: start;
+  max-height: none;
+  overflow: visible;
+  padding: 0;
 }
 
 .action-bar-abilities .ability-card {
-  flex: 0 0 116px;
-  min-height: 62px;
-  padding: 5px;
+  align-items: center;
+  min-height: 28px;
+  padding: 3px 24px 3px 6px;
 }
 
 .action-bar-abilities .ability-card strong {
-  font-size: 12px;
+  font-size: 11px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
-.action-bar-abilities .ability-meta {
-  font-size: 10px;
+.action-bar-abilities .hotkey-chip {
+  font-size: 9px;
+  padding: 2px 4px;
+  right: 3px;
+  top: 3px;
+}
+
+.action-bar-abilities .ability-card:disabled {
+  color: var(--text);
+  opacity: 0.64;
 }
 
 .combat-feed {
@@ -3073,7 +3159,7 @@ summary:focus-visible {
 }
 
 .combat-hud > .json-panel {
-  bottom: 204px;
+  bottom: 144px;
   max-height: min(360px, calc(100% - 190px));
   overflow: auto;
   position: absolute;
@@ -3110,6 +3196,7 @@ summary:focus-visible {
   }
 
   .action-bar {
+    max-height: min(188px, 28vh);
     width: min(760px, calc(100% - 500px));
   }
 }

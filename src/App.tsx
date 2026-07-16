@@ -1586,9 +1586,15 @@ export function App() {
           {activeCreature ? (
             <>
               <div className="action-bar-header">
-                <div>
+                <div className="action-bar-title">
                   <h2>Actions</h2>
-                  <span>{selectedAction ? selectedAction.name : selectionMode === 'move' ? 'Movement mode' : 'Choose an action'}</span>
+                  <span>
+                    {selectedAction
+                      ? `${selectedAction.name} - ${describeAction(selectedAction)}`
+                      : selectionMode === 'move'
+                        ? 'Movement mode'
+                        : 'Choose an action'}
+                  </span>
                 </div>
                 <div className="mode-actions">
                   {activeCreature.controlMode === 'bot' && (
@@ -2896,26 +2902,18 @@ function CreatureActionGroups({
           .map((action, index) => {
             const disabledReason = getDisabledReason(action);
             const hotkey = index < 9 ? getActionHotkeyLabel(selectedTab, index) : undefined;
+            const actionMeta = getActionMeta(action);
             return (
               <button
                 aria-label={`${hotkey ? `${hotkey}: ` : ''}${action.name}`}
                 className={['ability-card', action.id === selectedActionId ? 'selected-action' : ''].join(' ')}
                 disabled={Boolean(disabledReason)}
                 key={action.id}
-                title={`${hotkey ? `${hotkey}. ` : ''}${disabledReason ?? action.description ?? describeAction(action)}`}
+                title={`${hotkey ? `${hotkey}. ` : ''}${disabledReason ?? action.description ?? describeAction(action)}${actionMeta ? ` | ${actionMeta}` : ''}`}
                 onClick={() => onSelect(action)}
               >
                 {hotkey && <span className="hotkey-chip">{hotkey}</span>}
                 <strong>{action.name}</strong>
-                <span className="badge-row">
-                  {action.tags.includes('spell') || action.kind === 'spell' ? <span>Spell</span> : null}
-                  {action.kind === 'multiattack' ? <span>Multi</span> : null}
-                  {action.generatedByFeatureId ? <span>Feature</span> : null}
-                  {action.tags.includes('melee') ? <span>Melee</span> : null}
-                  {action.tags.includes('ranged') ? <span>Ranged</span> : null}
-                </span>
-                <span className="ability-meta">{getActionMeta(action)}</span>
-                {disabledReason && <small>{disabledReason}</small>}
               </button>
             );
           })}
