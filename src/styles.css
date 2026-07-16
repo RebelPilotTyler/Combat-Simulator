@@ -2667,53 +2667,77 @@ summary:focus-visible {
 }
 
 .app-shell.view-combat {
-  background:
-    radial-gradient(circle at 50% 35%, color-mix(in srgb, var(--accent-soft) 34%, transparent), transparent 34%),
-    var(--bg);
-  grid-template-rows: auto auto minmax(0, 1fr);
+  background: #111722;
+  gap: 0;
+  grid-template-rows: minmax(0, 1fr);
+  padding: 0;
+  position: relative;
 }
 
 .combat-top-bar {
   align-items: center;
-  background: color-mix(in srgb, var(--panel) 90%, transparent);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-md);
-  box-shadow: var(--shadow-sm);
+  backdrop-filter: blur(14px);
+  background: color-mix(in srgb, var(--panel) 86%, transparent);
+  border: 1px solid color-mix(in srgb, var(--border) 78%, transparent);
+  border-radius: var(--radius-sm);
+  box-shadow: 0 8px 24px rgba(10, 15, 24, 0.2);
   color: var(--text);
   display: grid;
-  gap: 10px;
-  grid-template-columns: minmax(150px, 220px) minmax(0, 1fr) auto;
-  padding: 8px 10px;
+  gap: 8px;
+  grid-template-columns: minmax(140px, 190px) minmax(0, 1fr) auto;
+  left: 10px;
+  padding: 6px 8px;
+  position: absolute;
+  right: 10px;
+  top: 10px;
+  z-index: 40;
 }
 
 .combat-top-bar h1 {
-  font-size: 18px;
+  font-size: 16px;
   letter-spacing: 0;
-  margin: 0 0 2px;
+  margin: 0;
 }
 
 .combat-top-bar p {
   color: var(--text-muted);
+  font-size: 11px;
   margin: 0;
+}
+
+.combat-top-bar .top-actions {
+  flex-wrap: nowrap;
+  gap: 4px;
+}
+
+.combat-top-bar .top-actions button {
+  min-height: 30px;
+  padding: 4px 7px;
+  white-space: nowrap;
 }
 
 .combat-status-readout {
   align-items: center;
   display: grid;
-  gap: 6px;
-  grid-template-columns: repeat(6, minmax(82px, 1fr));
+  gap: 4px;
+  grid-template-columns: repeat(6, minmax(64px, 1fr));
   min-width: 0;
 }
 
 .combat-status-readout span {
-  background: var(--surface);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
+  background: color-mix(in srgb, var(--surface) 72%, transparent);
+  border: 1px solid color-mix(in srgb, var(--border) 74%, transparent);
+  border-radius: 4px;
   display: grid;
   gap: 1px;
-  min-height: 42px;
+  font-size: 12px;
+  line-height: 1.15;
+  min-height: 34px;
   min-width: 0;
-  padding: 5px 7px;
+  overflow: hidden;
+  padding: 4px 6px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .combat-status-readout strong {
@@ -2731,16 +2755,12 @@ summary:focus-visible {
 }
 
 .combat-hud {
-  display: grid;
-  gap: var(--gap);
-  grid-template-areas:
-    "initiative stage status"
-    "feed actions status";
-  grid-template-columns: clamp(190px, 18vw, 260px) minmax(0, 1fr) clamp(250px, 22vw, 340px);
-  grid-template-rows: minmax(0, 1fr) minmax(156px, 24vh);
+  display: block;
+  height: 100%;
   min-height: 0;
   overflow: hidden;
   position: relative;
+  width: 100%;
 }
 
 .combat-hud-main {
@@ -2749,15 +2769,25 @@ summary:focus-visible {
 
 .initiative-hud {
   align-content: start;
+  backdrop-filter: blur(12px);
+  background: color-mix(in srgb, var(--panel) 84%, transparent);
+  border-color: color-mix(in srgb, var(--border) 76%, transparent);
+  box-shadow: 0 10px 28px rgba(10, 15, 24, 0.24);
   display: grid;
   gap: 7px;
-  grid-area: initiative;
   grid-template-rows: auto auto minmax(0, 1fr) auto;
+  left: 10px;
+  max-height: calc(100% - 250px);
   overflow: hidden;
+  padding: 8px;
+  position: absolute;
+  top: 72px;
+  width: clamp(178px, 15vw, 224px);
+  z-index: 18;
 }
 
 .initiative-hud .round-card {
-  padding: 7px 8px;
+  display: none;
 }
 
 .initiative-hud h2,
@@ -2773,11 +2803,13 @@ summary:focus-visible {
   min-height: 0;
   overflow: auto;
   padding-right: 2px;
+  scrollbar-width: thin;
 }
 
 .initiative-hud .initiative-item {
   grid-template-columns: auto minmax(0, 1fr) auto;
-  padding: 6px;
+  min-height: 48px;
+  padding: 5px;
 }
 
 .initiative-hud .initiative-item strong {
@@ -2787,36 +2819,49 @@ summary:focus-visible {
 }
 
 .map-stage {
-  display: grid;
-  grid-area: stage;
-  min-height: 0;
+  border: 0;
+  border-radius: 0;
+  bottom: 0;
+  box-shadow: none;
+  display: block;
+  left: 0;
   overflow: hidden;
   padding: 0;
-  position: relative;
+  position: absolute;
+  right: 0;
+  top: 0;
+  z-index: 1;
 }
 
 .map-stage > .grid-board-viewport,
 .map-stage > .battlefield-3d-viewport {
   border: 0;
-  border-radius: var(--radius-md);
+  border-radius: 0;
   height: 100%;
   min-height: 0;
+  width: 100%;
+}
+
+.map-stage > .grid-board-viewport {
+  background: #202733;
+  display: grid;
+  place-items: safe center;
 }
 
 .map-overlay-controls {
-  background: color-mix(in srgb, var(--panel) 88%, transparent);
+  background: color-mix(in srgb, var(--panel) 82%, transparent);
   backdrop-filter: blur(12px);
-  border: 1px solid var(--border);
+  border: 1px solid color-mix(in srgb, var(--border) 76%, transparent);
   border-radius: var(--radius-sm);
-  box-shadow: var(--shadow-sm);
+  box-shadow: 0 8px 24px rgba(10, 15, 24, 0.18);
   display: grid;
-  gap: 5px;
-  left: 10px;
-  max-width: calc(100% - 20px);
-  padding: 6px;
+  gap: 4px;
+  left: 246px;
+  max-width: min(720px, calc(100% - 530px));
+  padding: 5px;
   position: absolute;
   right: auto;
-  top: 10px;
+  top: 72px;
   z-index: 12;
 }
 
@@ -2825,8 +2870,9 @@ summary:focus-visible {
 }
 
 .map-overlay-controls button {
-  min-height: 28px;
-  padding: 4px 7px;
+  font-size: 11px;
+  min-height: 26px;
+  padding: 3px 6px;
 }
 
 .map-overlay-controls input[type='range'] {
@@ -2834,18 +2880,19 @@ summary:focus-visible {
 }
 
 .targeting-prompt {
-  background: color-mix(in srgb, var(--panel) 90%, transparent);
+  background: color-mix(in srgb, var(--panel) 84%, transparent);
   backdrop-filter: blur(12px);
-  border: 1px solid var(--border);
+  border: 1px solid color-mix(in srgb, var(--border) 76%, transparent);
   border-radius: var(--radius-sm);
-  bottom: 10px;
-  box-shadow: var(--shadow-sm);
+  bottom: 204px;
+  box-shadow: 0 8px 24px rgba(10, 15, 24, 0.18);
   display: grid;
   gap: 2px;
-  left: 10px;
+  left: 50%;
   max-width: min(520px, calc(100% - 20px));
-  padding: 7px 9px;
+  padding: 6px 9px;
   position: absolute;
+  transform: translateX(-50%);
   z-index: 12;
 }
 
@@ -2856,10 +2903,21 @@ summary:focus-visible {
 
 .creature-status-hud {
   align-content: start;
+  backdrop-filter: blur(12px);
+  background: color-mix(in srgb, var(--panel) 84%, transparent);
+  border-color: color-mix(in srgb, var(--border) 76%, transparent);
+  box-shadow: 0 10px 28px rgba(10, 15, 24, 0.24);
   display: grid;
-  gap: 8px;
-  grid-area: status;
-  overflow: auto;
+  gap: 6px;
+  max-height: calc(100% - 278px);
+  overflow: hidden auto;
+  padding: 8px;
+  position: absolute;
+  right: 10px;
+  scrollbar-width: thin;
+  top: 72px;
+  width: clamp(230px, 18vw, 286px);
+  z-index: 18;
 }
 
 .creature-status-hud .creature-summary {
@@ -2874,6 +2932,17 @@ summary:focus-visible {
 
 .creature-status-hud .turn-state {
   grid-template-columns: repeat(2, minmax(0, 1fr));
+  font-size: 11px;
+  padding: 5px;
+}
+
+.creature-status-hud .target-panel {
+  max-height: min(38vh, 340px);
+  overflow: auto;
+}
+
+.creature-status-hud .condition-dev-panel {
+  margin-top: 2px;
 }
 
 .target-panel {
@@ -2882,10 +2951,21 @@ summary:focus-visible {
 
 .action-bar {
   align-content: start;
+  backdrop-filter: blur(14px);
+  background: color-mix(in srgb, var(--panel) 88%, transparent);
+  border-color: color-mix(in srgb, var(--border) 78%, transparent);
+  bottom: 10px;
+  box-shadow: 0 12px 34px rgba(10, 15, 24, 0.32);
   display: grid;
-  gap: 8px;
-  grid-area: actions;
+  gap: 6px;
+  left: 50%;
+  max-height: 184px;
   overflow: hidden;
+  padding: 8px;
+  position: absolute;
+  transform: translateX(-50%);
+  width: min(920px, calc(100% - 520px));
+  z-index: 20;
 }
 
 .action-bar-header {
@@ -2906,27 +2986,36 @@ summary:focus-visible {
 
 .action-bar-grid {
   display: grid;
-  gap: 8px;
-  grid-template-columns: minmax(220px, 0.55fr) minmax(0, 1fr);
+  gap: 6px;
+  grid-template-columns: minmax(210px, 0.42fr) minmax(0, 1fr);
   min-height: 0;
   overflow: hidden;
 }
 
 .basic-action-strip,
 .action-bar-abilities {
-  background: var(--panel-muted);
-  border: 1px solid var(--border);
+  background: color-mix(in srgb, var(--panel-muted) 76%, transparent);
+  border: 1px solid color-mix(in srgb, var(--border) 72%, transparent);
   border-radius: var(--radius-sm);
   display: grid;
-  gap: 6px;
+  gap: 4px;
   min-height: 0;
   overflow: hidden;
-  padding: 7px;
+  padding: 5px;
 }
 
 .basic-action-strip .action-list {
-  max-height: 92px;
-  overflow: auto;
+  flex-wrap: nowrap;
+  max-height: none;
+  overflow: hidden;
+}
+
+.basic-action-strip .action-list button {
+  flex: 1 1 auto;
+  font-size: 11px;
+  min-height: 30px;
+  min-width: 0;
+  padding: 3px 5px;
 }
 
 .action-bar-abilities {
@@ -2934,21 +3023,44 @@ summary:focus-visible {
 }
 
 .action-bar-abilities .action-grid {
-  grid-template-columns: repeat(auto-fit, minmax(118px, 1fr));
-  overflow: auto;
-  padding-right: 2px;
+  display: flex;
+  gap: 5px;
+  overflow-x: auto;
+  overflow-y: hidden;
+  padding: 0 0 2px;
+  scrollbar-width: thin;
 }
 
 .action-bar-abilities .ability-card {
-  min-height: 66px;
+  flex: 0 0 116px;
+  min-height: 62px;
+  padding: 5px;
+}
+
+.action-bar-abilities .ability-card strong {
+  font-size: 12px;
+}
+
+.action-bar-abilities .ability-meta {
+  font-size: 10px;
 }
 
 .combat-feed {
+  backdrop-filter: blur(12px);
+  background: color-mix(in srgb, var(--panel) 82%, transparent);
+  border-color: color-mix(in srgb, var(--border) 72%, transparent);
+  bottom: 10px;
+  box-shadow: 0 10px 28px rgba(10, 15, 24, 0.22);
   display: grid;
   gap: 6px;
-  grid-area: feed;
   grid-template-rows: auto minmax(0, 1fr);
+  height: 156px;
+  left: 10px;
   overflow: hidden;
+  padding: 8px;
+  position: absolute;
+  width: clamp(210px, 18vw, 280px);
+  z-index: 19;
 }
 
 .combat-feed .combat-log {
@@ -2961,7 +3073,7 @@ summary:focus-visible {
 }
 
 .combat-hud > .json-panel {
-  bottom: calc(24vh + 16px);
+  bottom: 204px;
   max-height: min(360px, calc(100% - 190px));
   overflow: auto;
   position: absolute;
@@ -2972,70 +3084,117 @@ summary:focus-visible {
 
 @media (max-width: 1180px) {
   .combat-top-bar {
-    grid-template-columns: 1fr;
+    grid-template-columns: minmax(130px, 180px) minmax(0, 1fr) auto;
+  }
+
+  .combat-status-readout {
+    grid-template-columns: repeat(6, minmax(50px, 1fr));
+  }
+
+  .combat-top-bar .top-actions button:nth-child(2),
+  .combat-top-bar .top-actions button:nth-child(5) {
+    display: none;
+  }
+
+  .initiative-hud {
+    width: 190px;
+  }
+
+  .creature-status-hud {
+    width: 240px;
+  }
+
+  .map-overlay-controls {
+    left: 210px;
+    max-width: calc(100% - 470px);
+  }
+
+  .action-bar {
+    width: min(760px, calc(100% - 500px));
+  }
+}
+
+@media (max-width: 960px) and (min-width: 761px) {
+  .combat-top-bar {
+    grid-template-columns: minmax(0, 1fr) auto;
+  }
+
+  .combat-top-bar .brand-block,
+  .combat-top-bar .top-actions button:first-child {
+    display: none;
+  }
+}
+
+@media (max-width: 760px) {
+  .app-shell.view-combat {
+    grid-template-rows: minmax(0, 1fr);
+    overflow: hidden;
+  }
+
+  .combat-top-bar {
+    border-radius: 0;
+    grid-template-columns: minmax(0, 1fr) auto;
+    left: 0;
+    padding: 5px 6px;
+    right: 0;
+    top: 0;
+  }
+
+  .combat-top-bar .brand-block,
+  .combat-top-bar .top-actions button:not(:nth-child(3)):not(:nth-child(4)):not(:nth-child(6)) {
+    display: none;
+  }
+
+  .combat-top-bar .top-actions button:nth-child(3),
+  .combat-top-bar .top-actions button:nth-child(4),
+  .combat-top-bar .top-actions button:nth-child(6) {
+    font-size: 0;
+    min-width: 42px;
+  }
+
+  .combat-top-bar .top-actions button:nth-child(3)::after {
+    content: 'Roll';
+    font-size: 11px;
+  }
+
+  .combat-top-bar .top-actions button:nth-child(4)::after {
+    content: 'End';
+    font-size: 11px;
+  }
+
+  .combat-top-bar .top-actions button:nth-child(6)::after {
+    content: 'Settings';
+    font-size: 11px;
   }
 
   .combat-status-readout {
     grid-template-columns: repeat(3, minmax(0, 1fr));
   }
 
-  .combat-hud {
-    grid-template-areas:
-      "stage status"
-      "initiative status"
-      "feed actions";
-    grid-template-columns: minmax(0, 1fr) minmax(250px, 32vw);
-    grid-template-rows: minmax(360px, 1fr) minmax(120px, 18vh) minmax(170px, 24vh);
-  }
-
-  .initiative-hud .initiative-tracker {
-    display: flex;
-    gap: 6px;
-    overflow-x: auto;
-    overflow-y: hidden;
-  }
-
-  .initiative-hud .initiative-item {
-    min-width: 168px;
-  }
-
-  .action-bar-grid {
-    grid-template-columns: 1fr;
-  }
-}
-
-@media (max-width: 760px) {
-  .app-shell.view-combat {
-    grid-template-rows: auto auto minmax(0, 1fr);
-    overflow: auto;
+  .combat-status-readout span:nth-child(2),
+  .combat-status-readout span:nth-child(4),
+  .combat-status-readout span:nth-child(5),
+  .combat-status-readout span:nth-child(6) {
+    display: none;
   }
 
   .combat-status-readout {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
+    grid-template-columns: repeat(2, minmax(48px, 1fr));
+  }
+
+  .workbench-mobile-tabs {
+    backdrop-filter: blur(12px);
+    background: color-mix(in srgb, var(--panel) 88%, transparent);
+    border-radius: var(--radius-sm);
+    bottom: 6px;
+    left: 6px;
+    position: absolute;
+    right: 6px;
+    z-index: 50;
   }
 
   .combat-hud {
-    display: grid;
-    grid-template-columns: 1fr;
-    grid-template-rows: minmax(0, 1fr);
-    min-height: 560px;
-    overflow: visible;
-  }
-
-  .combat-hud-main {
-    display: contents;
-  }
-
-  .initiative-hud,
-  .map-stage,
-  .creature-status-hud,
-  .action-bar,
-  .combat-feed,
-  .combat-hud > .json-panel {
-    grid-column: 1;
-    grid-row: 1;
     min-height: 0;
-    position: static;
   }
 
   .mobile-tab-map .initiative-hud,
@@ -3065,15 +3224,74 @@ summary:focus-visible {
   }
 
   .map-stage {
-    min-height: 560px;
+    min-height: 0;
   }
 
   .map-overlay-controls {
-    max-height: 46%;
+    left: 6px;
+    max-height: 38%;
+    max-width: calc(100% - 12px);
+    overflow: auto;
+    top: 58px;
+  }
+
+  .targeting-prompt {
+    bottom: 58px;
+    max-width: calc(100% - 12px);
+  }
+
+  .initiative-hud,
+  .creature-status-hud,
+  .combat-feed,
+  .action-bar {
+    bottom: 54px;
+    left: 6px;
+    max-height: none;
+    right: 6px;
+    top: 58px;
+    transform: none;
+    width: auto;
+  }
+
+  .initiative-hud,
+  .creature-status-hud,
+  .combat-feed {
+    height: auto;
     overflow: auto;
   }
 
   .action-bar {
     overflow: auto;
+  }
+
+  .action-bar-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .combat-hud.mobile-tab-actions {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    overflow: auto;
+    padding: 58px 6px 58px;
+  }
+
+  .mobile-tab-actions .creature-status-hud,
+  .mobile-tab-actions .action-bar {
+    bottom: auto;
+    flex: 0 0 auto;
+    left: auto;
+    max-height: none;
+    order: 2;
+    overflow: visible;
+    position: static;
+    right: auto;
+    top: auto;
+    transform: none;
+    width: 100%;
+  }
+
+  .mobile-tab-actions .action-bar {
+    order: 1;
   }
 }

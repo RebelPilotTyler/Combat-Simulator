@@ -1055,6 +1055,7 @@ export function App() {
     }
   }
 
+  // Shared header used by floating/collapsible HUD panels.
   function renderHudPanelBar(panel: HudPanel, title: string) {
     return (
       <div
@@ -1081,12 +1082,15 @@ export function App() {
   const visibleLogEntries = logExpanded ? combat.log : combat.log.slice(0, 5);
 
   return (
+    // App shell: swaps between the combat HUD and encounter editor.
     <main className={['app-shell', `view-${activeView}`, `theme-${uiSettings.theme}`, `text-${uiSettings.textScale}`, `density-${uiSettings.density}`].join(' ')}>
+      {/* App shell / header */}
       <header className={activeView === 'combat' ? 'combat-top-bar' : 'top-bar'}>
         <div className="brand-block">
           <h1>Combat Sandbox</h1>
           <p>Round {combat.round || '-'} - {activeCreature?.name ?? 'No active creature'}</p>
         </div>
+        {/* Combat: top status readout */}
         {activeView === 'combat' && (
           <section className="combat-status-readout" aria-label="Combat status">
             <span><strong>Active</strong>{activeCreature?.name ?? 'No initiative'}</span>
@@ -1113,6 +1117,7 @@ export function App() {
 
       {activeView === 'combat' ? (
       <>
+      {/* Combat: mobile workbench tabs */}
       <nav className="workbench-mobile-tabs" aria-label="Combat workbench tabs">
         {(['map', 'roster', 'actions', 'log'] as const).map((tab) => (
           <button className={workbenchTab === tab ? 'selected-action' : ''} key={tab} onClick={() => setWorkbenchTab(tab)}>
@@ -1120,7 +1125,9 @@ export function App() {
           </button>
         ))}
       </nav>
+      {/* Combat: main HUD layout wrapper */}
       <section className={combatLayoutClass}>
+        {/* Combat: initiative / roster HUD */}
         <aside className={['panel', 'initiative-hud', openHudPanels.roster ? 'hud-open' : ''].join(' ')} tabIndex={0} aria-label="Initiative and creature list">
           {renderHudPanelBar('roster', 'Roster')}
           <div className="round-card">
@@ -1156,6 +1163,7 @@ export function App() {
             })}
           </section>
 
+          {/* Combat: pending reactions */}
           {combat.pendingReactions.length > 0 && (
             <section className="reaction-prompts">
               <strong>Pending Reactions</strong>
@@ -1171,6 +1179,7 @@ export function App() {
         </aside>
 
         <section className="combat-hud-main">
+        {/* Combat: map stage / battlemap controls */}
         <section className="panel map-stage" aria-label="Battle grid panel">
           <div className="map-overlay-controls">
             <div className="map-toolbar-row">
@@ -1272,6 +1281,7 @@ export function App() {
               </>
             )}
           </div>
+          {/* Combat: targeting or movement prompt */}
           <div className="targeting-prompt" role="status" aria-live="polite">
             <strong>{selectedAction ? selectedAction.name : selectionMode === 'move' ? 'Movement' : 'Map'}</strong>
             <span>
@@ -1284,6 +1294,7 @@ export function App() {
                     : 'Select a target.'}
             </span>
           </div>
+          {/* Combat: 2D vs 3D battlefield render */}
           {battlemapView === '2d' ? (
             <Battlefield2DView
               combat={combat}
@@ -1337,6 +1348,7 @@ export function App() {
           )}
         </section>
 
+        {/* Combat: active creature HUD */}
         <aside className={['panel', 'creature-status-hud', openHudPanels.actions ? 'hud-open' : ''].join(' ')} tabIndex={0} aria-label="Active creature and actions">
           {renderHudPanelBar('actions', 'Actions')}
           <h2>Active Creature</h2>
@@ -1350,6 +1362,7 @@ export function App() {
                 <span>Reaction used: {combat.turnState.reactionUsed ? 'yes' : 'no'}</span>
               </div>
               {activeBotPreview && <BotTurnPreviewPanel preview={activeBotPreview} />}
+              {/* Combat: target/action resolution panel */}
               {selectedAction && (
                 <div className="target-panel" ref={targetPanelRef} tabIndex={0} aria-label="Target panel">
                   <p>{describeAction(selectedAction)}</p>
@@ -1480,6 +1493,7 @@ export function App() {
             <p>Roll initiative to begin.</p>
           )}
 
+          {/* Combat: selected creature HUD */}
           <h2>Selected</h2>
           {selectedCreature ? <CreatureSummary creature={selectedCreature} state={combat} /> : <p>No creature selected.</p>}
           {selectedCreature?.id === combat.activeCreatureId && (
@@ -1490,6 +1504,7 @@ export function App() {
               <span>Reaction used: {combat.turnState.reactionUsed ? 'yes' : 'no'}</span>
             </div>
           )}
+          {/* Combat: advanced creature tools */}
           {selectedCreature && uiSettings.showAdvancedTools && (
             <details className="condition-dev-panel compact-details">
               <summary>Creature Tools</summary>
@@ -1566,6 +1581,7 @@ export function App() {
           )}
         </aside>
 
+        {/* Combat: bottom action bar */}
         <section className="panel action-bar" aria-label="Available actions">
           {activeCreature ? (
             <>
@@ -1595,6 +1611,7 @@ export function App() {
                 </div>
               )}
               <div className="action-bar-grid">
+                {/* Combat: basic actions */}
                 <section className="basic-action-strip" aria-label="Basic actions">
                   <h3>Basic</h3>
                   <div className="action-list">
@@ -1679,6 +1696,7 @@ export function App() {
                     </div>
                   </details>
                 </section>
+                {/* Combat: creature actions */}
                 <CreatureActionGroups
                   actions={activeActions}
                   selectedActionId={selectedActionId}
@@ -1694,6 +1712,7 @@ export function App() {
           )}
         </section>
 
+        {/* Combat: log/feed */}
         <section className={['panel', 'combat-feed', openHudPanels.log ? 'hud-open' : ''].join(' ')}>
           {renderHudPanelBar('log', 'Log')}
           <div className="panel-heading-row">
@@ -1711,6 +1730,7 @@ export function App() {
           </ol>
         </section>
 
+        {/* Combat: import/export data panel */}
         {uiSettings.showAdvancedTools && (
         <section className={['panel', 'json-panel', openHudPanels.data ? 'hud-open' : ''].join(' ')}>
           {renderHudPanelBar('data', 'Data')}
@@ -1740,8 +1760,10 @@ export function App() {
       </section>
       </>
       ) : (
+        // Editor view.
         <EncounterEditor currentCombat={combat} onLoadEncounter={loadEncounterFromEditor} />
       )}
+      {/* App overlays: keyboard help and settings */}
       {showHelp && <KeyboardHelpOverlay onClose={() => setShowHelp(false)} />}
       {settingsOpen && (
         <SettingsDialog
