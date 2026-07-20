@@ -225,11 +225,16 @@ function passiveSelectorTargetsCreature(
   if (selector.type === 'self' || selector.type === 'source') {
     return owner.id === target.id;
   }
-  if (selector.type === 'alliesWithinRange' || selector.type === 'enemiesWithinRange') {
+  if (selector.type === 'alliesWithinRange' || selector.type === 'enemiesWithinRange' || selector.type === 'creaturesWithinRange') {
     if (owner.id === target.id || target.hp <= 0 || hasCondition(target, 'defeated')) {
       return false;
     }
-    const teamMatches = selector.type === 'alliesWithinRange' ? areAllies(target, owner, state) : areHostile(target, owner, state);
+    const teamMatches =
+      selector.type === 'creaturesWithinRange'
+        ? true
+        : selector.type === 'alliesWithinRange'
+          ? areAllies(target, owner, state)
+          : areHostile(target, owner, state);
     return teamMatches && getDistanceFeet(owner.position, target.position) <= (selector.range ?? 0);
   }
   return false;
@@ -251,7 +256,7 @@ function passesPassiveFilters(owner: Creature, target: Creature, filters: RuleFi
       const creature = filter.target === 'actionTarget' ? target : owner;
       return (getResource(creature, filter.resourceId)?.current ?? 0) >= (filter.amount ?? 1);
     }
-    return filter.type === 'actionHasTag' ? false : true;
+    return filter.type === 'actionHasTag' || filter.type === 'damageTaken' || filter.type === 'damageType' ? false : true;
   });
 }
 

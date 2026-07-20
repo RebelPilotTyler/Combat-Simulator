@@ -1,16 +1,19 @@
-import { rollDamageDice, type RandomSource } from './dice';
+import { rollDamageDice, rollDice, type RandomSource } from './dice';
 import {
   applyBeforeDamageModifiers,
   applyConditionToCreature,
+  canCreatureTakeReaction,
+  collectSavingThrowModifiers,
   createAppliedCondition,
   getConditionDefinition,
   hasCondition,
   mergeRollModifiers,
   removeConditionFromCreature,
+  resolveRollMode,
   runAfterDamageHooks
 } from './conditions';
 import { applyDamageTraits, damageTypeMatches, getActionDamageType, getNativeDamageTraits } from './damage';
-import { getEnabledFeatures, getResource } from './features';
+import { getAvailableActions, getEffectiveSaveBonus, getEnabledFeatures, getResource } from './features';
 import { getDistanceFeet } from './targeting';
 import { areAllies, areHostile } from './teams';
 import { enqueueVisualEvent } from './visualEvents';
@@ -21,6 +24,8 @@ import type {
   CombatLogEntry,
   CombatState,
   Creature,
+  PendingReaction,
+  ReactionTriggerDefinition,
   RollModifier,
   RuleDefinition,
   RuleEffectOperation,
@@ -50,6 +55,7 @@ interface RuleEventContext {
   success?: boolean;
   random?: RandomSource;
   damageType?: string;
+  damageAmount?: number;
 }
 
 export interface AttackRollRuleContext {
@@ -118,6 +124,7 @@ export function applyBeforeDamageRules(state: CombatState, context: DamageRuleCo
     damageTarget: context.target,
     action: context.action,
     damageType: context.damageType ?? getActionDamageType(context.action),
+    damageAmount: context.amount,
     random: context.random
   }, context.amount);
 }
@@ -129,7 +136,8 @@ export function runAfterDamageRules(state: CombatState, context: Omit<DamageRule
     actionTarget: context.target,
     damageTarget: context.target,
     action: context.action,
-    damageType: context.damageType ?? getActionDamageType(context.action)
+    damageType: context.damageType ?? getActionDamageType(context.action),
+    damageAmount: context.amount
   });
 }
 
@@ -189,6 +197,23 @@ export function runConditionAppliedRules(
     source,
     actionTarget: target,
     condition
+  });
+}
+
+export function runDefeatedRules(
+  state: CombatState,
+  defeated: Creature,
+  defeatedBy?: Creature,
+  action?: ActionDefinition,
+  random?: RandomSource
+): void {
+  runRules(state, {
+    trigger: 'onDefeated',
+    source: defeated,
+    actionTarget: defeated,
+    action,
+    rollCreature: defeatedBy,
+    random
   });
 }
 
@@ -300,6 +325,8 @@ function runRules(state: CombatState, event: RuleEventContext): void {
       markLimitedRuleUsed(state, entry, event);
     }
   });
+
+  queueTriggeredReactions(state, event);
 }
 
 function applyRuleEffect(
@@ -374,6 +401,7 @@ function applyRuleEffect(
         damageTarget: creature,
         action: damageAction,
         damageType: effect.damageType,
+        damageAmount: appliedAmount,
         random: event.random
       }, appliedAmount));
       const before = creature.hp;
@@ -407,6 +435,86 @@ function applyRuleEffect(
           sourceCreatureId: event.source?.id ?? entry.owner.id,
           label: 'Defeated'
         });
+        runDefeatedRules(state, creature, source, damageAction, event.random);
+      }
+    });
+    return affected;
+  }
+
+  if (effect.type === 'savingThrowDamage') {
+    let affected = false;
+    selected.forEach((creature) => {
+      if (creature.hp <= 0 || hasCondition(creature, 'defeated')) {
+        return;
+      }
+
+      const source = entry.owner;
+      const damageAction = createRuleSavingThrowDamageAction(entry, effect);
+      const saveRollModifier = mergeRollModifiers(
+        collectSavingThrowModifiers(state, creature, effect.ability),
+        collectBeforeSavingThrowRuleModifiers(state, { source, target: creature, action: damageAction, ability: effect.ability })
+      );
+      const rollMode = resolveRollMode(saveRollModifier);
+      const firstSaveRoll = rollDice('1d20', event.random ?? Math.random);
+      const secondSaveRoll = rollMode === 'normal' ? undefined : rollDice('1d20', event.random ?? Math.random);
+      const saveModifier = getEffectiveSaveBonus(creature, effect.ability, state);
+      const flatModifier = saveRollModifier.flatModifier ?? 0;
+      const d20Total = chooseD20(firstSaveRoll.total, secondSaveRoll?.total, rollMode);
+      const saveTotal = d20Total + saveModifier + flatModifier;
+      const success = saveRollModifier.autoFail ? false : saveRollModifier.autoSuccess ? true : saveTotal >= effect.dc;
+      const damageRoll = rollDice(effect.dice, event.random ?? Math.random);
+      const baseAmount = success ? (effect.halfDamageOnSuccess ? Math.floor(damageRoll.total / 2) : 0) : damageRoll.total;
+
+      logRuleMessage(
+        state,
+        `${creature.name} rolls ${effect.ability.toUpperCase()} save against ${effect.note ?? entry.rule.name ?? entry.label}: ${formatD20Roll(firstSaveRoll.total, secondSaveRoll?.total, rollMode)}${formatRollReasons(saveRollModifier.notes)} + ${saveModifier}${flatModifier ? ` ${formatSigned(flatModifier)}` : ''} = ${saveTotal} vs DC ${effect.dc}. ${success ? 'Success.' : 'Failure.'}`
+      );
+      enqueueVisualEvent(state, {
+        kind: success ? 'savingThrowSuccess' : 'savingThrowFailure',
+        creatureId: creature.id,
+        sourceCreatureId: source.id,
+        label: success ? 'Save' : 'Fail'
+      });
+      runAfterSavingThrowRules(state, { source, target: creature, action: damageAction, ability: effect.ability, total: saveTotal, success });
+
+      let appliedAmount = Math.max(0, applyBeforeDamageModifiers(state, source, creature, damageAction, baseAmount));
+      appliedAmount = Math.max(0, runDamageRules(state, {
+        trigger: 'beforeDamage',
+        source,
+        actionTarget: creature,
+        damageTarget: creature,
+        action: damageAction,
+        damageType: effect.damageType,
+        damageAmount: appliedAmount,
+        random: event.random
+      }, appliedAmount));
+      const before = creature.hp;
+      creature.hp = Math.max(0, creature.hp - appliedAmount);
+      affected = true;
+      if (creature.hp !== before) {
+        enqueueVisualEvent(state, {
+          kind: 'damageDealt',
+          creatureId: creature.id,
+          sourceCreatureId: source.id,
+          amount: before - creature.hp,
+          label: `-${before - creature.hp}`
+        });
+      }
+      logRuleMessage(
+        state,
+        `${creature.name} takes ${before - creature.hp} ${effect.damageType ?? 'damage'} from ${effect.note ?? entry.rule.name ?? entry.label} (${damageRoll.rolls.join(', ')} + ${damageRoll.modifier}${success && effect.halfDamageOnSuccess ? ', halved' : ''}).`
+      );
+      runAfterDamageHooks(state, source, creature, damageAction, appliedAmount);
+      if (creature.hp === 0 && !hasCondition(creature, 'defeated')) {
+        applyConditionToCreature(creature, createAppliedCondition('defeated'));
+        logRuleMessage(state, `${creature.name} is defeated.`);
+        enqueueVisualEvent(state, {
+          kind: 'creatureDefeated',
+          creatureId: creature.id,
+          sourceCreatureId: source.id,
+          label: 'Defeated'
+        });
+        runDefeatedRules(state, creature, source, damageAction, event.random);
       }
     });
     return affected;
@@ -454,6 +562,116 @@ function applyRuleEffect(
   return false;
 }
 
+function queueTriggeredReactions(state: CombatState, event: RuleEventContext): void {
+  if (event.action?.actionCost === 'reaction') {
+    return;
+  }
+
+  state.pendingReactions = state.pendingReactions ?? [];
+  state.creatures.forEach((reactor) => {
+    if (reactor.hp <= 0 || hasCondition(reactor, 'defeated') || state.turnResources[reactor.id]?.reactionUsed || !canCreatureTakeReaction(state, reactor)) {
+      return;
+    }
+
+    getAvailableActions(reactor, state)
+      .filter((action) => action.actionCost === 'reaction')
+      .forEach((action) => {
+        (action.reactionTriggers ?? []).forEach((listener) => {
+          if (!reactionListenerMatches(state, reactor, listener, event)) {
+            return;
+          }
+
+          const target = getReactionTarget(state, reactor, listener, event);
+          if (target && (target.hp <= 0 || hasCondition(target, 'defeated'))) {
+            return;
+          }
+          if (target && !isReactionTargetInRange(action, reactor, target)) {
+            return;
+          }
+
+          const pending = createPendingReaction(state, reactor, action, listener, event, target);
+          if (!state.pendingReactions.some((candidate) => candidate.id === pending.id)) {
+            state.pendingReactions.push(pending);
+            logRuleMessage(state, `Reaction available: ${pending.description}`);
+          }
+        });
+      });
+  });
+}
+
+function reactionListenerMatches(
+  state: CombatState,
+  reactor: Creature,
+  listener: ReactionTriggerDefinition,
+  event: RuleEventContext
+): boolean {
+  if (listener.enabled === false || listener.trigger !== event.trigger) {
+    return false;
+  }
+
+  const selected = resolveSelectors(state, reactor, event, listener.selectors ?? eventSelectorDefaults(event));
+  const entry = { owner: reactor, rule: { id: listener.id, trigger: listener.trigger, filters: listener.filters, effects: [] }, label: listener.name ?? listener.id };
+  if (listener.reactorMustBeSelected === false) {
+    return selected.length > 0 && passesFilters(state, entry, event);
+  }
+
+  return selected.some((creature) => creature.id === reactor.id) && passesFilters(state, entry, event);
+}
+
+function getReactionTarget(
+  state: CombatState,
+  reactor: Creature,
+  listener: ReactionTriggerDefinition,
+  event: RuleEventContext
+): Creature | undefined {
+  const target = getReferencedCreature(
+    { owner: reactor, rule: { id: listener.id, trigger: listener.trigger, effects: [] }, label: listener.name ?? listener.id },
+    event,
+    listener.target ?? getDefaultReactionTarget(event)
+  );
+  if (target) {
+    return target;
+  }
+
+  const selected = resolveSelectors(state, reactor, event, listener.selectors ?? eventSelectorDefaults(event));
+  return selected.find((creature) => creature.id !== reactor.id) ?? selected[0];
+}
+
+function getDefaultReactionTarget(event: RuleEventContext): 'self' | 'source' | 'actionTarget' {
+  if (event.trigger === 'onActionUsed' || event.trigger === 'onTurnStart' || event.trigger === 'onTurnEnd' || event.trigger === 'onDefeated') {
+    return 'source';
+  }
+  return 'actionTarget';
+}
+
+function isReactionTargetInRange(action: ActionDefinition, reactor: Creature, target: Creature): boolean {
+  if (action.targetMode === 'self') {
+    return true;
+  }
+  return getDistanceFeet(reactor.position, target.position) <= Math.max(action.reach ?? 0, action.normalRange ?? action.longRange ?? action.range * 5);
+}
+
+function createPendingReaction(
+  state: CombatState,
+  reactor: Creature,
+  action: ActionDefinition,
+  listener: ReactionTriggerDefinition,
+  event: RuleEventContext,
+  target?: Creature
+): PendingReaction {
+  const triggerLabel = listener.name ?? listener.description ?? listener.trigger;
+  return {
+    id: `${state.round}:${state.turnIndex}:${listener.trigger}:${reactor.id}:${action.id}:${target?.id ?? 'none'}:${event.source?.id ?? 'none'}:${event.actionTarget?.id ?? 'none'}:${state.pendingReactions.length}`,
+    trigger: listener.trigger,
+    reactorId: reactor.id,
+    targetId: target?.id,
+    actionId: action.id,
+    from: event.source?.position,
+    to: event.actionTarget?.position,
+    description: `${reactor.name} can use ${action.name}${target ? ` on ${target.name}` : ''} (${triggerLabel}).`
+  };
+}
+
 function createRuleDamageAction(
   entry: RuleSource,
   effect: Extract<RuleEffectOperation, { type: 'dealDamage' }>
@@ -472,10 +690,34 @@ function createRuleDamageAction(
   };
 }
 
+function createRuleSavingThrowDamageAction(
+  entry: RuleSource,
+  effect: Extract<RuleEffectOperation, { type: 'savingThrowDamage' }>
+): ActionDefinition {
+  return {
+    id: `${entry.rule.id}-save-damage`,
+    name: effect.note ?? entry.rule.name ?? entry.label,
+    kind: 'savingThrowEffect',
+    type: 'savingThrowEffect',
+    actionCost: 'free',
+    targetMode: 'creature',
+    tags: ['condition', 'damage', 'save', ...(effect.damageType ? [effect.damageType.toLowerCase()] : [])],
+    range: 0,
+    damage: { dice: effect.dice, type: effect.damageType },
+    save: { ability: effect.ability, dc: effect.dc, halfDamageOnSuccess: effect.halfDamageOnSuccess },
+    shape: { type: 'single' },
+    effects: []
+  };
+}
+
 function getTriggeredRules(state: CombatState, event: RuleEventContext): RuleSource[] {
   const entries: RuleSource[] = [];
 
   state.creatures.forEach((creature) => {
+    if (event.trigger === 'onDefeated' && creature.id !== event.source?.id) {
+      return;
+    }
+
     getEnabledFeatures(creature).forEach((feature) => {
       (feature.rules ?? []).forEach((rule) => {
         if (rule.trigger === event.trigger && rule.enabled !== false) {
@@ -515,6 +757,9 @@ function eventSelectorDefaults(event: RuleEventContext): RuleTargetSelector[] {
   if (event.trigger === 'afterAttackRoll' || event.trigger === 'afterSavingThrow' || event.trigger === 'onActionUsed') {
     return [{ type: 'source' }];
   }
+  if (event.trigger === 'onDefeated') {
+    return [{ type: 'self' }];
+  }
   if (event.trigger === 'onTurnStart' || event.trigger === 'onTurnEnd') {
     return [{ type: 'source' }];
   }
@@ -541,6 +786,12 @@ function resolveSelectors(
       if (selector.type === 'creaturesInArea') {
         return event.areaTargets ?? [];
       }
+      if (selector.type === 'sourceWithinRange') {
+        if (!event.source || event.source.id === owner.id || event.source.hp <= 0 || hasCondition(event.source, 'defeated')) {
+          return [];
+        }
+        return getDistanceFeet(owner.position, event.source.position) <= (selector.range ?? 0) ? [event.source] : [];
+      }
 
       const range = selector.range ?? 0;
       return state.creatures.filter((creature) => {
@@ -548,7 +799,12 @@ function resolveSelectors(
           return false;
         }
         const inRange = getDistanceFeet(owner.position, creature.position) <= range;
-        const teamMatches = selector.type === 'alliesWithinRange' ? areAllies(creature, owner, state) : areHostile(creature, owner, state);
+        const teamMatches =
+          selector.type === 'creaturesWithinRange'
+            ? true
+            : selector.type === 'alliesWithinRange'
+              ? areAllies(creature, owner, state)
+              : areHostile(creature, owner, state);
         return inRange && teamMatches;
       });
     })
@@ -581,6 +837,12 @@ function passesFilter(state: CombatState, entry: RuleSource, event: RuleEventCon
     const creature = getReferencedCreature(entry, event, filter.target ?? 'source');
     const resource = creature ? getResource(creature, filter.resourceId) : undefined;
     return (resource?.current ?? 0) >= (filter.amount ?? 1);
+  }
+  if (filter.type === 'damageTaken') {
+    return (event.damageAmount ?? 0) >= (filter.minimum ?? 1);
+  }
+  if (filter.type === 'damageType') {
+    return damageTypeMatches(filter.damageType, event.damageType);
   }
   if (filter.type === 'oncePerTurn') {
     const memory = state.ruleMemory?.[getMemoryKey(entry, filter.key)];
@@ -648,6 +910,34 @@ function logRuleMessage(state: CombatState, message: string): void {
     message,
     timestamp: new Date().toISOString()
   } satisfies CombatLogEntry);
+}
+
+function chooseD20(first: number, second: number | undefined, mode: 'normal' | 'advantage' | 'disadvantage'): number {
+  if (mode === 'advantage') {
+    return Math.max(first, second ?? first);
+  }
+  if (mode === 'disadvantage') {
+    return Math.min(first, second ?? first);
+  }
+  return first;
+}
+
+function formatD20Roll(first: number, second?: number, mode: 'normal' | 'advantage' | 'disadvantage' = 'normal'): string {
+  if (mode === 'advantage') {
+    return `d20 ${first}/${second ?? first} adv`;
+  }
+  if (mode === 'disadvantage') {
+    return `d20 ${first}/${second ?? first} dis`;
+  }
+  return `d20 ${first}`;
+}
+
+function formatRollReasons(notes: string[] | undefined): string {
+  return notes?.length ? ` (${notes.join(', ')})` : '';
+}
+
+function formatSigned(value: number): string {
+  return value >= 0 ? `+ ${value}` : `- ${Math.abs(value)}`;
 }
 
 function stampConditionApplicationTiming(state: CombatState, condition: AppliedCondition): void {

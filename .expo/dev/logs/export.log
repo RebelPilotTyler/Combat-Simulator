@@ -1,0 +1,17 @@
+{"_e":"root:init","_t":1784249941001,"format":"v0-jsonl","version":"57.0.8"}
+{"_e":"env:mode","_t":1784249941522,"nodeEnv":"production","babelEnv":"production","mode":"production"}
+{"_e":"env:load","_t":1784249941532,"mode":"production","files":[],"env":{}}
+{"_e":"devserver:start","_t":1784249941581,"mode":"production","web":true,"baseUrl":"","asyncRoutes":false,"routerRoot":"../..\\..\\app","serverComponents":false,"serverActions":false,"serverRendering":false,"apiRoutes":false,"exporting":true}
+{"_e":"metro:config","_t":1784249942525,"serverRoot":"../..\\..","projectRoot":"../..\\..","exporting":true,"flags":{"autolinkingModuleResolution":false,"serverActions":false,"serverComponents":false,"reactCompiler":false,"optimizeGraph":false,"treeshaking":false,"logbox":false}}
+{"_e":"metro:instantiate","_t":1784249943005,"atlas":false,"workers":10,"host":null,"port":null}
+{"_e":"metro:bundling:started","_t":1784249943406,"id":"1","platform":"android","environment":null,"entry":"node_modules\\expo\\AppEntry.js"}
+{"_e":"root:init","_t":1784249976023,"format":"v0-jsonl","version":"57.0.8"}
+{"_e":"env:mode","_t":1784249976514,"nodeEnv":"production","babelEnv":"production","mode":"production"}
+{"_e":"env:load","_t":1784249976520,"mode":"production","files":[],"env":{}}
+{"_e":"devserver:start","_t":1784249976552,"mode":"production","web":true,"baseUrl":"","asyncRoutes":false,"routerRoot":"../..\\..\\app","serverComponents":false,"serverActions":false,"serverRendering":false,"apiRoutes":false,"exporting":true}
+{"_e":"metro:config","_t":1784249977401,"serverRoot":"../..\\..","projectRoot":"../..\\..","exporting":true,"flags":{"autolinkingModuleResolution":false,"serverActions":false,"serverComponents":false,"reactCompiler":false,"optimizeGraph":false,"treeshaking":false,"logbox":false}}
+{"_e":"metro:instantiate","_t":1784249977864,"atlas":false,"workers":10,"host":null,"port":null}
+{"_e":"metro:bundling:started","_t":1784249978266,"id":"1","platform":"android","environment":null,"entry":"node_modules\\expo\\AppEntry.js"}
+{"_e":"metro:bundling:done","_t":1784249983018,"id":"1","total":590,"ms":4751.1091}
+{"_e":"metro:bundling:started","_t":1784249983026,"id":"2","platform":"web","environment":null,"entry":"node_modules\\expo\\dom\\entry.js"}
+{"_e":"metro:bundling:done","_t":1784249998109,"id":"2","total":157,"ms":15082.614}

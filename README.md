@@ -16,6 +16,16 @@ Run the app:
 npm run dev
 ```
 
+Run the same combat UI on a phone with Expo Go:
+
+```bash
+npm run dev:expo
+```
+
+The Expo entry embeds the existing React DOM app as an Expo DOM component. It does not require the Vite server to be running, while desktop web development continues to use `npm run dev` as before.
+
+The Expo dependencies intentionally target SDK 54 for compatibility with the store version of Expo Go on physical devices. After changing Expo dependencies, run `npm run expo:check`. If Expo Go shows a stale native runtime error, restart Metro with `npm run dev:expo:clear`.
+
 Run engine tests:
 
 ```bash

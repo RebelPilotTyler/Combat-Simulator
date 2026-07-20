@@ -63,7 +63,10 @@ export type RuleTriggerPoint =
   | 'onTurnEnd'
   | 'onActionUsed'
   | 'onConditionApplied'
+  | 'onDefeated'
   | 'whileActive';
+
+export type ReactionTriggerPoint = Exclude<RuleTriggerPoint, 'beforeAttackRoll' | 'beforeDamage' | 'beforeSavingThrow' | 'whileActive'>;
 
 export type EffectOperationType =
   | 'addFlatModifier'
@@ -71,6 +74,7 @@ export type EffectOperationType =
   | 'grantDisadvantage'
   | 'addDamageDice'
   | 'dealDamage'
+  | 'savingThrowDamage'
   | 'multiplyDamage'
   | 'reduceDamage'
   | 'setDamageMinimum'
@@ -96,6 +100,8 @@ export type TargetSelectorType =
   | 'actionTarget'
   | 'source'
   | 'creaturesInArea'
+  | 'creaturesWithinRange'
+  | 'sourceWithinRange'
   | 'alliesWithinRange'
   | 'enemiesWithinRange';
 
@@ -105,6 +111,8 @@ export type RuleFilterType =
   | 'sourceHasCondition'
   | 'hpBelowHalf'
   | 'resourceAvailable'
+  | 'damageTaken'
+  | 'damageType'
   | 'oncePerTurn'
   | 'oncePerRound';
 
@@ -121,6 +129,8 @@ export type RuleFilter =
   | { type: 'sourceHasCondition'; conditionId: ConditionId }
   | { type: 'hpBelowHalf'; target?: RuleCreatureReference }
   | { type: 'resourceAvailable'; resourceId: string; amount?: number; target?: RuleCreatureReference }
+  | { type: 'damageTaken'; minimum?: number }
+  | { type: 'damageType'; damageType: string }
   | { type: 'oncePerTurn'; key?: string }
   | { type: 'oncePerRound'; key?: string };
 
@@ -130,6 +140,7 @@ export type RuleEffectOperation =
   | { type: 'grantDisadvantage'; note?: string }
   | { type: 'addDamageDice'; dice: string; damageType?: string; note?: string }
   | { type: 'dealDamage'; dice: string; damageType?: string; note?: string }
+  | { type: 'savingThrowDamage'; ability: Ability; dc: number; dice: string; damageType?: string; halfDamageOnSuccess: boolean; note?: string }
   | { type: 'multiplyDamage'; factor: number; note?: string }
   | { type: 'reduceDamage'; amount: number; note?: string }
   | { type: 'setDamageMinimum'; amount: number; note?: string }
@@ -172,6 +183,18 @@ export interface RuleDefinition {
   selectors?: RuleTargetSelector[];
   filters?: RuleFilter[];
   effects: RuleEffectOperation[];
+}
+
+export interface ReactionTriggerDefinition {
+  id: string;
+  name?: string;
+  enabled?: boolean;
+  trigger: ReactionTriggerPoint;
+  selectors?: RuleTargetSelector[];
+  filters?: RuleFilter[];
+  target?: RuleCreatureReference;
+  description?: string;
+  reactorMustBeSelected?: boolean;
 }
 
 export interface RollModifier {
@@ -429,6 +452,7 @@ export interface ActionDefinition {
   description?: string;
   resourceCosts?: ResourceCost[];
   rules?: RuleDefinition[];
+  reactionTriggers?: ReactionTriggerDefinition[];
   generatedByFeatureId?: string;
   baseActionName?: string;
   multiattack?: {
@@ -551,12 +575,12 @@ export interface TurnResourceState extends TurnState {
 
 export interface PendingReaction {
   id: string;
-  trigger: 'opportunityAttack';
+  trigger: 'opportunityAttack' | ReactionTriggerPoint;
   reactorId: string;
-  targetId: string;
+  targetId?: string;
   actionId: string;
-  from: GridPosition;
-  to: GridPosition;
+  from?: GridPosition;
+  to?: GridPosition;
   description: string;
 }
 

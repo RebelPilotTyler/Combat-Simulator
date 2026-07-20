@@ -16,9 +16,7 @@ describe('getShapeSquares', () => {
 
   it('builds a cardinal line and omits blocked squares', () => {
     expect(getShapeSquares({ type: 'line', length: 4 }, { x: 3, y: 5 }, grid, 'east')).toEqual([
-      { x: 4, y: 5 },
-      { x: 6, y: 5 },
-      { x: 7, y: 5 }
+      { x: 4, y: 5 }
     ].map((position) => ({ ...position, z: 0 })));
   });
 
@@ -48,6 +46,52 @@ describe('getShapeSquares', () => {
       { x: 2, y: 3 },
       { x: 3, y: 3 }
     ].map((position) => ({ ...position, z: 0 })));
+  });
+
+  it('does not let radius shapes spread through blocked cover', () => {
+    const coverGrid: GridDefinition = {
+      width: 6,
+      height: 5,
+      blocked: [{ x: 3, y: 2 }],
+      heights: []
+    };
+    const squares = getShapeSquares({ type: 'radius', radius: 2 }, { x: 2, y: 2 }, coverGrid);
+
+    expect(squares).toContainEqual({ x: 2, y: 2, z: 0 });
+    expect(squares).toContainEqual({ x: 2, y: 4, z: 0 });
+    expect(squares).not.toContainEqual({ x: 3, y: 2, z: 0 });
+    expect(squares).not.toContainEqual({ x: 4, y: 2, z: 0 });
+  });
+
+  it('does not let radius shapes leak diagonally around a blocked corner', () => {
+    const cornerGrid: GridDefinition = {
+      width: 4,
+      height: 4,
+      blocked: [
+        { x: 2, y: 1 },
+        { x: 1, y: 2 }
+      ],
+      heights: []
+    };
+
+    expect(getShapeSquares({ type: 'radius', radius: 1 }, { x: 1, y: 1 }, cornerGrid)).not.toContainEqual({ x: 2, y: 2, z: 0 });
+  });
+
+  it('allows shape line of effect across the top of elevated terrain', () => {
+    const elevatedGrid: GridDefinition = {
+      width: 3,
+      height: 1,
+      blocked: [],
+      heights: [{ x: 1, y: 0, z: 1 }]
+    };
+
+    expect(getShapeSquares({ type: 'line', length: 2 }, { x: 0, y: 0, z: 0 }, elevatedGrid, 'east')).toEqual([
+      { x: 1, y: 0, z: 1 }
+    ]);
+    expect(getShapeSquares({ type: 'line', length: 2 }, { x: 0, y: 0, z: 1 }, elevatedGrid, 'east')).toEqual([
+      { x: 1, y: 0, z: 1 },
+      { x: 2, y: 0, z: 1 }
+    ]);
   });
 
   it('builds a readable cardinal cone', () => {

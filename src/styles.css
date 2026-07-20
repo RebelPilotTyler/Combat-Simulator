@@ -462,17 +462,58 @@ summary:focus-visible {
 }
 
 .reaction-prompts {
-  background: var(--warning-bg);
-  border: 1px solid var(--warning-border);
-  border-radius: var(--radius-sm);
   display: grid;
-  gap: 6px;
-  padding: 8px;
+  gap: 8px;
+  pointer-events: none;
+  position: fixed;
+  right: max(14px, env(safe-area-inset-right));
+  bottom: max(14px, env(safe-area-inset-bottom));
+  width: min(360px, calc(100vw - 28px));
+  z-index: 70;
+}
+
+.reaction-prompts > strong {
+  background: color-mix(in srgb, var(--panel) 88%, transparent);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  box-shadow: var(--shadow-sm);
+  color: var(--text-muted);
+  justify-self: end;
+  padding: 4px 8px;
 }
 
 .reaction-prompt {
+  animation: reaction-toast-in 160ms ease-out;
+  background: color-mix(in srgb, var(--warning-bg) 94%, var(--panel));
+  border: 1px solid var(--warning-border);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-md);
   display: grid;
-  gap: 5px;
+  gap: 8px;
+  padding: 10px;
+  pointer-events: auto;
+}
+
+.reaction-prompt-message {
+  line-height: 1.35;
+}
+
+.reaction-prompt-actions {
+  display: flex;
+  gap: 6px;
+  justify-content: flex-end;
+}
+
+@keyframes reaction-toast-in {
+  from {
+    opacity: 0;
+    transform: translateY(10px) scale(0.98);
+  }
+
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
 }
 
 .initiative-item,
@@ -3301,6 +3342,12 @@ summary:focus-visible {
     position: absolute;
     right: 6px;
     z-index: 50;
+  }
+
+  .reaction-prompts {
+    bottom: max(58px, env(safe-area-inset-bottom));
+    right: 8px;
+    width: min(340px, calc(100vw - 16px));
   }
 
   .combat-hud {

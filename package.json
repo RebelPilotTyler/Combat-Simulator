@@ -5,20 +5,28 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
+    "dev:expo": "expo start",
+    "dev:expo:clear": "expo start --clear",
+    "expo:check": "expo install --check",
     "build": "tsc && vite build",
     "preview": "vite preview",
     "test": "vitest run",
     "test:watch": "vitest"
   },
   "dependencies": {
-    "react": "^19.2.7",
-    "react-dom": "^19.2.7"
+    "@expo/metro-runtime": "~6.1.2",
+    "expo": "~54.0.0",
+    "react": "19.1.0",
+    "react-dom": "19.1.0",
+    "react-native": "0.81.5",
+    "react-native-web": "^0.21.2",
+    "react-native-webview": "13.15.0"
   },
   "devDependencies": {
-    "@types/react": "^19.2.17",
-    "@types/react-dom": "^19.2.3",
+    "@types/react": "~19.1.10",
+    "@types/react-dom": "~19.1.7",
     "@vitejs/plugin-react": "^6.0.3",
-    "typescript": "^7.0.2",
+    "typescript": "~5.9.2",
     "vite": "^8.1.3",
     "vitest": "^4.1.10"
   }

@@ -1205,19 +1205,6 @@ export function App() {
             })}
           </section>
 
-          {/* Combat: pending reactions */}
-          {combat.pendingReactions.length > 0 && (
-            <section className="reaction-prompts">
-              <strong>Pending Reactions</strong>
-              {combat.pendingReactions.map((reaction) => (
-                <span className="reaction-prompt" key={reaction.id}>
-                  {reaction.description}
-                  <button onClick={() => setCombat((current) => resolvePendingReaction(current, reaction.id, true))}>Use</button>
-                  <button onClick={() => setCombat((current) => resolvePendingReaction(current, reaction.id, false))}>Skip</button>
-                </span>
-              ))}
-            </section>
-          )}
         </aside>
 
         <section className="combat-hud-main">
@@ -1812,6 +1799,21 @@ export function App() {
         </section>
         )}
         </section>
+        {/* Combat: pending reactions */}
+        {combat.pendingReactions.length > 0 && (
+          <aside className="reaction-prompts" aria-label="Pending reactions" aria-live="polite">
+            <strong>Pending Reactions</strong>
+            {combat.pendingReactions.map((reaction) => (
+              <article className="reaction-prompt" key={reaction.id}>
+                <span className="reaction-prompt-message">{reaction.description}</span>
+                <span className="reaction-prompt-actions">
+                  <button onClick={() => setCombat((current) => resolvePendingReaction(current, reaction.id, true))}>Use</button>
+                  <button onClick={() => setCombat((current) => resolvePendingReaction(current, reaction.id, false))}>Skip</button>
+                </span>
+              </article>
+            ))}
+          </aside>
+        )}
       </section>
       </>
       ) : (

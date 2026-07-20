@@ -53,6 +53,8 @@ import type {
   Resource,
   ResourceConsumeOn,
   ResourceReset,
+  ReactionTriggerDefinition,
+  ReactionTriggerPoint,
   RuleDefinition,
   RuleEffectOperation,
   RuleFilter,
@@ -97,16 +99,28 @@ const ruleTriggers: RuleTriggerPoint[] = [
   'onTurnEnd',
   'onActionUsed',
   'onConditionApplied',
+  'onDefeated',
   'whileActive'
 ];
-const selectorTypes: TargetSelectorType[] = ['self', 'actionTarget', 'source', 'creaturesInArea', 'alliesWithinRange', 'enemiesWithinRange'];
-const filterTypes: RuleFilterType[] = ['actionHasTag', 'targetHasCondition', 'sourceHasCondition', 'hpBelowHalf', 'resourceAvailable', 'oncePerTurn', 'oncePerRound'];
+const reactionTriggers: ReactionTriggerPoint[] = [
+  'afterAttackRoll',
+  'afterDamage',
+  'afterSavingThrow',
+  'onTurnStart',
+  'onTurnEnd',
+  'onActionUsed',
+  'onConditionApplied',
+  'onDefeated'
+];
+const selectorTypes: TargetSelectorType[] = ['self', 'actionTarget', 'source', 'creaturesInArea', 'creaturesWithinRange', 'sourceWithinRange', 'alliesWithinRange', 'enemiesWithinRange'];
+const filterTypes: RuleFilterType[] = ['actionHasTag', 'targetHasCondition', 'sourceHasCondition', 'hpBelowHalf', 'resourceAvailable', 'damageTaken', 'damageType', 'oncePerTurn', 'oncePerRound'];
 const effectTypes: EffectOperationType[] = [
   'addFlatModifier',
   'grantAdvantage',
   'grantDisadvantage',
   'addDamageDice',
   'dealDamage',
+  'savingThrowDamage',
   'multiplyDamage',
   'reduceDamage',
   'setDamageMinimum',
@@ -2054,6 +2068,12 @@ function ActionEditor({
         resources={resources}
         onChange={(rules) => onChange({ rules })}
       />
+
+      <ReactionTriggerListEditor
+        triggers={action.reactionTriggers ?? []}
+        resources={resources}
+        onChange={(reactionTriggers) => onChange({ reactionTriggers })}
+      />
     </div>
   );
 }
@@ -2168,6 +2188,147 @@ function RuleListEditor({
         {rules.length === 0 && <span className="empty-list">No hooks configured.</span>}
       </div>
     </details>
+  );
+}
+
+function ReactionTriggerListEditor({
+  triggers,
+  resources,
+  onChange
+}: {
+  triggers: ReactionTriggerDefinition[];
+  resources: Resource[];
+  onChange: (triggers: ReactionTriggerDefinition[]) => void;
+}) {
+  function addTrigger() {
+    onChange([...triggers, createBlankReactionTrigger()]);
+  }
+
+  function updateTrigger(index: number, update: ReactionTriggerDefinition) {
+    onChange(triggers.map((trigger, triggerIndex) => (triggerIndex === index ? normalizeReactionTrigger(update) : trigger)));
+  }
+
+  return (
+    <details className="editor-subsection rule-section">
+      <summary>Reaction Listeners</summary>
+      <div className="editor-button-row">
+        <button onClick={addTrigger}>Add Listener</button>
+      </div>
+      <div className="rule-list">
+        {triggers.map((trigger, index) => (
+          <ReactionTriggerEditor
+            key={`${trigger.id}-${index}`}
+            trigger={trigger}
+            resources={resources}
+            onChange={(nextTrigger) => updateTrigger(index, nextTrigger)}
+            onDelete={() => onChange(removeArrayItem(triggers, index))}
+          />
+        ))}
+        {triggers.length === 0 && <span className="empty-list">No reaction listeners configured.</span>}
+      </div>
+    </details>
+  );
+}
+
+function ReactionTriggerEditor({
+  trigger,
+  resources,
+  onChange,
+  onDelete
+}: {
+  trigger: ReactionTriggerDefinition;
+  resources: Resource[];
+  onChange: (trigger: ReactionTriggerDefinition) => void;
+  onDelete: () => void;
+}) {
+  const selectors = trigger.selectors ?? [];
+  const filters = trigger.filters ?? [];
+
+  return (
+    <article className="rule-card">
+      <div className="rule-card-header">
+        <strong>{trigger.name || trigger.id}</strong>
+        <button onClick={onDelete}>Delete</button>
+      </div>
+      <div className="form-grid">
+        <label>
+          Name
+          <input value={trigger.name ?? ''} onChange={(event) => onChange({ ...trigger, name: event.target.value })} />
+        </label>
+        <label>
+          ID
+          <input value={trigger.id} onChange={(event) => onChange({ ...trigger, id: toId(event.target.value) })} />
+        </label>
+        <label>
+          Trigger
+          <select value={trigger.trigger} onChange={(event) => onChange({ ...trigger, trigger: event.target.value as ReactionTriggerPoint })}>
+            {reactionTriggers.map((ruleTrigger) => (
+              <option key={ruleTrigger} value={ruleTrigger}>
+                {ruleTrigger}
+              </option>
+            ))}
+          </select>
+        </label>
+        <label>
+          Target
+          <select value={trigger.target ?? ''} onChange={(event) => onChange({ ...trigger, target: (event.target.value || undefined) as ReactionTriggerDefinition['target'] })}>
+            <option value="">Default</option>
+            <option value="self">self</option>
+            <option value="source">source</option>
+            <option value="actionTarget">actionTarget</option>
+          </select>
+        </label>
+        <label className="checkbox-field">
+          <input type="checkbox" checked={trigger.enabled !== false} onChange={(event) => onChange({ ...trigger, enabled: event.target.checked })} />
+          Enabled
+        </label>
+        <label className="checkbox-field">
+          <input
+            type="checkbox"
+            checked={trigger.reactorMustBeSelected !== false}
+            onChange={(event) => onChange({ ...trigger, reactorMustBeSelected: event.target.checked })}
+          />
+          Reactor must be selected
+        </label>
+        <label className="wide-field">
+          Description
+          <input value={trigger.description ?? ''} onChange={(event) => onChange({ ...trigger, description: event.target.value })} />
+        </label>
+      </div>
+
+      <RulePartList
+        title="Targets"
+        addLabel="Add Target"
+        emptyText="Defaults based on trigger."
+        onAdd={() => onChange({ ...trigger, selectors: [...selectors, createBlankSelector()] })}
+      >
+        {selectors.map((selector, index) => (
+          <SelectorEditor
+            key={index}
+            selector={selector}
+            onChange={(nextSelector) => onChange({ ...trigger, selectors: updateArray(selectors, index, nextSelector) })}
+            onDelete={() => onChange({ ...trigger, selectors: removeArrayItem(selectors, index) })}
+          />
+        ))}
+      </RulePartList>
+
+      <RulePartList
+        title="Filters"
+        addLabel="Add Filter"
+        emptyText="No filters."
+        onAdd={() => onChange({ ...trigger, filters: [...filters, createBlankFilter()] })}
+      >
+        {filters.map((filter, index) => (
+          <FilterEditor
+            key={index}
+            filter={filter}
+            resources={resources}
+            onChange={(nextFilter) => onChange({ ...trigger, filters: updateArray(filters, index, nextFilter) })}
+            onDelete={() => onChange({ ...trigger, filters: removeArrayItem(filters, index) })}
+          />
+        ))}
+      </RulePartList>
+    </article>
   );
 }
 
@@ -2330,7 +2491,7 @@ function SelectorEditor({
           ))}
         </select>
       </label>
-      {(selector.type === 'alliesWithinRange' || selector.type === 'enemiesWithinRange') && (
+      {isRangeSelector(selector.type) && (
         <NumberInput disabled={readOnly} label="Range Feet" value={selector.range ?? 10} min={0} onChange={(value) => onChange({ ...selector, range: value })} />
       )}
       <button onClick={onDelete} disabled={readOnly}>Remove</button>
@@ -2384,6 +2545,15 @@ function FilterEditor({
           <NumberInput disabled={readOnly} label="Amount" value={filter.amount ?? 1} min={1} onChange={(amount) => onChange({ ...filter, amount })} />
           <CreatureReferenceSelect disabled={readOnly} value={filter.target ?? 'source'} onChange={(target) => onChange({ ...filter, target })} />
         </>
+      )}
+      {filter.type === 'damageTaken' && (
+        <NumberInput disabled={readOnly} label="Min Damage" value={filter.minimum ?? 1} min={1} onChange={(minimum) => onChange({ ...filter, minimum })} />
+      )}
+      {filter.type === 'damageType' && (
+        <label>
+          Damage Type
+          <input disabled={readOnly} placeholder="fire or all" value={filter.damageType} onChange={(event) => onChange({ ...filter, damageType: event.target.value })} />
+        </label>
       )}
       {(filter.type === 'oncePerTurn' || filter.type === 'oncePerRound') && (
         <label>
@@ -2508,6 +2678,40 @@ function renderEffectFields(
         <label>
           Type
           <input disabled={readOnly} value={effect.damageType ?? ''} onChange={(event) => onChange({ ...effect, damageType: event.target.value || undefined })} />
+        </label>
+      </>
+    );
+  }
+  if (effect.type === 'savingThrowDamage') {
+    return (
+      <>
+        <label>
+          Save
+          <select disabled={readOnly} value={effect.ability} onChange={(event) => onChange({ ...effect, ability: event.target.value as Ability })}>
+            {abilities.map((ability) => (
+              <option key={ability} value={ability}>
+                {ability.toUpperCase()}
+              </option>
+            ))}
+          </select>
+        </label>
+        <NumberInput disabled={readOnly} label="DC" value={effect.dc} min={0} onChange={(dc) => onChange({ ...effect, dc })} />
+        <label>
+          Dice
+          <input disabled={readOnly} value={effect.dice} onChange={(event) => onChange({ ...effect, dice: event.target.value })} />
+        </label>
+        <label>
+          Type
+          <input disabled={readOnly} value={effect.damageType ?? ''} onChange={(event) => onChange({ ...effect, damageType: event.target.value || undefined })} />
+        </label>
+        <label className="checkbox-field">
+          <input
+            checked={effect.halfDamageOnSuccess}
+            disabled={readOnly}
+            type="checkbox"
+            onChange={(event) => onChange({ ...effect, halfDamageOnSuccess: event.target.checked })}
+          />
+          Half damage on success
         </label>
       </>
     );
@@ -3392,7 +3596,8 @@ function normalizeAction(action: ActionDefinition): ActionDefinition {
     range: Math.max(0, numberOr(action.range, 1)),
     effects: action.effects ?? [],
     shape: action.shape ?? { type: 'single' },
-    rules: (action.rules ?? []).map(normalizeRule)
+    rules: (action.rules ?? []).map(normalizeRule),
+    reactionTriggers: (action.reactionTriggers ?? []).map(normalizeReactionTrigger)
   };
 }
 
@@ -3431,6 +3636,21 @@ function normalizeRule(rule: RuleDefinition): RuleDefinition {
     selectors: (rule.selectors ?? []).map((selector) => createBlankSelector(selector.type, selector)),
     filters: (rule.filters ?? []).map(normalizeFilter),
     effects: (rule.effects ?? []).map(normalizeEffect)
+  };
+}
+
+function normalizeReactionTrigger(trigger: ReactionTriggerDefinition): ReactionTriggerDefinition {
+  return {
+    ...trigger,
+    id: toId(trigger.id || trigger.name || 'reaction-listener'),
+    name: trigger.name?.trim() || undefined,
+    enabled: trigger.enabled !== false,
+    trigger: reactionTriggers.includes(trigger.trigger) ? trigger.trigger : 'afterAttackRoll',
+    selectors: (trigger.selectors ?? []).map((selector) => createBlankSelector(selector.type, selector)),
+    filters: (trigger.filters ?? []).map(normalizeFilter),
+    target: trigger.target,
+    description: trigger.description?.trim() || undefined,
+    reactorMustBeSelected: trigger.reactorMustBeSelected !== false
   };
 }
 
@@ -3495,12 +3715,29 @@ function createBlankRule(update: Partial<RuleDefinition> = {}): RuleDefinition {
   });
 }
 
+function createBlankReactionTrigger(update: Partial<ReactionTriggerDefinition> = {}): ReactionTriggerDefinition {
+  return normalizeReactionTrigger({
+    id: createId('reaction-listener', 'reaction-listener'),
+    name: 'New Reaction Listener',
+    enabled: true,
+    trigger: 'afterAttackRoll',
+    selectors: [{ type: 'actionTarget' }],
+    filters: [],
+    target: 'source',
+    ...update
+  });
+}
+
 function createBlankSelector(type: TargetSelectorType = 'source', update: Partial<RuleTargetSelector> = {}): RuleTargetSelector {
   return {
     type,
-    ...(type === 'alliesWithinRange' || type === 'enemiesWithinRange' ? { range: 10 } : {}),
+    ...(isRangeSelector(type) ? { range: 10 } : {}),
     ...update
   };
+}
+
+function isRangeSelector(type: TargetSelectorType): boolean {
+  return type === 'alliesWithinRange' || type === 'enemiesWithinRange' || type === 'creaturesWithinRange' || type === 'sourceWithinRange';
 }
 
 function createBlankFilter(type: RuleFilterType = 'actionHasTag', update: Partial<RuleFilter> = {}): RuleFilter {
@@ -3515,6 +3752,12 @@ function createBlankFilter(type: RuleFilterType = 'actionHasTag', update: Partia
   }
   if (type === 'resourceAvailable') {
     return { resourceId: '', amount: 1, target: 'source', ...update, type } as RuleFilter;
+  }
+  if (type === 'damageTaken') {
+    return { minimum: 1, ...update, type } as RuleFilter;
+  }
+  if (type === 'damageType') {
+    return { damageType: 'fire', ...update, type } as RuleFilter;
   }
   if (type === 'oncePerTurn' || type === 'oncePerRound') {
     return { ...update, type } as RuleFilter;
@@ -3534,6 +3777,9 @@ function createBlankEffect(type: EffectOperationType = 'addFlatModifier', update
   }
   if (type === 'dealDamage') {
     return { dice: '1d6', damageType: 'fire', ...update, type } as RuleEffectOperation;
+  }
+  if (type === 'savingThrowDamage') {
+    return { ability: 'dex', dc: 10, dice: '1d6', damageType: 'fire', halfDamageOnSuccess: true, ...update, type } as RuleEffectOperation;
   }
   if (type === 'multiplyDamage') {
     return { factor: 2, ...update, type } as RuleEffectOperation;

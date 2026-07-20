@@ -53,7 +53,13 @@ export function getShapeSquares(
   return rawSquares.reduce<GridPosition[]>((squares, square) => {
     const positionedSquare = getTilePosition(square, grid);
     const key = position3DKey(positionedSquare);
-    if (seen.has(key) || !isInBounds(square, grid) || isBlocked(square, grid)) {
+    if (
+      seen.has(key) ||
+      !isInBounds(square, grid) ||
+      isBlocked(square, grid) ||
+      getTileHeight(positionedSquare, grid) > getElevation(positionedSquare) ||
+      !hasLineOfEffect(normalizedOrigin, positionedSquare, grid)
+    ) {
       return squares;
     }
 
@@ -61,6 +67,104 @@ export function getShapeSquares(
     squares.push(positionedSquare);
     return squares;
   }, []);
+}
+
+export function hasLineOfEffect(from: GridPosition, to: GridPosition, grid: GridDefinition): boolean {
+  const normalizedFrom = getTilePosition(from, grid);
+  const normalizedTo = getTilePosition(to, grid);
+  return getLineOfEffectSquares(normalizedFrom, normalizedTo)
+    .filter((position) => !samePosition(position, normalizedFrom) && !samePosition(position, normalizedTo))
+    .every((position) => {
+      const tilePosition = getTilePosition(position, grid);
+      return !isBlocked(tilePosition, grid) && getTileHeight(tilePosition, grid) <= getElevation(position);
+    });
+}
+
+function getLineOfEffectSquares(from: GridPosition, to: GridPosition): GridPosition[] {
+  const dx = to.x - from.x;
+  const dy = to.y - from.y;
+  const dz = getElevation(to) - getElevation(from);
+  const horizontalSteps = Math.max(Math.abs(dx), Math.abs(dy));
+  const verticalSteps = Math.abs(dz);
+  const steps = Math.max(horizontalSteps, verticalSteps);
+
+  if (steps === 0) {
+    return [{ ...from, z: getElevation(from) }];
+  }
+
+  const horizontalSquares = getSupercoverLineSquares(from, to);
+  const seen = new Set<string>();
+  const points: GridPosition[] = [];
+
+  horizontalSquares.forEach((square) => {
+    const horizontalProgress = horizontalSteps === 0
+      ? 0
+      : Math.max(Math.abs(square.x - from.x), Math.abs(square.y - from.y)) / horizontalSteps;
+    const z = Math.round(getElevation(from) + dz * horizontalProgress);
+    const point = { ...square, z };
+    const key = position3DKey(point);
+    if (!seen.has(key)) {
+      seen.add(key);
+      points.push(point);
+    }
+  });
+
+  if (verticalSteps > horizontalSteps) {
+    const signZ = Math.sign(dz);
+    for (let step = 1; step <= verticalSteps; step += 1) {
+      const point = { x: from.x, y: from.y, z: getElevation(from) + signZ * step };
+      const key = position3DKey(point);
+      if (!seen.has(key)) {
+        seen.add(key);
+        points.push(point);
+      }
+    }
+  }
+
+  return points;
+}
+
+function getSupercoverLineSquares(from: GridPosition, to: GridPosition): GridPosition[] {
+  const points: GridPosition[] = [{ x: from.x, y: from.y, z: getElevation(from) }];
+  const dx = to.x - from.x;
+  const dy = to.y - from.y;
+  const nx = Math.abs(dx);
+  const ny = Math.abs(dy);
+  const stepX = Math.sign(dx);
+  const stepY = Math.sign(dy);
+  let x = from.x;
+  let y = from.y;
+  let ix = 0;
+  let iy = 0;
+
+  while (ix < nx || iy < ny) {
+    const decision = (1 + 2 * ix) * ny - (1 + 2 * iy) * nx;
+
+    if (decision === 0) {
+      pushUnique2D(points, { x: x + stepX, y, z: getElevation(from) });
+      pushUnique2D(points, { x, y: y + stepY, z: getElevation(from) });
+      x += stepX;
+      y += stepY;
+      ix += 1;
+      iy += 1;
+    } else if (decision < 0) {
+      x += stepX;
+      ix += 1;
+    } else {
+      y += stepY;
+      iy += 1;
+    }
+
+    pushUnique2D(points, { x, y, z: getElevation(from) });
+  }
+
+  return points;
+}
+
+function pushUnique2D(points: GridPosition[], position: GridPosition): void {
+  if (!points.some((point) => point.x === position.x && point.y === position.y)) {
+    points.push(position);
+  }
 }
 
 function buildRawShape(
@@ -79,15 +183,18 @@ function buildRawShape(
 
     for (let y = Math.max(0, origin.y - radius); y <= Math.min(grid.height - 1, origin.y + radius); y += 1) {
       for (let x = Math.max(0, origin.x - radius); x <= Math.min(grid.width - 1, origin.x + radius); x += 1) {
-        const square = getTilePosition({ x, y }, grid);
-        const distance = Math.max(
-          Math.abs(square.x - origin.x),
-          Math.abs(square.y - origin.y),
-          Math.abs(getElevation(square) - getElevation(origin))
-        );
-        if (distance <= radius) {
-          squares.push(square);
-        }
+        const candidateElevations = uniqueNumbers([getTileHeight({ x, y }, grid), getElevation(origin)]);
+        candidateElevations.forEach((z) => {
+          const square = { x, y, z };
+          const distance = Math.max(
+            Math.abs(square.x - origin.x),
+            Math.abs(square.y - origin.y),
+            Math.abs(getElevation(square) - getElevation(origin))
+          );
+          if (distance <= radius) {
+            squares.push(square);
+          }
+        });
       }
     }
 
@@ -97,7 +204,7 @@ function buildRawShape(
   if (shape.type === 'line') {
     const length = shape.length ?? 1;
     return Array.from({ length }, (_, index) =>
-      offsetInDirection(origin, direction, index + 1)
+      projectShapeSquareHeight(origin, offsetInDirection(origin, direction, index + 1), grid)
     );
   }
 
@@ -107,11 +214,22 @@ function buildRawShape(
   for (let distance = 1; distance <= length; distance += 1) {
     const spread = distance - 1;
     for (let side = -spread; side <= spread; side += 1) {
-      squares.push(offsetCone(origin, direction, distance, side));
+      squares.push(projectShapeSquareHeight(origin, offsetCone(origin, direction, distance, side), grid));
     }
   }
 
   return squares;
+}
+
+function projectShapeSquareHeight(origin: GridPosition, square: GridPosition, grid: GridDefinition): GridPosition {
+  return {
+    ...square,
+    z: Math.max(getElevation(origin), getTileHeight(square, grid))
+  };
+}
+
+function uniqueNumbers(values: number[]): number[] {
+  return [...new Set(values)];
 }
 
 function offsetInDirection(

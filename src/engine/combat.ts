@@ -22,7 +22,8 @@ import type {
   BotProfile,
   BotResourceStrategy,
   BotTargetPriority,
-  TeamDefinition
+  TeamDefinition,
+  PendingReaction
 } from './types';
 import { getElevation, getShapeSquares, getTilePosition, isBlocked, isInBounds, samePosition } from './shapes';
 import { getMovementOption, getMovementOptionForPath, getReachableMovementSquares, isOccupied, type MovementOption } from './movement';
@@ -50,7 +51,6 @@ import {
   tickRoundDurations
 } from './conditions';
 import {
-  getDistanceInSquares,
   getDistanceFeet,
   getHostileCreaturesWithinReach,
   getOpportunityAttackCandidates,
@@ -82,6 +82,7 @@ import {
   runAfterDamageRules,
   runAfterSavingThrowRules,
   runConditionAppliedRules,
+  runDefeatedRules,
   runTurnRules
 } from './rules';
 import { enqueueVisualEvent, pruneVisualEvents } from './visualEvents';
@@ -621,7 +622,6 @@ export function resolvePendingReaction(
   }
 
   const reactor = findCreature(next, pending.reactorId);
-  const target = findCreature(next, pending.targetId);
   if (getResource(next, reactor.id).reactionUsed || !canCreatureTakeReaction(next, reactor)) {
     addLog(next, 'system', `${reactor.name} cannot use a reaction.`);
     return next;
@@ -633,15 +633,43 @@ export function resolvePendingReaction(
   action.actionCost = 'free';
   getResource(next, reactor.id).reactionUsed = true;
   syncActiveTurnState(next);
-  addLog(next, 'action', `${reactor.name} uses a reaction for ${action.name} against ${target.name}.`);
+  const target = pending.targetId ? findCreature(next, pending.targetId) : undefined;
+  addLog(next, 'action', `${reactor.name} uses a reaction for ${action.name}${target ? ` against ${target.name}` : ''}.`);
 
   next.activeCreatureId = reactor.id;
   next.turnState = getResource(next, reactor.id);
-  const resolved = performAttackAction(next, action.id, target.id, random, {}, { targetPositionOverride: pending.from });
-  findCreature(resolved, reactor.id).actions.find((candidate) => candidate.id === action.id)!.actionCost = originalCost;
+  const resolved = resolveReactionAction(next, action, pending, random);
+  const resolvedAction = findCreature(resolved, reactor.id).actions.find((candidate) => candidate.id === action.id);
+  if (resolvedAction) {
+    resolvedAction.actionCost = originalCost;
+  }
   resolved.activeCreatureId = originalActiveId;
   syncActiveTurnState(resolved);
   return resolved;
+}
+
+function resolveReactionAction(
+  state: CombatState,
+  action: ActionDefinition,
+  pending: PendingReaction,
+  random: RandomSource
+): CombatState {
+  const actionKind = getRulesKind(action);
+
+  if (isAttackActionDefinition(action)) {
+    if (!pending.targetId) {
+      addLog(state, 'system', `${action.name} has no reaction target.`);
+      return state;
+    }
+    return performAttackAction(state, action.id, pending.targetId, random, {}, { targetPositionOverride: pending.from });
+  }
+
+  if (actionKind === 'savingThrowEffect') {
+    const targetIds = pending.targetId ? [pending.targetId] : [];
+    return performSavingThrowAction(state, action.id, targetIds, random, {}, { origin: pending.to ?? pending.from });
+  }
+
+  return performCreatureUtilityAction(state, action.id);
 }
 
 export function performGrappleAction(
@@ -774,6 +802,7 @@ export function applyHpChange(
     applyConditionToCreature(target, createAppliedCondition('defeated'));
     addLog(next, 'defeat', `${target.name} is defeated.`);
     enqueueVisualEvent(next, { kind: 'creatureDefeated', creatureId: target.id, label: 'Defeated' });
+    runDefeatedRules(next, target);
   }
 
   return next;
@@ -2483,14 +2512,8 @@ function isPositionInActionShape(
   position: GridPosition,
   direction?: CardinalDirection
 ): boolean {
-  const shape = action.shape ?? { type: 'single' as const };
   const normalizedOrigin = getTilePosition(origin, state.grid);
   const normalizedPosition = getTilePosition(position, state.grid);
-
-  if (shape.type === 'radius') {
-    const radius = shape.radius ?? 1;
-    return getDistanceInSquares(normalizedOrigin, normalizedPosition) <= radius;
-  }
 
   return getActionShapeSquares(state, action, normalizedOrigin, direction).some((square) => samePosition(square, normalizedPosition));
 }
@@ -2682,6 +2705,7 @@ function applyDamage(
     hooks.onCreatureDefeated?.(state, target);
     addLog(state, 'defeat', `${target.name} is defeated.`);
     enqueueVisualEvent(state, { kind: 'creatureDefeated', creatureId: target.id, sourceCreatureId: source.id, label: 'Defeated' });
+    runDefeatedRules(state, target, source, action, random);
   }
   return modifiedAmount;
 }

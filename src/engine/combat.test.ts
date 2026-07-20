@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import {
   createCombatState,
   endTurn,
@@ -371,6 +371,26 @@ describe('combat engine', () => {
     expect(target?.hp).toBe(7);
     expect(result.turnState.actionUsed).toBe(true);
     expect(result.log.some((entry) => entry.type === 'save')).toBe(true);
+  });
+
+  it('does not let saving throw areas damage creatures behind blocked cover', () => {
+    const state = rollInitiative(
+      createCombatState([
+        creature({ id: 'a', name: 'Alpha', position: { x: 0, y: 0 } }),
+        creature({ id: 'b', name: 'Bravo', hp: 10, position: { x: 0, y: 1 }, abilityScores: { ...baseCreature.abilityScores, dex: 8 } }),
+        creature({ id: 'c', name: 'Charlie', hp: 10, position: { x: 2, y: 2 }, abilityScores: { ...baseCreature.abilityScores, dex: 8 } })
+      ], 5, 5, [
+        { x: 2, y: 1 },
+        { x: 1, y: 2 }
+      ]),
+      sequence([0.9, 0.1, 0.2])
+    );
+
+    const result = performSavingThrowAction(state, 'burst', ['b', 'c'], sequence([0.1, 0.49, 0.49]), {}, { origin: { x: 1, y: 1 } });
+
+    expect(findCreatureForTest(result, 'b').hp).toBe(4);
+    expect(findCreatureForTest(result, 'c').hp).toBe(10);
+    expect(result.turnState.actionUsed).toBe(true);
   });
 
   it('validates saving throw area origin against action range before spending the action', () => {
@@ -1020,6 +1040,200 @@ describe('combat engine', () => {
     expect(resolved.creatures.find((candidate) => candidate.id === 'a')?.position).toEqual({ x: 3, y: 0, z: 0 });
     expect(resolved.creatures.find((candidate) => candidate.id === 'a')?.hp).toBe(15);
     expect(resolved.log.some((entry) => entry.type === 'attack' && entry.message.includes('Strike'))).toBe(true);
+  });
+
+  it('queues and resolves reaction actions from non-opportunity rule triggers', () => {
+    const riposte: ActionDefinition = {
+      ...baseCreature.actions[0],
+      id: 'riposte',
+      name: 'Riposte',
+      actionCost: 'reaction',
+      reactionTriggers: [
+        {
+          id: 'riposte-after-damage',
+          trigger: 'afterDamage',
+          selectors: [{ type: 'actionTarget' }],
+          target: 'source'
+        }
+      ]
+    };
+    const state = rollInitiative(
+      createCombatState([
+        creature({ id: 'a', name: 'Alpha', hp: 20, maxHp: 20, position: { x: 0, y: 0 } }),
+        creature({ id: 'b', name: 'Bravo', team: 'enemies', hp: 20, maxHp: 20, position: { x: 1, y: 0 }, actions: [baseCreature.actions[0], riposte] })
+      ]),
+      sequence([0.9, 0.1])
+    );
+
+    const attacked = performAttackAction(state, 'strike', 'b', sequence([0.5, 0]));
+
+    expect(attacked.pendingReactions).toHaveLength(1);
+    expect(attacked.pendingReactions[0]).toMatchObject({
+      trigger: 'afterDamage',
+      reactorId: 'b',
+      actionId: 'riposte',
+      targetId: 'a'
+    });
+
+    const resolved = resolvePendingReaction(attacked, attacked.pendingReactions[0].id, true, sequence([0.5, 0]));
+
+    expect(findCreatureForTest(resolved, 'a').hp).toBe(17);
+    expect(resolved.turnResources.b.reactionUsed).toBe(true);
+  });
+
+  it('can filter damage hooks by actual damage taken and damage type', () => {
+    const emberShield = {
+      id: 'ember-shield',
+      name: 'Ember Shield',
+      description: 'Marks the creature after taking fire damage.',
+      enabled: true,
+      source: 'test',
+      rules: [
+        {
+          id: 'ember-shield-mark',
+          trigger: 'afterDamage' as const,
+          selectors: [{ type: 'actionTarget' as const }],
+          filters: [
+            { type: 'damageTaken' as const, minimum: 1 },
+            { type: 'damageType' as const, damageType: 'fire' }
+          ],
+          effects: [{ type: 'applyCondition' as const, conditionId: 'ember-mark' }]
+        }
+      ]
+    };
+    const fireStrike: ActionDefinition = {
+      ...baseCreature.actions[0],
+      id: 'fire-strike',
+      name: 'Fire Strike',
+      damage: { dice: '1d6+2', type: 'fire' }
+    };
+    const coldStrike: ActionDefinition = {
+      ...baseCreature.actions[0],
+      id: 'cold-strike',
+      name: 'Cold Strike',
+      damage: { dice: '1d6+2', type: 'cold' }
+    };
+
+    const coldState = rollInitiative(
+      createCombatState([
+        creature({ id: 'a', name: 'Alpha', actions: [coldStrike] }),
+        creature({ id: 'b', name: 'Bravo', team: 'enemies', hp: 20, maxHp: 20, position: { x: 1, y: 0 }, features: [emberShield] })
+      ]),
+      sequence([0.9, 0.1])
+    );
+    const coldHit = performAttackAction(coldState, 'cold-strike', 'b', sequence([0.5, 0]));
+    expect(hasCondition(findCreatureForTest(coldHit, 'b'), 'ember-mark')).toBe(false);
+
+    const immuneState = rollInitiative(
+      createCombatState([
+        creature({ id: 'a', name: 'Alpha', actions: [fireStrike] }),
+        creature({ id: 'b', name: 'Bravo', team: 'enemies', hp: 20, maxHp: 20, position: { x: 1, y: 0 }, damageImmunities: ['fire'], features: [emberShield] })
+      ]),
+      sequence([0.9, 0.1])
+    );
+    const immuneHit = performAttackAction(immuneState, 'fire-strike', 'b', sequence([0.5, 0]));
+    expect(hasCondition(findCreatureForTest(immuneHit, 'b'), 'ember-mark')).toBe(false);
+
+    const fireState = rollInitiative(
+      createCombatState([
+        creature({ id: 'a', name: 'Alpha', actions: [fireStrike] }),
+        creature({ id: 'b', name: 'Bravo', team: 'enemies', hp: 20, maxHp: 20, position: { x: 1, y: 0 }, features: [emberShield] })
+      ]),
+      sequence([0.9, 0.1])
+    );
+    const fireHit = performAttackAction(fireState, 'fire-strike', 'b', sequence([0.5, 0]));
+    expect(hasCondition(findCreatureForTest(fireHit, 'b'), 'ember-mark')).toBe(true);
+  });
+
+  it('can filter reaction listeners by damage taken and damage type', () => {
+    const fireRiposte: ActionDefinition = {
+      ...baseCreature.actions[0],
+      id: 'fire-riposte',
+      name: 'Fire Riposte',
+      actionCost: 'reaction',
+      reactionTriggers: [
+        {
+          id: 'fire-riposte-after-fire',
+          trigger: 'afterDamage',
+          selectors: [{ type: 'actionTarget' }],
+          filters: [
+            { type: 'damageTaken', minimum: 1 },
+            { type: 'damageType', damageType: 'fire' }
+          ],
+          target: 'source'
+        }
+      ]
+    };
+    const fireStrike: ActionDefinition = {
+      ...baseCreature.actions[0],
+      id: 'fire-strike',
+      name: 'Fire Strike',
+      damage: { dice: '1d6+2', type: 'fire' }
+    };
+
+    const state = rollInitiative(
+      createCombatState([
+        creature({ id: 'a', name: 'Alpha', actions: [fireStrike], position: { x: 0, y: 0 } }),
+        creature({ id: 'b', name: 'Bravo', team: 'enemies', hp: 20, maxHp: 20, position: { x: 1, y: 0 }, damageImmunities: ['fire'], actions: [fireRiposte] })
+      ]),
+      sequence([0.9, 0.1])
+    );
+
+    const immuneHit = performAttackAction(state, 'fire-strike', 'b', sequence([0.5, 0]));
+    expect(immuneHit.pendingReactions).toHaveLength(0);
+
+    const vulnerable = {
+      ...state,
+      creatures: state.creatures.map((creature) => creature.id === 'b' ? { ...creature, damageImmunities: [] } : creature)
+    };
+    const fireHit = performAttackAction(vulnerable, 'fire-strike', 'b', sequence([0.5, 0]));
+    expect(fireHit.pendingReactions).toHaveLength(1);
+  });
+
+  it('can listen for another creature using an action within range', () => {
+    const taunt: ActionDefinition = {
+      id: 'taunt',
+      name: 'Taunt',
+      kind: 'custom',
+      actionCost: 'action',
+      targetMode: 'self',
+      tags: [],
+      range: 0,
+      shape: { type: 'single' },
+      effects: []
+    };
+    const interrupt: ActionDefinition = {
+      ...baseCreature.actions[0],
+      id: 'interrupt',
+      name: 'Interrupt',
+      actionCost: 'reaction',
+      reactionTriggers: [
+        {
+          id: 'interrupt-action-used',
+          trigger: 'onActionUsed',
+          selectors: [{ type: 'sourceWithinRange', range: 5 }],
+          target: 'source',
+          reactorMustBeSelected: false
+        }
+      ]
+    };
+    const state = rollInitiative(
+      createCombatState([
+        creature({ id: 'a', name: 'Alpha', actions: [taunt], position: { x: 0, y: 0 } }),
+        creature({ id: 'b', name: 'Bravo', team: 'enemies', hp: 20, maxHp: 20, position: { x: 1, y: 0 }, actions: [interrupt] })
+      ]),
+      sequence([0.9, 0.1])
+    );
+
+    const acted = performCreatureUtilityAction(state, 'taunt');
+
+    expect(acted.pendingReactions).toHaveLength(1);
+    expect(acted.pendingReactions[0]).toMatchObject({
+      trigger: 'onActionUsed',
+      reactorId: 'b',
+      actionId: 'interrupt',
+      targetId: 'a'
+    });
   });
 
   it('Disengage and incapacitated enemies prevent opportunity attacks', () => {
@@ -2469,6 +2683,149 @@ describe('combat engine', () => {
     expect(getEffectiveAC(state.creatures[1], state)).toBe(13);
     expect(getEffectiveAC(state.creatures[2], state)).toBe(12);
     expect(getEffectiveAC(state.creatures[3], state)).toBe(12);
+  });
+
+  it('can trigger a saving throw damage burst when the rule owner is defeated', () => {
+    const state = rollInitiative(
+      createCombatState([
+        creature({
+          id: 'a',
+          name: 'Alpha',
+          position: { x: 0, y: 0 }
+        }),
+        creature({
+          id: 'sentinel',
+          name: 'Fire Sentinel',
+          team: 'enemies',
+          hp: 3,
+          maxHp: 3,
+          position: { x: 1, y: 0 },
+          features: [
+            {
+              id: 'explosive-core',
+              name: 'Explosive Core',
+              description: 'Nearby creatures make a Dex save or take fire damage when this creature is defeated.',
+              enabled: true,
+              source: 'test',
+              rules: [
+                {
+                  id: 'explosive-core-burst',
+                  trigger: 'onDefeated',
+                  selectors: [{ type: 'creaturesWithinRange', range: 5 }],
+                  effects: [
+                    {
+                      type: 'savingThrowDamage',
+                      ability: 'dex',
+                      dc: 12,
+                      dice: '3d6',
+                      damageType: 'fire',
+                      halfDamageOnSuccess: true,
+                      note: 'Explosive Core'
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        }),
+        creature({
+          id: 'b',
+          name: 'Bravo',
+          team: 'players',
+          hp: 10,
+          maxHp: 10,
+          position: { x: 2, y: 0 }
+        }),
+        creature({
+          id: 'c',
+          name: 'Charlie',
+          team: 'players',
+          hp: 10,
+          maxHp: 10,
+          position: { x: 4, y: 0 }
+        })
+      ]),
+      sequence([0.9, 0.1, 0.2, 0.3])
+    );
+
+    const result = performAttackAction(state, 'strike', 'sentinel', sequence([0.5, 0, 0.99, 0, 0, 0, 0, 0, 0, 0]));
+
+    expect(hasCondition(findCreatureForTest(result, 'sentinel'), 'defeated')).toBe(true);
+    expect(findCreatureForTest(result, 'a').hp).toBe(9);
+    expect(findCreatureForTest(result, 'b').hp).toBe(7);
+    expect(findCreatureForTest(result, 'c').hp).toBe(10);
+    expect(result.log.some((entry) => entry.message.includes('DEX save against Explosive Core'))).toBe(true);
+  });
+
+  it('can apply turn-start saving throw damage to only the nearby creature whose turn begins', () => {
+    const random = sequence([0, 0, 0]);
+    const spy = vi.spyOn(Math, 'random').mockImplementation(random);
+    try {
+      const state = rollInitiative(
+        createCombatState([
+          creature({
+            id: 'sentinel',
+            name: 'Fire Sentinel',
+            team: 'enemies',
+            position: { x: 0, y: 0 },
+            features: [
+              {
+                id: 'heated-body',
+                name: 'Heated Body',
+                description: 'Creatures starting their turn nearby make a Con save or take fire damage.',
+                enabled: true,
+                source: 'test',
+                rules: [
+                  {
+                    id: 'heated-body-start',
+                    trigger: 'onTurnStart',
+                    selectors: [{ type: 'sourceWithinRange', range: 5 }],
+                    effects: [
+                      {
+                        type: 'savingThrowDamage',
+                        ability: 'con',
+                        dc: 12,
+                        dice: '2d6',
+                        damageType: 'fire',
+                        halfDamageOnSuccess: false,
+                        note: 'Heated Body'
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }),
+          creature({
+            id: 'b',
+            name: 'Bravo',
+            team: 'players',
+            hp: 10,
+            maxHp: 10,
+            position: { x: 1, y: 0 }
+          }),
+          creature({
+            id: 'c',
+            name: 'Charlie',
+            team: 'players',
+            hp: 10,
+            maxHp: 10,
+            position: { x: 3, y: 0 }
+          })
+        ]),
+        sequence([0.9, 0.8, 0.1])
+      );
+
+      const bravoTurn = endTurn(state);
+      const charlieTurn = endTurn(bravoTurn);
+
+      expect(findCreatureForTest(bravoTurn, 'b').hp).toBe(8);
+      expect(findCreatureForTest(bravoTurn, 'sentinel').hp).toBe(10);
+      expect(findCreatureForTest(charlieTurn, 'c').hp).toBe(10);
+      expect(bravoTurn.log.some((entry) => entry.message.includes('CON save against Heated Body'))).toBe(true);
+    } finally {
+      spy.mockRestore();
+    }
   });
 
   it('effective speed initializes turn movement', () => {

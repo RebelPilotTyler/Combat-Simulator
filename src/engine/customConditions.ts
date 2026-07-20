@@ -26,6 +26,7 @@ const ruleTriggers: RuleTriggerPoint[] = [
   'onTurnEnd',
   'onActionUsed',
   'onConditionApplied',
+  'onDefeated',
   'whileActive'
 ];
 
@@ -241,6 +242,11 @@ export function getCustomConditionTemplateWarnings(template: CustomConditionTemp
     if (rule.effects.length === 0) {
       warnings.push(`${rule.name || rule.id} has no valid mechanical effects.`);
     }
+    rule.filters?.forEach((filter) => {
+      if (filter.type === 'damageType' && !filter.damageType.trim()) {
+        warnings.push(`${rule.name || rule.id}: Damage type filter requires a damage type.`);
+      }
+    });
     rule.effects.forEach((effect) => {
       getRuleEffectWarnings(effect).forEach((warning) => warnings.push(`${rule.name || rule.id}: ${warning}`));
     });
@@ -264,6 +270,8 @@ export function getRuleEffectPlainEnglish(effect: RuleEffectOperation): string {
       return `Add ${effect.dice || 'extra dice'} to damage dealt by the selected source.`;
     case 'dealDamage':
       return `Deal ${effect.dice || 'damage'} ${effect.damageType ?? 'damage'} to the selected creature.`;
+    case 'savingThrowDamage':
+      return `Force a DC ${effect.dc} ${effect.ability.toUpperCase()} save, then deal ${effect.dice || 'damage'} ${effect.damageType ?? 'damage'}${effect.halfDamageOnSuccess ? ' with half damage on success' : ' on a failed save only'}.`;
     case 'multiplyDamage':
       return `Multiply damage against the selected target by ${effect.factor}.`;
     case 'reduceDamage':
@@ -307,11 +315,14 @@ export function getRuleEffectPlainEnglish(effect: RuleEffectOperation): string {
 
 export function getRuleEffectWarnings(effect: RuleEffectOperation): string[] {
   const warnings: string[] = [];
-  if ((effect.type === 'addDamageDice' || effect.type === 'dealDamage') && !effect.dice.trim()) {
+  if ((effect.type === 'addDamageDice' || effect.type === 'dealDamage' || effect.type === 'savingThrowDamage') && !effect.dice.trim()) {
     warnings.push('Damage dice are required.');
   }
-  if ((effect.type === 'dealDamage' || effect.type === 'addDamageDice') && effect.dice && !/^\d+d\d+([+-]\d+)?$/i.test(effect.dice.trim())) {
+  if ((effect.type === 'dealDamage' || effect.type === 'addDamageDice' || effect.type === 'savingThrowDamage') && effect.dice && !/^\d+d\d+([+-]\d+)?$/i.test(effect.dice.trim())) {
     warnings.push('Damage dice should look like 1d6 or 2d8+3.');
+  }
+  if (effect.type === 'savingThrowDamage' && effect.dc < 0) {
+    warnings.push('Save DC should not be negative.');
   }
   if (effect.type === 'multiplyDamage' && effect.factor < 0) {
     warnings.push('Damage multiplier should not be negative.');
@@ -471,7 +482,7 @@ function coerceTemplateRule(value: unknown): RuleDefinition | undefined {
 function normalizeSelectors(selectors: RuleTargetSelector[]): RuleTargetSelector[] {
   const valid = selectors.filter((selector) =>
     selector &&
-    ['self', 'actionTarget', 'source', 'creaturesInArea', 'alliesWithinRange', 'enemiesWithinRange'].includes(selector.type)
+    ['self', 'actionTarget', 'source', 'creaturesInArea', 'creaturesWithinRange', 'sourceWithinRange', 'alliesWithinRange', 'enemiesWithinRange'].includes(selector.type)
   );
   return valid.length > 0 ? valid : [{ type: 'self' }];
 }
@@ -500,6 +511,14 @@ function normalizeEffect(effect: RuleEffectOperation): RuleEffectOperation | und
     case 'addDamageDice':
     case 'dealDamage':
       return typeof effect.dice === 'string' && effect.dice.trim() ? effect : undefined;
+    case 'savingThrowDamage':
+      return typeof effect.dice === 'string' &&
+        effect.dice.trim() &&
+        typeof effect.dc === 'number' &&
+        typeof effect.ability === 'string' &&
+        typeof effect.halfDamageOnSuccess === 'boolean'
+        ? effect
+        : undefined;
     case 'multiplyDamage':
       return typeof effect.factor === 'number' ? effect : undefined;
     case 'grantDamageResistance':

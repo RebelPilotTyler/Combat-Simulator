@@ -1,0 +1,9 @@
+{
+  "expo": {
+    "name": "D&D Combat Sandbox",
+    "slug": "dnd-combat-sandbox",
+    "version": "0.1.0",
+    "orientation": "default",
+    "userInterfaceStyle": "automatic"
+  }
+}
