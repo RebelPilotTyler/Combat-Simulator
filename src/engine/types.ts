@@ -88,7 +88,10 @@ export type EffectOperationType =
   | 'modifySavingThrowBonus'
   | 'modifySaveDc'
   | 'applyCondition'
+  | 'applyConditionOnFailedSave'
   | 'removeCondition'
+  | 'pushCreature'
+  | 'pullCreature'
   | 'spendResource'
   | 'restoreResource'
   | 'addTag'
@@ -168,7 +171,24 @@ export type RuleEffectOperation =
       rules?: RuleDefinition[];
       note?: string;
     }
+  | {
+      type: 'applyConditionOnFailedSave';
+      conditionId: ConditionId;
+      name?: string;
+      description?: string;
+      tags?: string[];
+      durationType?: ConditionDurationType;
+      remainingRounds?: number;
+      stackBehavior?: StackBehavior;
+      stackCount?: number;
+      intensity?: number;
+      metadata?: Record<string, string | number | boolean | undefined>;
+      rules?: RuleDefinition[];
+      note?: string;
+    }
   | { type: 'removeCondition'; conditionId: ConditionId; note?: string }
+  | { type: 'pushCreature'; distanceFeet: number; note?: string }
+  | { type: 'pullCreature'; distanceFeet: number; note?: string }
   | { type: 'spendResource'; resourceId: string; amount: number; note?: string }
   | { type: 'restoreResource'; resourceId: string; amount: number; note?: string }
   | { type: 'addTag'; tag: ActionTag; note?: string }

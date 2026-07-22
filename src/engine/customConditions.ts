@@ -298,8 +298,14 @@ export function getRuleEffectPlainEnglish(effect: RuleEffectOperation): string {
       return `Change the selected creature's saving throw DCs by ${formatSigned(effect.amount)} while active.`;
     case 'applyCondition':
       return `Apply condition "${effect.conditionId}" to the selected creature.`;
+    case 'applyConditionOnFailedSave':
+      return `Apply condition "${effect.conditionId}" to the selected creature only when its saving throw fails.`;
     case 'removeCondition':
       return `Remove condition "${effect.conditionId}" from the selected creature.`;
+    case 'pushCreature':
+      return `Push the selected creature ${effect.distanceFeet} feet away from the source.`;
+    case 'pullCreature':
+      return `Pull the selected creature ${effect.distanceFeet} feet toward the source.`;
     case 'spendResource':
       return `Spend ${effect.amount} from the selected resource.`;
     case 'restoreResource':
@@ -339,8 +345,14 @@ export function getRuleEffectWarnings(effect: RuleEffectOperation): string[] {
   if (effect.type === 'modifySpeed' && effect.amount % 5 !== 0) {
     warnings.push('Speed changes usually work best in 5-foot increments.');
   }
-  if ((effect.type === 'applyCondition' || effect.type === 'removeCondition') && !effect.conditionId.trim()) {
+  if ((effect.type === 'applyCondition' || effect.type === 'applyConditionOnFailedSave' || effect.type === 'removeCondition') && !effect.conditionId.trim()) {
     warnings.push('Condition ID is required.');
+  }
+  if ((effect.type === 'pushCreature' || effect.type === 'pullCreature') && effect.distanceFeet <= 0) {
+    warnings.push('Forced movement distance must be greater than 0.');
+  }
+  if ((effect.type === 'pushCreature' || effect.type === 'pullCreature') && effect.distanceFeet % 5 !== 0) {
+    warnings.push('Forced movement distance should be a 5-foot increment.');
   }
   if ((effect.type === 'spendResource' || effect.type === 'restoreResource') && !effect.resourceId.trim()) {
     warnings.push('Resource is required.');
@@ -530,9 +542,13 @@ function normalizeEffect(effect: RuleEffectOperation): RuleEffectOperation | und
     case 'multiplyMovementCost':
       return typeof effect.factor === 'number' && effect.factor > 0 ? effect : undefined;
     case 'applyCondition':
+    case 'applyConditionOnFailedSave':
       return typeof effect.conditionId === 'string' && effect.conditionId.trim() ? effect : undefined;
     case 'removeCondition':
       return typeof effect.conditionId === 'string' && effect.conditionId.trim() ? effect : undefined;
+    case 'pushCreature':
+    case 'pullCreature':
+      return typeof effect.distanceFeet === 'number' && effect.distanceFeet > 0 ? effect : undefined;
     case 'spendResource':
     case 'restoreResource':
       return typeof effect.resourceId === 'string' && effect.resourceId.trim() && typeof effect.amount === 'number' ? effect : undefined;

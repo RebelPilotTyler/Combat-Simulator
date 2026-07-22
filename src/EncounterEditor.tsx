@@ -134,7 +134,10 @@ const effectTypes: EffectOperationType[] = [
   'modifySavingThrowBonus',
   'modifySaveDc',
   'applyCondition',
+  'applyConditionOnFailedSave',
   'removeCondition',
+  'pushCreature',
+  'pullCreature',
   'spendResource',
   'restoreResource',
   'addTag',
@@ -2613,8 +2616,8 @@ function EffectEditor({
 }) {
   const warnings = getRuleEffectWarnings(effect);
   const matchingTemplate =
-    effect.type === 'applyCondition' ? customConditions.find((template) => template.id === effect.conditionId) : undefined;
-  const isMissingTemplateHooks = effect.type === 'applyCondition' && Boolean(matchingTemplate && !(effect.rules?.length));
+    isApplyConditionEffect(effect) ? customConditions.find((template) => template.id === effect.conditionId) : undefined;
+  const isMissingTemplateHooks = isApplyConditionEffect(effect) && Boolean(matchingTemplate && !(effect.rules?.length));
   return (
     <div className="rule-row effect-row">
       <label>
@@ -2685,6 +2688,17 @@ function renderEffectFields(
   if (effect.type === 'multiplyDamage') {
     return <NumberInput disabled={readOnly} label="Factor" value={effect.factor} min={0} onChange={(factor) => onChange({ ...effect, factor })} />;
   }
+  if (effect.type === 'pushCreature' || effect.type === 'pullCreature') {
+    return (
+      <NumberInput
+        disabled={readOnly}
+        label="Distance Feet"
+        value={effect.distanceFeet}
+        min={5}
+        onChange={(distanceFeet) => onChange({ ...effect, distanceFeet })}
+      />
+    );
+  }
   if (effect.type === 'grantDamageResistance' || effect.type === 'grantDamageImmunity' || effect.type === 'grantDamageVulnerability') {
     return (
       <label>
@@ -2746,7 +2760,7 @@ function renderEffectFields(
       </>
     );
   }
-  if (effect.type === 'applyCondition') {
+  if (isApplyConditionEffect(effect)) {
     return (
       <>
         {customConditions.length > 0 && (
@@ -2870,12 +2884,12 @@ function renderEffectFields(
 
 function createApplyConditionEffectFromTemplate(
   template: CustomConditionTemplate,
-  previous: Extract<RuleEffectOperation, { type: 'applyCondition' }>
-): Extract<RuleEffectOperation, { type: 'applyCondition' }> {
+  previous: ApplyConditionRuleEffect
+): ApplyConditionRuleEffect {
   const normalized = normalizeCustomConditionTemplate(template);
   return {
     ...previous,
-    type: 'applyCondition',
+    type: previous.type,
     conditionId: normalized.id,
     name: normalized.name,
     description: normalized.description,
@@ -2889,11 +2903,11 @@ function createApplyConditionEffectFromTemplate(
 }
 
 function updateApplyConditionEffectFromTemplateMatch(
-  effect: Extract<RuleEffectOperation, { type: 'applyCondition' }>,
+  effect: ApplyConditionRuleEffect,
   customConditions: CustomConditionTemplate[],
-  update: Partial<Extract<RuleEffectOperation, { type: 'applyCondition' }>>
-): Extract<RuleEffectOperation, { type: 'applyCondition' }> {
-  const next = { ...effect, ...update, type: 'applyCondition' as const };
+  update: Partial<ApplyConditionRuleEffect>
+): ApplyConditionRuleEffect {
+  const next = { ...effect, ...update, type: effect.type } as ApplyConditionRuleEffect;
   const template = customConditions.find((candidate) => candidate.id === next.conditionId);
   if (!template) {
     return next;
@@ -2908,6 +2922,15 @@ function updateApplyConditionEffectFromTemplateMatch(
     stackCount: next.stackCount,
     intensity: next.intensity
   };
+}
+
+type ApplyConditionRuleEffect = Extract<
+  RuleEffectOperation,
+  { type: 'applyCondition' | 'applyConditionOnFailedSave' }
+>;
+
+function isApplyConditionEffect(effect: RuleEffectOperation): effect is ApplyConditionRuleEffect {
+  return effect.type === 'applyCondition' || effect.type === 'applyConditionOnFailedSave';
 }
 
 function CreatureReferenceSelect({
@@ -3916,11 +3939,14 @@ function createBlankEffect(type: EffectOperationType = 'addFlatModifier', update
   ) {
     return { amount: type === 'modifySpeed' ? 10 : 1, ...update, type } as RuleEffectOperation;
   }
-  if (type === 'applyCondition') {
+  if (type === 'applyCondition' || type === 'applyConditionOnFailedSave') {
     return { conditionId: 'prone', ...update, type } as RuleEffectOperation;
   }
   if (type === 'removeCondition') {
     return { conditionId: 'prone', ...update, type } as RuleEffectOperation;
+  }
+  if (type === 'pushCreature' || type === 'pullCreature') {
+    return { distanceFeet: 5, ...update, type } as RuleEffectOperation;
   }
   if (type === 'spendResource' || type === 'restoreResource') {
     return { resourceId: '', amount: 1, ...update, type } as RuleEffectOperation;

@@ -373,6 +373,43 @@ describe('combat engine', () => {
     expect(result.log.some((entry) => entry.type === 'save')).toBe(true);
   });
 
+  it('applies a failed-save condition only to targets that fail their saving throw', () => {
+    const ensnaringBurst: ActionDefinition = {
+      ...baseCreature.actions[1],
+      id: 'ensnaring-burst',
+      name: 'Ensnaring Burst',
+      rules: [
+        {
+          id: 'ensnaring-burst-restrain',
+          trigger: 'afterSavingThrow',
+          selectors: [{ type: 'actionTarget' }],
+          effects: [{ type: 'applyConditionOnFailedSave', conditionId: 'restrained' }]
+        }
+      ]
+    };
+    const state = rollInitiative(
+      createCombatState([
+        creature({ id: 'a', name: 'Alpha', actions: [ensnaringBurst], position: { x: 0, y: 0 } }),
+        creature({ id: 'b', name: 'Bravo', team: 'enemies', position: { x: 1, y: 0 } }),
+        creature({ id: 'c', name: 'Charlie', team: 'enemies', position: { x: 0, y: 1 } })
+      ]),
+      sequence([0.9, 0.2, 0.1])
+    );
+    const roundTrip = parseCombatStateJson(serializeCombatState(state));
+    const importedEffect = roundTrip.state?.creatures[0].actions[0].rules?.[0].effects[0];
+
+    expect(importedEffect).toEqual({ type: 'applyConditionOnFailedSave', conditionId: 'restrained' });
+    const result = performSavingThrowAction(
+      roundTrip.state!,
+      ensnaringBurst.id,
+      ['b', 'c'],
+      sequence([0, 0, 0, 0.99, 0, 0])
+    );
+
+    expect(hasCondition(findCreatureForTest(result, 'b'), 'restrained')).toBe(true);
+    expect(hasCondition(findCreatureForTest(result, 'c'), 'restrained')).toBe(false);
+  });
+
   it('does not let saving throw areas damage creatures behind blocked cover', () => {
     const state = rollInitiative(
       createCombatState([
@@ -1294,6 +1331,100 @@ describe('combat engine', () => {
 
     expect(shoved.creatures.find((candidate) => candidate.id === 'b')?.position).toEqual({ x: 2, y: 0, z: 0 });
     expect(shoved.pendingReactions).toHaveLength(0);
+  });
+
+  it('pushes an attack target away from the attacker after damage', () => {
+    const forcefulStrike: ActionDefinition = {
+      ...baseCreature.actions[0],
+      id: 'forceful-strike',
+      name: 'Forceful Strike',
+      rules: [
+        {
+          id: 'forceful-strike-push',
+          trigger: 'afterDamage',
+          selectors: [{ type: 'actionTarget' }],
+          effects: [{ type: 'pushCreature', distanceFeet: 10 }]
+        }
+      ]
+    };
+    const state = rollInitiative(
+      createCombatState([
+        creature({ id: 'a', name: 'Alpha', position: { x: 0, y: 0 }, actions: [forcefulStrike] }),
+        creature({ id: 'b', name: 'Bravo', team: 'enemies', position: { x: 1, y: 0 } })
+      ]),
+      sequence([0.9, 0.1])
+    );
+    const roundTrip = parseCombatStateJson(serializeCombatState(state));
+    const importedEffect = roundTrip.state?.creatures[0].actions[0].rules?.[0].effects[0];
+
+    expect(importedEffect).toEqual({ type: 'pushCreature', distanceFeet: 10 });
+    const pushed = performAttackAction(roundTrip.state!, forcefulStrike.id, 'b', sequence([0.5, 0]));
+
+    expect(findCreatureForTest(pushed, 'b').position).toEqual({ x: 3, y: 0, z: 0 });
+    expect(pushed.pendingReactions).toHaveLength(0);
+    expect(pushed.log.some((entry) => entry.message.includes('pushes Bravo 10 feet away'))).toBe(true);
+  });
+
+  it('pulls an attack target toward the attacker after damage', () => {
+    const graspingShot: ActionDefinition = {
+      ...baseCreature.actions[0],
+      id: 'grasping-shot',
+      name: 'Grasping Shot',
+      kind: 'rangedAttack',
+      type: 'rangedAttack',
+      tags: ['attack', 'ranged'],
+      range: 6,
+      normalRange: 30,
+      rules: [
+        {
+          id: 'grasping-shot-pull',
+          trigger: 'afterDamage',
+          selectors: [{ type: 'actionTarget' }],
+          effects: [{ type: 'pullCreature', distanceFeet: 10 }]
+        }
+      ]
+    };
+    const state = rollInitiative(
+      createCombatState([
+        creature({ id: 'a', name: 'Alpha', position: { x: 0, y: 0 }, actions: [graspingShot] }),
+        creature({ id: 'b', name: 'Bravo', team: 'enemies', position: { x: 3, y: 0 } })
+      ]),
+      sequence([0.9, 0.1])
+    );
+
+    const pulled = performAttackAction(state, graspingShot.id, 'b', sequence([0.5, 0]));
+
+    expect(findCreatureForTest(pulled, 'b').position).toEqual({ x: 1, y: 0, z: 0 });
+    expect(pulled.log.some((entry) => entry.message.includes('pulls Bravo 10 feet closer'))).toBe(true);
+  });
+
+  it('stops forced movement at an occupied square and keeps partial movement', () => {
+    const forcefulStrike: ActionDefinition = {
+      ...baseCreature.actions[0],
+      id: 'blocked-forceful-strike',
+      name: 'Blocked Forceful Strike',
+      rules: [
+        {
+          id: 'blocked-forceful-strike-push',
+          trigger: 'afterDamage',
+          selectors: [{ type: 'actionTarget' }],
+          effects: [{ type: 'pushCreature', distanceFeet: 15 }]
+        }
+      ]
+    };
+    const state = rollInitiative(
+      createCombatState([
+        creature({ id: 'a', name: 'Alpha', position: { x: 0, y: 0 }, actions: [forcefulStrike] }),
+        creature({ id: 'b', name: 'Bravo', team: 'enemies', position: { x: 1, y: 0 } }),
+        creature({ id: 'c', name: 'Charlie', team: 'enemies', position: { x: 3, y: 0 } })
+      ]),
+      sequence([0.9, 0.1, 0.05])
+    );
+
+    const pushed = performAttackAction(state, forcefulStrike.id, 'b', sequence([0.5, 0]));
+
+    expect(findCreatureForTest(pushed, 'b').position).toEqual({ x: 2, y: 0, z: 0 });
+    expect(pushed.log.some((entry) => entry.message.includes('remaining movement is blocked'))).toBe(true);
   });
 
   it('custom conditions keep metadata, tags, duration, and rule effects through serialization', () => {

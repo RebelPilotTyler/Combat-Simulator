@@ -14,6 +14,8 @@ import {
 } from './conditions';
 import { applyDamageTraits, damageTypeMatches, getActionDamageType, getNativeDamageTraits } from './damage';
 import { getAvailableActions, getEffectiveSaveBonus, getEnabledFeatures, getResource } from './features';
+import { isOccupied } from './movement';
+import { getTilePosition, isBlocked, isInBounds } from './shapes';
 import { getDistanceFeet } from './targeting';
 import { areAllies, areHostile } from './teams';
 import { enqueueVisualEvent } from './visualEvents';
@@ -24,6 +26,7 @@ import type {
   CombatLogEntry,
   CombatState,
   Creature,
+  GridPosition,
   PendingReaction,
   ReactionTriggerDefinition,
   RollModifier,
@@ -336,7 +339,11 @@ function applyRuleEffect(
   selected: Creature[],
   effect: RuleEffectOperation
 ): boolean {
-  if (effect.type === 'applyCondition') {
+  if (effect.type === 'applyCondition' || effect.type === 'applyConditionOnFailedSave') {
+    if (effect.type === 'applyConditionOnFailedSave' && (event.trigger !== 'afterSavingThrow' || event.success !== false)) {
+      return false;
+    }
+
     selected.forEach((creature) => {
       const condition = createAppliedCondition(effect.conditionId, {
         sourceCreatureId: event.source?.id ?? entry.owner.id,
@@ -382,6 +389,68 @@ function applyRuleEffect(
       });
     });
     return changed.length > 0;
+  }
+
+  if (effect.type === 'pushCreature' || effect.type === 'pullCreature') {
+    const source = event.source ?? entry.owner;
+    const requestedSteps = Math.floor(Math.max(0, effect.distanceFeet) / 5);
+    let changed = false;
+
+    selected.forEach((creature) => {
+      const from = { ...creature.position };
+      const path = [from];
+
+      for (let step = 0; step < requestedSteps; step += 1) {
+        const dx = Math.sign(
+          effect.type === 'pushCreature'
+            ? creature.position.x - source.position.x
+            : source.position.x - creature.position.x
+        );
+        const dy = Math.sign(
+          effect.type === 'pushCreature'
+            ? creature.position.y - source.position.y
+            : source.position.y - creature.position.y
+        );
+        if (dx === 0 && dy === 0) {
+          break;
+        }
+
+        const destination = getTilePosition({ x: creature.position.x + dx, y: creature.position.y + dy }, state.grid);
+        if (!isInBounds(destination, state.grid) || isBlocked(destination, state.grid) || isOccupied(state, destination, creature.id)) {
+          break;
+        }
+
+        creature.position = destination;
+        path.push(destination);
+      }
+
+      const distanceMoved = (path.length - 1) * 5;
+      const baseVerb = effect.type === 'pushCreature' ? 'push' : 'pull';
+      const verb = effect.type === 'pushCreature' ? 'pushes' : 'pulls';
+      const direction = effect.type === 'pushCreature' ? 'away' : 'closer';
+      if (distanceMoved === 0) {
+        logRuleMessage(state, `${source.name} cannot ${baseVerb} ${creature.name} ${direction}; the path is blocked.`);
+        return;
+      }
+
+      changed = true;
+      const partial = distanceMoved < effect.distanceFeet ? ` The remaining movement is blocked.` : '';
+      logRuleMessage(
+        state,
+        `${source.name} ${verb} ${creature.name} ${distanceMoved} feet ${direction} to ${formatPosition(creature.position)}.${partial}`
+      );
+      enqueueVisualEvent(state, {
+        kind: 'movementComplete',
+        creatureId: creature.id,
+        sourceCreatureId: source.id,
+        label: effect.type === 'pushCreature' ? `Pushed ${distanceMoved} ft` : `Pulled ${distanceMoved} ft`,
+        from,
+        to: creature.position,
+        path
+      });
+    });
+
+    return changed;
   }
 
   if (effect.type === 'dealDamage') {
@@ -938,6 +1007,10 @@ function formatRollReasons(notes: string[] | undefined): string {
 
 function formatSigned(value: number): string {
   return value >= 0 ? `+ ${value}` : `- ${Math.abs(value)}`;
+}
+
+function formatPosition(position: GridPosition): string {
+  return `(${position.x}, ${position.y}${position.z ? `, z ${position.z}` : ''})`;
 }
 
 function stampConditionApplicationTiming(state: CombatState, condition: AppliedCondition): void {
