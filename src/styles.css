@@ -2070,6 +2070,95 @@ summary:focus-visible {
   gap: 6px;
 }
 
+.team-select-field {
+  min-width: 0;
+}
+
+.team-select-control {
+  align-items: center;
+  display: grid;
+  gap: 6px;
+  grid-template-columns: auto minmax(0, 1fr);
+}
+
+.team-select-control select {
+  min-width: 0;
+  width: 100%;
+}
+
+.team-color-swatch {
+  border: 1px solid rgba(0, 0, 0, 0.35);
+  border-radius: 50%;
+  display: inline-block;
+  height: 14px;
+  width: 14px;
+}
+
+.team-editor-section {
+  align-content: start;
+}
+
+.team-editor-list {
+  display: grid;
+  gap: 6px;
+}
+
+.team-editor-row {
+  align-items: end;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  display: grid;
+  gap: 7px;
+  grid-template-columns: auto minmax(130px, 1fr) minmax(116px, auto) auto;
+  padding: 7px;
+}
+
+.team-editor-row label {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+}
+
+.team-editor-row input[type='text'],
+.team-editor-row input:not([type]) {
+  min-width: 0;
+  width: 100%;
+}
+
+.team-editor-row small {
+  color: var(--text-muted);
+  font-size: 12px;
+  padding-bottom: 7px;
+}
+
+.team-editor-swatch {
+  align-self: center;
+  height: 18px;
+  width: 18px;
+}
+
+.team-color-control {
+  align-items: center;
+  display: flex;
+  gap: 6px;
+}
+
+.team-color-control input[type='color'] {
+  cursor: pointer;
+  height: var(--control-height);
+  min-height: var(--control-height);
+  padding: 2px;
+  width: 42px;
+}
+
+.team-color-control span {
+  color: var(--text-muted);
+  font-family: Consolas, 'Courier New', monospace;
+  font-size: 12px;
+  white-space: nowrap;
+}
+
 .wide-field {
   grid-column: 1 / -1;
 }

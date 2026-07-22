@@ -72,6 +72,16 @@ describe('filterCreaturesForEditor', () => {
     expect(filterCreaturesForEditor([...creatures, thirdTeamCreature], 'team-3').map((creature) => creature.id)).toEqual(['third-team-scout']);
   });
 
+  it('filters creature editor entries by custom team names', () => {
+    const wardens = { ...creatures[0], id: 'wardens-scout', team: 'team-3' };
+
+    expect(
+      filterCreaturesForEditor([...creatures, wardens], 'emerald wardens', [
+        { id: 'team-3', name: 'Emerald Wardens', color: '#2e7d32' }
+      ]).map((creature) => creature.id)
+    ).toEqual(['wardens-scout']);
+  });
+
   it('filters by action tags and feature names', () => {
     expect(filterCreaturesForEditor(creatures, 'melee rage').map((creature) => creature.id)).toEqual(['training-brute']);
   });

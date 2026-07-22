@@ -262,8 +262,8 @@ export function EncounterEditor({
   const selectedInstance = builderCreatures.find((creature) => creature.id === selectedInstanceId);
   const selectedTemplate = creatureLibrary.find((creature) => creature.id === selectedTemplateId) ?? creatureLibrary[0];
   const filteredCreatureLibrary = useMemo(
-    () => filterCreaturesForEditor(creatureLibrary, creatureSearch),
-    [creatureLibrary, creatureSearch]
+    () => filterCreaturesForEditor(creatureLibrary, creatureSearch, teamDefinitions),
+    [creatureLibrary, creatureSearch, teamDefinitions]
   );
   const crEstimate = useMemo(
     () =>
@@ -363,11 +363,35 @@ export function EncounterEditor({
     setCreatureJsonMessage('Blank creature added to the library.');
   }
 
-  function addTeam() {
+  function addTeam(messageTarget: 'creature' | 'encounter' = 'creature') {
     const team = createNextTeamDefinition(teamDefinitions);
     setTeamDefinitions((current) => [...current, team]);
     setCreatureDraft((current) => ({ ...current, team: team.id }));
-    setCreatureJsonMessage(`${team.name} added and selected.`);
+    const message = `${team.name} added. Rename it and pick a color below.`;
+    if (messageTarget === 'encounter') {
+      setEncounterJsonMessage(message);
+    } else {
+      setCreatureJsonMessage(message);
+    }
+  }
+
+  function updateTeamDefinition(teamId: Team, update: Partial<Pick<TeamDefinition, 'name' | 'color'>>) {
+    setTeamDefinitions((current) =>
+      current.map((team) =>
+        team.id === teamId
+          ? {
+              ...team,
+              ...update,
+              id: team.id,
+              neutral: team.id === 'neutral' || team.neutral === true
+            }
+          : team
+      )
+    );
+  }
+
+  function normalizeEditedTeams() {
+    setTeamDefinitions((current) => normalizeTeamDefinitions(current, [...currentCombat.creatures, ...creatureLibrary, ...builderCreatures]));
   }
 
   function duplicateSelectedCreature() {
@@ -979,23 +1003,26 @@ export function EncounterEditor({
                   Name
                   <input value={creatureDraft.name} onChange={(event) => updateDraftCreature({ name: event.target.value })} />
                 </label>
-                <label>
-                  Team
-                  <select value={creatureDraft.team} onChange={(event) => updateDraftCreature({ team: event.target.value })}>
-                    {teamDefinitions.map((team) => (
-                      <option key={team.id} value={team.id}>
-                        {team.name}
-                      </option>
-                    ))}
-                  </select>
-                </label>
-                <button type="button" onClick={addTeam}>Add Team</button>
+                <TeamSelect
+                  label="Team"
+                  teams={teamDefinitions}
+                  value={creatureDraft.team}
+                  onChange={(team) => updateDraftCreature({ team })}
+                />
+                <button type="button" onClick={() => addTeam('creature')}>Add Team</button>
                 <NumberInput label="HP" value={creatureDraft.hp} onChange={(value) => updateDraftCreature({ hp: value })} />
                 <NumberInput label="Max HP" value={creatureDraft.maxHp} onChange={(value) => updateDraftCreature({ maxHp: value })} />
                 <NumberInput label="AC" value={creatureDraft.ac} onChange={(value) => updateDraftCreature({ ac: value })} />
                 <NumberInput label="Proficiency" value={creatureDraft.proficiencyBonus} onChange={(value) => updateDraftCreature({ proficiencyBonus: value })} />
               </div>
             </details>
+
+            <TeamEditor
+              teams={teamDefinitions}
+              onAddTeam={() => addTeam('creature')}
+              onNormalize={normalizeEditedTeams}
+              onUpdateTeam={updateTeamDefinition}
+            />
 
             <details className="editor-section editor-subsection">
               <summary>Damage Defenses</summary>
@@ -1622,6 +1649,13 @@ export function EncounterEditor({
               </label>
             </section>
 
+            <TeamEditor
+              teams={teamDefinitions}
+              onAddTeam={() => addTeam('encounter')}
+              onNormalize={normalizeEditedTeams}
+              onUpdateTeam={updateTeamDefinition}
+            />
+
             <section className="editor-section encounter-balance-card">
               <h3>Encounter Balance</h3>
               <strong>{encounterBalance.message}</strong>
@@ -1662,16 +1696,12 @@ export function EncounterEditor({
                     Instance Name
                     <input value={selectedInstance.name} onChange={(event) => updateSelectedInstance({ name: event.target.value })} />
                   </label>
-                  <label>
-                    Team
-                    <select value={selectedInstance.team} onChange={(event) => updateSelectedInstance({ team: event.target.value })}>
-                      {teamDefinitions.map((team) => (
-                        <option key={team.id} value={team.id}>
-                          {team.name}
-                        </option>
-                      ))}
-                    </select>
-                  </label>
+                  <TeamSelect
+                    label="Team"
+                    teams={teamDefinitions}
+                    value={selectedInstance.team}
+                    onChange={(team) => updateSelectedInstance({ team })}
+                  />
                   <NumberInput label="X" value={selectedInstance.position.x} onChange={(value) => updateSelectedInstance({ position: { ...selectedInstance.position, x: value } })} />
                   <NumberInput label="Y" value={selectedInstance.position.y} onChange={(value) => updateSelectedInstance({ position: { ...selectedInstance.position, y: value } })} />
                   <NumberInput label="Z" value={selectedInstance.position.z ?? 0} onChange={(value) => updateSelectedInstance({ position: { ...selectedInstance.position, z: value } })} />
@@ -2929,6 +2959,82 @@ function ResourceSelect({
   );
 }
 
+function TeamSelect({
+  label,
+  value,
+  teams,
+  onChange
+}: {
+  label: string;
+  value: Team;
+  teams: TeamDefinition[];
+  onChange: (team: Team) => void;
+}) {
+  const team = teams.find((candidate) => candidate.id === normalizeTeamId(value)) ?? teams[0];
+  return (
+    <label className="team-select-field">
+      {label}
+      <span className="team-select-control">
+        <span className="team-color-swatch" style={{ backgroundColor: team?.color ?? '#666666' }} />
+        <select value={value} onChange={(event) => onChange(event.target.value)}>
+          {teams.map((option) => (
+            <option key={option.id} value={option.id}>
+              {option.name}
+            </option>
+          ))}
+        </select>
+      </span>
+    </label>
+  );
+}
+
+function TeamEditor({
+  teams,
+  onAddTeam,
+  onNormalize,
+  onUpdateTeam
+}: {
+  teams: TeamDefinition[];
+  onAddTeam: () => void;
+  onNormalize: () => void;
+  onUpdateTeam: (teamId: Team, update: Partial<Pick<TeamDefinition, 'name' | 'color'>>) => void;
+}) {
+  return (
+    <details className="editor-section editor-subsection team-editor-section" open>
+      <summary>Teams</summary>
+      <div className="team-editor-list">
+        {teams.map((team) => (
+          <div className="team-editor-row" key={team.id}>
+            <span className="team-color-swatch team-editor-swatch" style={{ backgroundColor: team.color }} />
+            <label>
+              Name
+              <input
+                value={team.name}
+                onBlur={onNormalize}
+                onChange={(event) => onUpdateTeam(team.id, { name: event.target.value })}
+              />
+            </label>
+            <label>
+              Color
+              <span className="team-color-control">
+                <input
+                  aria-label={`${team.name || team.id} color`}
+                  type="color"
+                  value={team.color}
+                  onChange={(event) => onUpdateTeam(team.id, { color: event.target.value })}
+                />
+                <span>{team.color}</span>
+              </span>
+            </label>
+            {team.neutral && <small>Neutral</small>}
+          </div>
+        ))}
+      </div>
+      <button type="button" onClick={onAddTeam}>Add Team</button>
+    </details>
+  );
+}
+
 function NumberInput({
   label,
   value,
@@ -2952,7 +3058,11 @@ function NumberInput({
   );
 }
 
-export function filterCreaturesForEditor(creatures: Creature[], query: string): Creature[] {
+export function filterCreaturesForEditor(
+  creatures: Creature[],
+  query: string,
+  definitions: TeamDefinition[] = normalizeTeamDefinitions(undefined, creatures)
+): Creature[] {
   const terms = query
     .trim()
     .toLowerCase()
@@ -2963,10 +3073,14 @@ export function filterCreaturesForEditor(creatures: Creature[], query: string): 
     return creatures;
   }
 
+  const normalizedDefinitions = normalizeTeamDefinitions(definitions, creatures);
+
   return creatures.filter((creature) => {
+    const team = normalizedDefinitions.find((definition) => definition.id === normalizeTeamId(creature.team));
     const haystack = [
       creature.name,
       creature.team,
+      team?.name,
       `hp ${creature.hp}`,
       `maxhp ${creature.maxHp}`,
       `ac ${creature.ac}`,
