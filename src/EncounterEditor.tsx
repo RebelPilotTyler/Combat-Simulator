@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, type ReactNode } from 'react';
+import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { sampleCreatures } from './data/sampleEncounter';
 import { createCombatState } from './engine/combat';
 import { crCalculationTable, estimateCreatureCR, getCrXp } from './engine/cr';
@@ -9,7 +9,6 @@ import {
   createBlankCustomConditionTemplate,
   deleteCustomConditionTemplate,
   duplicateCustomConditionTemplate,
-  filterCustomConditionTemplates,
   getCustomConditionTemplateWarnings,
   getRuleEffectPlainEnglish,
   getRuleEffectWarnings,
@@ -145,7 +144,7 @@ const effectTypes: EffectOperationType[] = [
   'logMessage'
 ];
 const stackBehaviors: StackBehavior[] = ['none', 'refresh', 'stackCount', 'stackIntensity'];
-type EditorMode = 'creatures' | 'encounters';
+export type EditorMode = 'creatures' | 'encounters';
 type EncounterBalanceLeader = Team | 'even' | 'unopposed';
 
 interface EncounterBalanceTeamSummary {
@@ -183,9 +182,11 @@ export interface SavedEncounterCreatureInstance {
 
 export function EncounterEditor({
   currentCombat,
+  editorMode = 'creatures',
   onLoadEncounter
 }: {
   currentCombat: CombatState;
+  editorMode?: EditorMode;
   onLoadEncounter: (state: CombatState) => void;
 }) {
   const [creatureLibrary, setCreatureLibrary] = useState<Creature[]>(loadCreatureLibrary);
@@ -200,21 +201,18 @@ export function EncounterEditor({
   const [selectedCreatureId, setSelectedCreatureId] = useState<string>(() => creatureLibrary[0]?.id ?? '');
   const [creatureDraft, setCreatureDraft] = useState<Creature>(() => cloneCreature(creatureLibrary[0] ?? createBlankCreature()));
   const [selectedActionId, setSelectedActionId] = useState<string>(() => creatureDraft.actions[0]?.id ?? '');
+  const [expandedActionId, setExpandedActionId] = useState<string | undefined>();
   const [selectedResourceId, setSelectedResourceId] = useState<string>(() => creatureDraft.resources?.[0]?.id ?? '');
   const [selectedFeatureId, setSelectedFeatureId] = useState<string>(() => creatureDraft.features?.[0]?.id ?? '');
   const [selectedLibraryActionId, setSelectedLibraryActionId] = useState<string>(() => actionLibrary[0]?.id ?? '');
   const [selectedLibraryFeatureId, setSelectedLibraryFeatureId] = useState<string>(() => featureLibrary[0]?.id ?? '');
   const [selectedLibraryResourceId, setSelectedLibraryResourceId] = useState<string>(() => resourceLibrary[0]?.id ?? '');
   const [selectedCustomConditionId, setSelectedCustomConditionId] = useState<string>(() => customConditionLibrary[0]?.id ?? '');
-  const [partLibraryMessage, setPartLibraryMessage] = useState<string | undefined>();
+  const [creatureEditorNotice, setCreatureEditorNotice] = useState<string | undefined>();
   const [creatureJson, setCreatureJson] = useState('');
-  const [creatureJsonMessage, setCreatureJsonMessage] = useState<string | undefined>();
   const [customConditionJson, setCustomConditionJson] = useState('');
-  const [customConditionMessage, setCustomConditionMessage] = useState<string | undefined>();
-  const [customConditionSearch, setCustomConditionSearch] = useState('');
   const [encounterJson, setEncounterJson] = useState('');
   const [encounterJsonMessage, setEncounterJsonMessage] = useState<string | undefined>();
-  const [editorMode, setEditorMode] = useState<EditorMode>('creatures');
   const [creatureSearch, setCreatureSearch] = useState('');
   const [crTargetAc, setCrTargetAc] = useState(15);
   const [crTargetSaveBonus, setCrTargetSaveBonus] = useState(3);
@@ -246,13 +244,20 @@ export function EncounterEditor({
   const selectedConditionIsReference = Boolean(
     selectedReferenceCondition || (!selectedCustomCondition && selectedConditionTemplate && referenceConditionLibrary.some((template) => template.id === selectedConditionTemplate.id))
   );
-  const filteredCustomConditions = useMemo(
-    () => filterCustomConditionTemplates(customConditionLibrary, customConditionSearch),
-    [customConditionLibrary, customConditionSearch]
-  );
-  const filteredReferenceConditions = useMemo(
-    () => filterCustomConditionTemplates(referenceConditionLibrary, customConditionSearch),
-    [referenceConditionLibrary, customConditionSearch]
+  const conditionPickerItems = useMemo(
+    () => [
+      ...referenceConditionLibrary.map((template) => ({
+        id: getReferenceConditionSelectionId(template),
+        name: template.name,
+        description: `Reference - ${template.tags.join(', ') || 'example'} - ${template.rules.length} hook(s)`
+      })),
+      ...customConditionLibrary.map((template) => ({
+        id: template.id,
+        name: template.name,
+        description: `Custom - ${template.tags.join(', ') || 'no tags'} - ${template.rules.length} hook(s)`
+      }))
+    ],
+    [customConditionLibrary, referenceConditionLibrary]
   );
   const selectedCustomConditionWarnings = selectedConditionTemplate ? getCustomConditionTemplateWarnings(selectedConditionTemplate) : [];
   const hydratedBuilder = useMemo(
@@ -316,6 +321,7 @@ export function EncounterEditor({
 
     const nextDraft = cloneCreature(selected);
     setCreatureDraft(nextDraft);
+    setExpandedActionId(undefined);
     setSelectedActionId(nextDraft.actions[0]?.id ?? '');
     setSelectedResourceId(nextDraft.resources?.[0]?.id ?? '');
     setSelectedFeatureId(nextDraft.features?.[0]?.id ?? '');
@@ -363,7 +369,7 @@ export function EncounterEditor({
     const blank = createBlankCreature();
     setCreatureLibrary((current) => [blank, ...current]);
     setSelectedCreatureId(blank.id);
-    setCreatureJsonMessage('Blank creature added to the library.');
+    setCreatureEditorNotice('Blank creature added to the library.');
   }
 
   function addTeam(messageTarget: 'creature' | 'encounter' = 'creature') {
@@ -374,7 +380,7 @@ export function EncounterEditor({
     if (messageTarget === 'encounter') {
       setEncounterJsonMessage(message);
     } else {
-      setCreatureJsonMessage(message);
+      setCreatureEditorNotice(message);
     }
   }
 
@@ -408,7 +414,7 @@ export function EncounterEditor({
     };
     setCreatureLibrary((current) => [duplicate, ...current]);
     setSelectedCreatureId(duplicate.id);
-    setCreatureJsonMessage(`${source.name} duplicated.`);
+    setCreatureEditorNotice(`${source.name} duplicated.`);
   }
 
   function saveCreatureDraft() {
@@ -416,35 +422,35 @@ export function EncounterEditor({
     setCreatureDraft(normalized);
     setCreatureLibrary((current) => upsertById(current, normalized));
     setSelectedCreatureId(normalized.id);
-    setCreatureJsonMessage(`${normalized.name} saved to localStorage.`);
+    setCreatureEditorNotice(`${normalized.name} saved to localStorage.`);
   }
 
   function deleteCreature() {
     if (creatureLibrary.length <= 1) {
-      setCreatureJsonMessage('Keep at least one creature in the library.');
+      setCreatureEditorNotice('Keep at least one creature in the library.');
       return;
     }
 
     const next = creatureLibrary.filter((creature) => creature.id !== selectedCreatureId);
     setCreatureLibrary(next);
     setSelectedCreatureId(next[0]?.id ?? '');
-    setCreatureJsonMessage('Creature deleted from the library.');
+    setCreatureEditorNotice('Creature deleted from the library.');
   }
 
   function exportSelectedCreature() {
     setCreatureJson(JSON.stringify(creatureDraft, null, 2));
-    setCreatureJsonMessage('Selected creature exported below.');
+    setCreatureEditorNotice('Selected creature exported below.');
   }
 
   function exportCreatureLibrary() {
     setCreatureJson(JSON.stringify(creatureLibrary, null, 2));
-    setCreatureJsonMessage('Creature library exported below.');
+    setCreatureEditorNotice('Creature library exported below.');
   }
 
   function importCreatureJson() {
     const imported = parseCreatureImport(creatureJson);
     if (!imported.ok) {
-      setCreatureJsonMessage(imported.error);
+      setCreatureEditorNotice(imported.error);
       return;
     }
 
@@ -452,7 +458,7 @@ export function EncounterEditor({
     setCreatureLibrary((current) => mergeCreatures(current, creatures));
     setTeamDefinitions((current) => normalizeTeamDefinitions(current, creatures));
     setSelectedCreatureId(creatures[0]?.id ?? selectedCreatureId);
-    setCreatureJsonMessage(`${creatures.length} creature${creatures.length === 1 ? '' : 's'} imported.`);
+    setCreatureEditorNotice(`${creatures.length} creature${creatures.length === 1 ? '' : 's'} imported.`);
   }
 
   function updateDraftCreature(update: Partial<Creature>) {
@@ -530,7 +536,7 @@ export function EncounterEditor({
     const action = normalizeAction(cloneAction(selectedAction));
     setActionLibrary((current) => upsertById(current, action));
     setSelectedLibraryActionId(action.id);
-    setPartLibraryMessage(`${action.name} saved to the action library.`);
+    setCreatureEditorNotice(`${action.name} saved to the action library.`);
   }
 
   function applyLibraryAction() {
@@ -541,7 +547,7 @@ export function EncounterEditor({
     const action = normalizeAction(cloneAction(selectedLibraryAction));
     setCreatureDraft((current) => ({ ...current, actions: upsertById(current.actions, action) }));
     setSelectedActionId(action.id);
-    setPartLibraryMessage(`${action.name} applied to ${creatureDraft.name}.`);
+    setCreatureEditorNotice(`${action.name} applied to ${creatureDraft.name}.`);
   }
 
   function deleteLibraryAction() {
@@ -550,7 +556,7 @@ export function EncounterEditor({
     }
 
     setActionLibrary((current) => current.filter((action) => action.id !== selectedLibraryAction.id));
-    setPartLibraryMessage(`${selectedLibraryAction.name} removed from the action library.`);
+    setCreatureEditorNotice(`${selectedLibraryAction.name} removed from the action library.`);
   }
 
   function addResource() {
@@ -599,7 +605,7 @@ export function EncounterEditor({
     const resource = normalizeResource(cloneJson(selectedResource));
     setResourceLibrary((current) => upsertById(current, resource));
     setSelectedLibraryResourceId(resource.id);
-    setPartLibraryMessage(`${resource.name} saved to the resource library.`);
+    setCreatureEditorNotice(`${resource.name} saved to the resource library.`);
   }
 
   function applyLibraryResource() {
@@ -610,7 +616,7 @@ export function EncounterEditor({
     const resource = normalizeResource(cloneJson(selectedLibraryResource));
     setCreatureDraft((current) => ({ ...current, resources: upsertById(current.resources ?? [], resource) }));
     setSelectedResourceId(resource.id);
-    setPartLibraryMessage(`${resource.name} applied to ${creatureDraft.name}.`);
+    setCreatureEditorNotice(`${resource.name} applied to ${creatureDraft.name}.`);
   }
 
   function deleteLibraryResource() {
@@ -619,14 +625,14 @@ export function EncounterEditor({
     }
 
     setResourceLibrary((current) => current.filter((resource) => resource.id !== selectedLibraryResource.id));
-    setPartLibraryMessage(`${selectedLibraryResource.name} removed from the resource library.`);
+    setCreatureEditorNotice(`${selectedLibraryResource.name} removed from the resource library.`);
   }
 
   function addCustomConditionTemplate() {
     const template = createBlankCustomConditionTemplate();
     setCustomConditionLibrary((current) => [template, ...current]);
     setSelectedCustomConditionId(template.id);
-    setCustomConditionMessage('Custom condition created.');
+    setCreatureEditorNotice('Custom condition created.');
   }
 
   function duplicateSelectedCustomCondition() {
@@ -636,7 +642,7 @@ export function EncounterEditor({
     const duplicate = duplicateCustomConditionTemplate(selectedConditionTemplate);
     setCustomConditionLibrary((current) => [duplicate, ...current]);
     setSelectedCustomConditionId(duplicate.id);
-    setCustomConditionMessage(`${selectedConditionTemplate.name} duplicated as an editable custom copy.`);
+    setCreatureEditorNotice(`${selectedConditionTemplate.name} duplicated as an editable custom copy.`);
   }
 
   function deleteSelectedCustomCondition() {
@@ -644,7 +650,7 @@ export function EncounterEditor({
       return;
     }
     setCustomConditionLibrary((current) => deleteCustomConditionTemplate(current, selectedCustomCondition.id));
-    setCustomConditionMessage(`${selectedCustomCondition.name} deleted.`);
+    setCreatureEditorNotice(`${selectedCustomCondition.name} deleted.`);
   }
 
   function updateSelectedCustomCondition(update: Partial<CustomConditionTemplate>) {
@@ -669,7 +675,7 @@ export function EncounterEditor({
     const normalized = normalizeCustomConditionTemplate(selectedCustomCondition);
     setCustomConditionLibrary((current) => upsertCustomConditionTemplate(current, normalized));
     setSelectedCustomConditionId(normalized.id);
-    setCustomConditionMessage(`${normalized.name} saved to the custom condition library.`);
+    setCreatureEditorNotice(`${normalized.name} saved to the custom condition library.`);
   }
 
   function exportSelectedCustomCondition() {
@@ -677,25 +683,25 @@ export function EncounterEditor({
       return;
     }
     setCustomConditionJson(JSON.stringify(selectedConditionTemplate, null, 2));
-    setCustomConditionMessage('Selected custom condition exported below.');
+    setCreatureEditorNotice('Selected custom condition exported below.');
   }
 
   function exportCustomConditionLibrary() {
     setCustomConditionJson(JSON.stringify({ customConditions: customConditionLibrary }, null, 2));
-    setCustomConditionMessage('Custom condition library exported below.');
+    setCreatureEditorNotice('Custom condition library exported below.');
   }
 
   function importCustomConditionJson() {
     const parsed = parseCustomConditionTemplates(customConditionJson);
     if (!parsed.ok) {
-      setCustomConditionMessage(parsed.error);
+      setCreatureEditorNotice(parsed.error);
       return;
     }
     setCustomConditionLibrary((current) =>
       parsed.templates.reduce((next, template) => upsertCustomConditionTemplate(next, template), current)
     );
     setSelectedCustomConditionId(parsed.templates[0]?.id ?? selectedCustomConditionId);
-    setCustomConditionMessage(`${parsed.templates.length} custom condition${parsed.templates.length === 1 ? '' : 's'} imported.`);
+    setCreatureEditorNotice(`${parsed.templates.length} custom condition${parsed.templates.length === 1 ? '' : 's'} imported.`);
   }
 
   function addFeature() {
@@ -751,7 +757,7 @@ export function EncounterEditor({
     const feature = normalizeFeature(cloneJson(selectedFeature));
     setFeatureLibrary((current) => upsertById(current, feature));
     setSelectedLibraryFeatureId(feature.id);
-    setPartLibraryMessage(`${feature.name} saved to the feature library.`);
+    setCreatureEditorNotice(`${feature.name} saved to the feature library.`);
   }
 
   function applyLibraryFeature() {
@@ -762,7 +768,7 @@ export function EncounterEditor({
     const feature = normalizeFeature(cloneJson(selectedLibraryFeature));
     setCreatureDraft((current) => ({ ...current, features: upsertById(current.features ?? [], feature) }));
     setSelectedFeatureId(feature.id);
-    setPartLibraryMessage(`${feature.name} applied to ${creatureDraft.name}.`);
+    setCreatureEditorNotice(`${feature.name} applied to ${creatureDraft.name}.`);
   }
 
   function deleteLibraryFeature() {
@@ -771,7 +777,7 @@ export function EncounterEditor({
     }
 
     setFeatureLibrary((current) => current.filter((feature) => feature.id !== selectedLibraryFeature.id));
-    setPartLibraryMessage(`${selectedLibraryFeature.name} removed from the feature library.`);
+    setCreatureEditorNotice(`${selectedLibraryFeature.name} removed from the feature library.`);
   }
 
   function clearBuilder() {
@@ -947,19 +953,13 @@ export function EncounterEditor({
 
   return (
     <section className="editor-shell">
-      <nav className="editor-mode-tabs" aria-label="Editor modes">
-        <button className={editorMode === 'creatures' ? 'selected-action' : ''} onClick={() => setEditorMode('creatures')}>
-          Creature Library / Editor
-        </button>
-        <button className={editorMode === 'encounters' ? 'selected-action' : ''} onClick={() => setEditorMode('encounters')}>
-          Encounter Builder / Editor
-        </button>
-      </nav>
-
       {editorMode === 'creatures' ? (
       <section className="panel editor-library-panel">
         <header className="editor-panel-header">
-          <h2>Creature Library</h2>
+          <div className="editor-panel-title">
+            <h2>Creature Library</h2>
+            <span>{creatureLibrary.length} creature{creatureLibrary.length === 1 ? '' : 's'}</span>
+          </div>
           <div className="editor-button-row">
             <button onClick={createFromBlank}>New Blank</button>
             <button onClick={duplicateSelectedCreature}>Duplicate</button>
@@ -968,38 +968,65 @@ export function EncounterEditor({
           </div>
         </header>
 
-        <label className="editor-search">
-          Search creatures
-          <input
-            value={creatureSearch}
-            placeholder="Name, team, action, tag, or stat"
-            onChange={(event) => setCreatureSearch(event.target.value)}
-          />
-        </label>
-
         <div className="editor-list-form">
-          <div className="library-list">
-            {filteredCreatureLibrary.map((creature) => (
-              <button
-                className={['creature-summary-card', creature.id === selectedCreatureId ? 'selected-action' : ''].join(' ')}
-                key={creature.id}
-                onClick={() => setSelectedCreatureId(creature.id)}
-              >
-                <strong>{creature.name}</strong>
-                <span>{getTeamLabel({ teams: teamDefinitions }, creature.team)}</span>
-                <small>HP {creature.hp}/{creature.maxHp}</small>
-                <small>AC {creature.ac}</small>
-                <small>Speed {creature.speed}</small>
-                <small>{creature.actions.length} action(s)</small>
-              </button>
-            ))}
-            {filteredCreatureLibrary.length === 0 && <span className="empty-list">No creatures match that search.</span>}
-          </div>
+          <aside className="creature-library-rail">
+            <label className="editor-search creature-library-search">
+              <span>Find a creature</span>
+              <input
+                value={creatureSearch}
+                placeholder="Name, team, action, tag, or stat"
+                onChange={(event) => setCreatureSearch(event.target.value)}
+              />
+            </label>
+            <div className="creature-library-results">
+              <strong>Library</strong>
+              <span>{filteredCreatureLibrary.length} shown</span>
+            </div>
+            <div className="library-list creature-library-list">
+              {filteredCreatureLibrary.map((creature) => (
+                <button
+                  aria-current={creature.id === selectedCreatureId ? 'true' : undefined}
+                  className={['creature-summary-card', creature.id === selectedCreatureId ? 'selected-action' : ''].join(' ')}
+                  key={creature.id}
+                  onClick={() => setSelectedCreatureId(creature.id)}
+                >
+                  <strong>{creature.name}</strong>
+                  <span>{getTeamLabel({ teams: teamDefinitions }, creature.team)}</span>
+                  <small>HP {creature.hp}/{creature.maxHp}</small>
+                  <small>AC {creature.ac}</small>
+                  <small>Speed {creature.speed}</small>
+                  <small>{creature.actions.length} action(s)</small>
+                </button>
+              ))}
+              {filteredCreatureLibrary.length === 0 && <span className="empty-list">No creatures match that search.</span>}
+            </div>
+          </aside>
 
-          <div className="creature-editor">
-            {partLibraryMessage && <p className="editor-message">{partLibraryMessage}</p>}
+          <main className="creature-editor">
+            <header className="creature-editing-header">
+              <div className="creature-editing-title">
+                <span className="editor-eyebrow">Currently editing</span>
+                <h2>{creatureDraft.name || 'Unnamed Creature'}</h2>
+                <span className="creature-editing-team">
+                  <i style={{ backgroundColor: getTeamColor({ teams: teamDefinitions }, creatureDraft.team) }} />
+                  {getTeamLabel({ teams: teamDefinitions }, creatureDraft.team)}
+                </span>
+              </div>
+              <div className="creature-editing-stats" aria-label="Creature summary">
+                <span><strong>HP</strong>{creatureDraft.hp}/{creatureDraft.maxHp}</span>
+                <span><strong>AC</strong>{creatureDraft.ac}</span>
+                <span><strong>Speed</strong>{creatureDraft.speed}</span>
+                <span><strong>Actions</strong>{creatureDraft.actions.length}</span>
+              </div>
+              <button className="creature-sticky-save" onClick={saveCreatureDraft}>Save Creature</button>
+              {creatureEditorNotice && (
+                <p className="creature-sticky-notice" role="status">{creatureEditorNotice}</p>
+              )}
+            </header>
 
-            <details className="editor-section editor-subsection" open>
+            <div className="creature-editor-grid">
+
+            <details className="editor-section editor-subsection">
               <summary>Basic Stats</summary>
               <div className="form-grid">
                 <label>
@@ -1012,7 +1039,6 @@ export function EncounterEditor({
                   value={creatureDraft.team}
                   onChange={(team) => updateDraftCreature({ team })}
                 />
-                <button type="button" onClick={() => addTeam('creature')}>Add Team</button>
                 <NumberInput label="HP" value={creatureDraft.hp} onChange={(value) => updateDraftCreature({ hp: value })} />
                 <NumberInput label="Max HP" value={creatureDraft.maxHp} onChange={(value) => updateDraftCreature({ maxHp: value })} />
                 <NumberInput label="AC" value={creatureDraft.ac} onChange={(value) => updateDraftCreature({ ac: value })} />
@@ -1141,7 +1167,7 @@ export function EncounterEditor({
               </div>
             </details>
 
-            <details className="editor-section editor-subsection" open>
+            <details className="editor-section editor-subsection editor-card-span-2">
               <summary>Actions</summary>
               <div className="editor-button-row">
                 <button onClick={addAction}>Add Action</button>
@@ -1168,10 +1194,13 @@ export function EncounterEditor({
                   <details
                     className={['action-edit-card', action.id === selectedAction?.id ? 'selected-action' : ''].join(' ')}
                     key={action.id}
-                    open={action.id === selectedAction?.id}
+                    open={action.id === expandedActionId}
                     onToggle={(event) => {
                       if (event.currentTarget.open) {
+                        setExpandedActionId(action.id);
                         setSelectedActionId(action.id);
+                      } else if (expandedActionId === action.id) {
+                        setExpandedActionId(undefined);
                       }
                     }}
                   >
@@ -1198,7 +1227,7 @@ export function EncounterEditor({
               </div>
             </details>
 
-            <details className="editor-section editor-subsection">
+            <details className="editor-section editor-subsection editor-card-span-2">
               <summary>Features / Triggers / Effects</summary>
               <div className="editor-button-row">
                 <button onClick={addFeature}>Add Feature</button>
@@ -1248,7 +1277,7 @@ export function EncounterEditor({
               </div>
             </details>
 
-            <details className="editor-section editor-subsection">
+            <details className="editor-section editor-subsection editor-card-span-2">
               <summary>Resources / Limited Uses</summary>
               <div className="editor-button-row">
                 <button onClick={addResource}>Add Resource</button>
@@ -1312,7 +1341,7 @@ export function EncounterEditor({
               </div>
             </details>
 
-            <details className="editor-section editor-subsection">
+            <details className="editor-section editor-subsection editor-card-span-2">
               <summary>CR / Balance Helper</summary>
               <p className="editor-muted">Estimated from 5e-style monster creation math. This does not affect saved creature data or combat behavior.</p>
               <div className="form-grid">
@@ -1382,7 +1411,7 @@ export function EncounterEditor({
               </details>
             </details>
 
-            <details className="editor-section editor-subsection">
+            <details className="editor-section editor-subsection editor-card-span-2">
               <summary>Custom Conditions</summary>
               <div className="condition-builder-help">
                 <strong>How custom conditions work</strong>
@@ -1412,42 +1441,17 @@ export function EncounterEditor({
                   Delete
                 </button>
               </div>
-              <label className="editor-search">
-                Search custom conditions
-                <input
-                  value={customConditionSearch}
-                  placeholder="Name, tag, rules text, or hook"
-                  onChange={(event) => setCustomConditionSearch(event.target.value)}
+              <div className="condition-library-picker">
+                <SearchableSelect
+                  label="Condition library"
+                  items={conditionPickerItems}
+                  value={selectedCustomConditionId}
+                  placeholder="No conditions available"
+                  getDescription={(item) => item.description}
+                  onChange={setSelectedCustomConditionId}
                 />
-              </label>
-              <div className="condition-template-layout">
-                <div className="library-list compact-list">
-                  <span className="library-list-heading">Reference and examples</span>
-                  {filteredReferenceConditions.map((template) => (
-                    <button
-                      className={getReferenceConditionSelectionId(template) === selectedCustomConditionId ? 'selected-action' : ''}
-                      key={`reference-${template.id}`}
-                      onClick={() => setSelectedCustomConditionId(getReferenceConditionSelectionId(template))}
-                    >
-                      <strong>{template.name}</strong>
-                      <span>{template.tags.join(', ') || 'reference'}</span>
-                      <small>{hasMechanicalCustomConditionEffects(template) ? `${template.rules.length} hook(s)` : 'rules text only'}</small>
-                    </button>
-                  ))}
-                  <span className="library-list-heading">Your custom conditions</span>
-                  {filteredCustomConditions.map((template) => (
-                    <button
-                      className={template.id === selectedCustomConditionId ? 'selected-action' : ''}
-                      key={template.id}
-                      onClick={() => setSelectedCustomConditionId(template.id)}
-                    >
-                      <strong>{template.name}</strong>
-                      <span>{template.tags.join(', ') || 'no tags'}</span>
-                      <small>{hasMechanicalCustomConditionEffects(template) ? `${template.rules.length} hook(s)` : 'rules text only'}</small>
-                    </button>
-                  ))}
-                  {filteredCustomConditions.length === 0 && <span className="empty-list">No custom conditions match that search.</span>}
-                </div>
+              </div>
+              <div className="condition-template-layout condition-template-layout-single">
                 {selectedConditionTemplate ? (
                   <div className="condition-template-form">
                     {selectedConditionIsReference && (
@@ -1549,22 +1553,21 @@ export function EncounterEditor({
                   <button onClick={exportCustomConditionLibrary}>Export Library</button>
                   <button onClick={importCustomConditionJson}>Import JSON</button>
                 </div>
-                {customConditionMessage && <p className="editor-message">{customConditionMessage}</p>}
                 <textarea value={customConditionJson} onChange={(event) => setCustomConditionJson(event.target.value)} spellCheck={false} />
               </details>
             </details>
 
-            <section className="editor-section">
+            <section className="editor-section editor-card-span-2">
               <h3>Creature JSON</h3>
               <div className="editor-button-row">
                 <button onClick={exportSelectedCreature}>Export Selected</button>
                 <button onClick={exportCreatureLibrary}>Export Library</button>
                 <button onClick={importCreatureJson}>Import JSON</button>
               </div>
-              {creatureJsonMessage && <p className="editor-message">{creatureJsonMessage}</p>}
               <textarea value={creatureJson} onChange={(event) => setCreatureJson(event.target.value)} spellCheck={false} />
             </section>
-          </div>
+            </div>
+          </main>
         </div>
       </section>
       ) : (
@@ -1640,16 +1643,14 @@ export function EncounterEditor({
                   <NumberInput label="Tile Z" value={builderTileHeight} onChange={setBuilderTileHeight} />
                 </div>
               )}
-              <label>
-                Creature to place
-                <select value={selectedTemplateId} onChange={(event) => setSelectedTemplateId(event.target.value)}>
-                  {creatureLibrary.map((creature) => (
-                    <option key={creature.id} value={creature.id}>
-                      {creature.name}
-                    </option>
-                  ))}
-                </select>
-              </label>
+              <SearchableSelect
+                label="Creature to place"
+                items={creatureLibrary}
+                value={selectedTemplateId}
+                placeholder="No creatures available"
+                getDescription={(creature) => `${getTeamLabel({ teams: teamDefinitions }, creature.team)} - HP ${creature.hp}/${creature.maxHp} - AC ${creature.ac}`}
+                onChange={setSelectedTemplateId}
+              />
             </section>
 
             <TeamEditor
@@ -1771,6 +1772,100 @@ export function EncounterEditor({
   );
 }
 
+function SearchableSelect<T extends { id: string; name: string }>({
+  label,
+  items,
+  value,
+  placeholder = 'Select an entry',
+  emptyOptionLabel,
+  disabled = false,
+  getDescription,
+  onChange
+}: {
+  label: string;
+  items: T[];
+  value: string;
+  placeholder?: string;
+  emptyOptionLabel?: string;
+  disabled?: boolean;
+  getDescription?: (item: T) => string;
+  onChange: (id: string) => void;
+}) {
+  const [query, setQuery] = useState('');
+  const detailsRef = useRef<HTMLDetailsElement>(null);
+  const selected = items.find((item) => item.id === value);
+  const normalizedQuery = query.trim().toLowerCase();
+  const filteredItems = items.filter((item) => {
+    const description = getDescription?.(item) ?? '';
+    return !normalizedQuery || `${item.name} ${item.id} ${description} ${JSON.stringify(item)}`.toLowerCase().includes(normalizedQuery);
+  });
+
+  function choose(id: string) {
+    onChange(id);
+    setQuery('');
+    if (detailsRef.current) {
+      detailsRef.current.open = false;
+    }
+  }
+
+  return (
+    <div className="searchable-select-field">
+      <span className="searchable-select-label">{label}</span>
+      <details
+        className="searchable-select"
+        ref={detailsRef}
+        onToggle={(event) => {
+          if (!event.currentTarget.open) {
+            setQuery('');
+          }
+        }}
+      >
+        <summary aria-disabled={disabled} onClick={(event) => disabled && event.preventDefault()}>
+          {selected?.name ?? emptyOptionLabel ?? placeholder}
+        </summary>
+        <div className="searchable-select-popover">
+          <input
+            aria-label={`Search ${label.toLowerCase()}`}
+            placeholder={`Search ${label.toLowerCase()}...`}
+            type="search"
+            value={query}
+            onChange={(event) => setQuery(event.target.value)}
+          />
+          <div className="searchable-select-options" role="listbox" aria-label={label}>
+            {emptyOptionLabel && (!normalizedQuery || emptyOptionLabel.toLowerCase().includes(normalizedQuery)) && (
+              <button
+                aria-selected={!value}
+                className={!value ? 'selected-action' : ''}
+                role="option"
+                type="button"
+                onClick={() => choose('')}
+              >
+                <strong>{emptyOptionLabel}</strong>
+              </button>
+            )}
+            {filteredItems.map((item) => (
+              <button
+                aria-selected={item.id === value}
+                className={item.id === value ? 'selected-action' : ''}
+                key={item.id}
+                role="option"
+                type="button"
+                onClick={() => choose(item.id)}
+              >
+                <strong>{item.name}</strong>
+                {getDescription && <small>{getDescription(item)}</small>}
+              </button>
+            ))}
+            {filteredItems.length === 0 && !(emptyOptionLabel && (!normalizedQuery || emptyOptionLabel.toLowerCase().includes(normalizedQuery))) && (
+              <span className="empty-list">No matching entries.</span>
+            )}
+          </div>
+        </div>
+      </details>
+    </div>
+  );
+}
+
 function PartLibraryControls<T extends { id: string; name: string }>({
   title,
   items,
@@ -1802,17 +1897,14 @@ function PartLibraryControls<T extends { id: string; name: string }>({
     <details className="part-library-tools">
       <summary>{title}</summary>
       <div className="part-library-grid">
-        <label>
-          Saved Entry
-          <select value={selected?.id ?? ''} onChange={(event) => onSelect(event.target.value)}>
-            <option value="">No saved entries</option>
-            {items.map((item) => (
-              <option key={item.id} value={item.id}>
-                {item.name}
-              </option>
-            ))}
-          </select>
-        </label>
+        <SearchableSelect
+          label="Saved entry"
+          items={items}
+          value={selected?.id ?? ''}
+          placeholder="No saved entries"
+          getDescription={getSummary}
+          onChange={onSelect}
+        />
         <div className="editor-button-row">
           <button onClick={onSave} disabled={saveDisabled}>
             Save Selected
@@ -1868,7 +1960,7 @@ function ActionEditor({
 
   return (
     <div className="action-form">
-      <details className="editor-subsection" open>
+      <details className="editor-subsection">
         <summary>Identity</summary>
         <div className="form-grid">
           <label>
@@ -1919,7 +2011,7 @@ function ActionEditor({
         </div>
       </details>
 
-      <details className="editor-subsection" open>
+      <details className="editor-subsection">
         <summary>Attack and Damage</summary>
         <div className="form-grid">
           <NumberInput label="Range Cells" value={action.range} min={0} onChange={(value) => onChange({ range: value })} />
@@ -2009,7 +2101,7 @@ function ActionEditor({
         </div>
       </details>
 
-      <details className="editor-subsection" open>
+      <details className="editor-subsection">
         <summary>Resource Cost</summary>
         <div className="form-grid">
           <label>
@@ -2124,7 +2216,7 @@ function FeatureEditor({
 }) {
   return (
     <div className="feature-form">
-      <details className="editor-subsection" open>
+      <details className="editor-subsection">
         <summary>Feature Details</summary>
         <div className="form-grid">
           <label>
@@ -2201,7 +2293,7 @@ function RuleListEditor({
   }
 
   return (
-    <details className="editor-subsection rule-section" open>
+    <details className="editor-subsection rule-section">
       <summary>{title}</summary>
       <div className="editor-button-row">
         <button onClick={addRule} disabled={readOnly}>Add Hook</button>
@@ -2491,7 +2583,7 @@ function RulePartList({
 }) {
   const hasChildren = Array.isArray(children) ? children.length > 0 : Boolean(children);
   return (
-    <div className="rule-part-list">
+    <div className={`rule-part-list rule-part-${title.toLowerCase()}`}>
       <div className="rule-part-header">
         <strong>{title}</strong>
         <button onClick={onAdd} disabled={readOnly}>{addLabel}</button>
@@ -2764,26 +2856,20 @@ function renderEffectFields(
     return (
       <>
         {customConditions.length > 0 && (
-          <label>
-            Custom Template
-            <select
-              disabled={readOnly}
-              value={customConditions.some((template) => template.id === effect.conditionId && effect.name === template.name) ? effect.conditionId : ''}
-              onChange={(event) => {
-                const template = customConditions.find((candidate) => candidate.id === event.target.value);
-                if (template) {
-                  onChange(createApplyConditionEffectFromTemplate(template, effect));
-                }
-              }}
-            >
-              <option value="">Manual condition</option>
-              {customConditions.map((template) => (
-                <option key={template.id} value={template.id}>
-                  {template.name}
-                </option>
-              ))}
-            </select>
-          </label>
+          <SearchableSelect
+            disabled={readOnly}
+            emptyOptionLabel="Manual condition"
+            label="Custom template"
+            items={customConditions}
+            value={customConditions.some((template) => template.id === effect.conditionId && effect.name === template.name) ? effect.conditionId : ''}
+            getDescription={(template) => `${template.tags.join(', ') || 'no tags'} - ${template.rules.length} hook(s)`}
+            onChange={(id) => {
+              const template = customConditions.find((candidate) => candidate.id === id);
+              if (template) {
+                onChange(createApplyConditionEffectFromTemplate(template, effect));
+              }
+            }}
+          />
         )}
         <label>
           Condition ID
@@ -3023,7 +3109,7 @@ function TeamEditor({
   onUpdateTeam: (teamId: Team, update: Partial<Pick<TeamDefinition, 'name' | 'color'>>) => void;
 }) {
   return (
-    <details className="editor-section editor-subsection team-editor-section" open>
+    <details className="editor-section editor-subsection team-editor-section">
       <summary>Teams</summary>
       <div className="team-editor-list">
         {teams.map((team) => (

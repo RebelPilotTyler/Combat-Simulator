@@ -12,7 +12,7 @@ import {
   type SetStateAction,
   type WheelEvent
 } from 'react';
-import { EncounterEditor } from './EncounterEditor';
+import { EncounterEditor, type EditorMode } from './EncounterEditor';
 import { createSampleEncounter } from './data/sampleEncounter';
 import {
   BASIC_ACTIONS,
@@ -161,6 +161,7 @@ export function App() {
   const [uiSettings, setUiSettings] = useState<UiSettings>(loadUiSettings);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [activeView, setActiveView] = useState<AppView>('combat');
+  const [editorMode, setEditorMode] = useState<EditorMode>('creatures');
   const [combat, setCombat] = useState<CombatState>(() => createSampleEncounter());
   const [selectedCreatureId, setSelectedCreatureId] = useState<string | undefined>(combat.creatures[0]?.id);
   const [selectedActionId, setSelectedActionId] = useState<string | undefined>();
@@ -186,6 +187,7 @@ export function App() {
   const [hudPanelOffsets, setHudPanelOffsets] = useState<HudPanelOffset>({});
   const [workbenchTab, setWorkbenchTab] = useState<WorkbenchTab>('map');
   const [logExpanded, setLogExpanded] = useState(false);
+  const [logCopyStatus, setLogCopyStatus] = useState<'copied' | 'error' | undefined>();
   const [cameraYaw, setCameraYaw] = useState(-35);
   const [cameraPitch, setCameraPitch] = useState(58);
   const [cameraZoom, setCameraZoom] = useState(1);
@@ -962,6 +964,50 @@ export function App() {
     URL.revokeObjectURL(url);
   }
 
+  async function copyFullCombatLog() {
+    if (combat.log.length === 0) {
+      return;
+    }
+
+    const fullLog = combat.log
+      .map((entry, index) => {
+        const turnNumber = entry.turn + 1;
+        return `${index + 1}. [${entry.type.toUpperCase()}] Round ${entry.round}, Turn ${turnNumber} - ${entry.message}`;
+      })
+      .join('\n');
+
+    let fallbackInput: HTMLTextAreaElement | undefined;
+    try {
+      let copied = false;
+      if (navigator.clipboard?.writeText) {
+        try {
+          await navigator.clipboard.writeText(fullLog);
+          copied = true;
+        } catch {
+          // Some browsers expose the Clipboard API but reject it outside a secure context.
+        }
+      }
+      if (!copied) {
+        fallbackInput = document.createElement('textarea');
+        fallbackInput.value = fullLog;
+        fallbackInput.setAttribute('readonly', '');
+        fallbackInput.style.left = '-9999px';
+        fallbackInput.style.position = 'fixed';
+        document.body.appendChild(fallbackInput);
+        fallbackInput.select();
+        if (!document.execCommand('copy')) {
+          throw new Error('Clipboard copy was rejected.');
+        }
+      }
+      setLogCopyStatus('copied');
+    } catch {
+      setLogCopyStatus('error');
+    } finally {
+      fallbackInput?.remove();
+      window.setTimeout(() => setLogCopyStatus(undefined), 2200);
+    }
+  }
+
   async function uploadJson(file: File | undefined) {
     if (!file) {
       return;
@@ -1147,8 +1193,23 @@ export function App() {
           <button className={activeView === 'combat' ? 'selected-action' : ''} onClick={() => setActiveView('combat')}>
             Combat
           </button>
-          <button className={activeView === 'editor' ? 'selected-action' : ''} onClick={() => setActiveView('editor')}>
-            Editor
+          <button
+            className={activeView === 'editor' && editorMode === 'creatures' ? 'selected-action' : ''}
+            onClick={() => {
+              setEditorMode('creatures');
+              setActiveView('editor');
+            }}
+          >
+            Creature Editor
+          </button>
+          <button
+            className={activeView === 'editor' && editorMode === 'encounters' ? 'selected-action' : ''}
+            onClick={() => {
+              setEditorMode('encounters');
+              setActiveView('editor');
+            }}
+          >
+            Encounter Editor
           </button>
           <button onClick={() => setCombat((current) => rollInitiative(current))}>Roll Initiative</button>
           <button onClick={() => setCombat((current) => endTurn(current))}>End Turn / Next Turn</button>
@@ -1759,9 +1820,14 @@ export function App() {
           {renderHudPanelBar('log', 'Log')}
           <div className="panel-heading-row">
             <h2>Combat Log</h2>
-            <button onClick={() => setLogExpanded((current) => !current)}>
-              {logExpanded ? 'Show Recent' : 'Full History'}
-            </button>
+            <div className="combat-log-heading-actions">
+              <button disabled={combat.log.length === 0} onClick={copyFullCombatLog}>
+                {logCopyStatus === 'copied' ? 'Copied!' : logCopyStatus === 'error' ? 'Copy Failed' : 'Copy Full Log'}
+              </button>
+              <button onClick={() => setLogExpanded((current) => !current)}>
+                {logExpanded ? 'Show Recent' : 'Full History'}
+              </button>
+            </div>
           </div>
           <ol className="combat-log" ref={logRef} tabIndex={0} aria-label="Combat log">
             {visibleLogEntries.map((entry) => (
@@ -1818,7 +1884,7 @@ export function App() {
       </>
       ) : (
         // Editor view.
-        <EncounterEditor currentCombat={combat} onLoadEncounter={loadEncounterFromEditor} />
+        <EncounterEditor currentCombat={combat} editorMode={editorMode} onLoadEncounter={loadEncounterFromEditor} />
       )}
       {/* App overlays: keyboard help and settings */}
       {showHelp && <KeyboardHelpOverlay onClose={() => setShowHelp(false)} />}
