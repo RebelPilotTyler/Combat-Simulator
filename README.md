@@ -38,6 +38,18 @@ Build for production:
 npm run build
 ```
 
+## Development profiling
+
+The Vite development build records React render timings, engine timings, and work counters without changing combat state. In the browser console:
+
+```js
+window.__DND_COMBAT_PERF__.reset()
+// Reproduce the interaction you want to measure.
+window.__DND_COMBAT_PERF__.report()
+```
+
+`snapshot()` returns the same data without logging it, while `disable()` and `enable()` pause and resume collection. Browser Performance recordings also include matching `dnd-combat:*` User Timing entries. Development React Strict Mode intentionally repeats some work, so use production builds for final before/after comparisons.
+
 On Windows PowerShell, if script execution blocks `npm`, use `npm.cmd` instead:
 
 ```bash

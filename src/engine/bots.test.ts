@@ -11,6 +11,11 @@ import {
 } from './combat';
 import { parseCombatStateJson, serializeCombatState } from './serialization';
 import type { ActionDefinition, BotProfile, Creature } from './types';
+import {
+  configurePerformanceProfiling,
+  getPerformanceSnapshot,
+  resetPerformanceMetrics
+} from '../performance/profiling';
 
 function sequence(values: number[]) {
   let index = 0;
@@ -306,6 +311,96 @@ describe('bot turns', () => {
     expect(preview.notes.some((note) => note.includes('Profile: Aggressive Melee'))).toBe(true);
     expect(findCreature(state, 'bot').position).toEqual({ x: 0, y: 0, z: 0 });
     expect(findCreature(state, 'target').hp).toBe(20);
+  });
+
+  it('reuses analysis only within one preview while preserving the exact intent snapshot', () => {
+    const state = rollInitiative(
+      createCombatState([
+        bot('aggressiveMelee', {
+          actions: [meleeStrike, offhandStrike],
+          position: { x: 0, y: 0 },
+          speed: 15
+        }),
+        creature({ id: 'target', name: 'Target', team: 'players', hp: 30, position: { x: 3, y: 0 } }),
+        creature({ id: 'other', name: 'Other', team: 'players', hp: 18, position: { x: 4, y: 2 } })
+      ], 6, 4),
+      sequence([0.9, 0.2, 0.1])
+    );
+
+    configurePerformanceProfiling(true);
+    resetPerformanceMetrics();
+    try {
+      const preview = getBotTurnPreview(state);
+      const counters = getPerformanceSnapshot().counters;
+
+      expect({
+        order: preview.order,
+        summary: preview.summary,
+        movement: preview.movement,
+        action: preview.action && {
+          actionId: preview.action.actionId,
+          targetIds: preview.action.targetIds,
+          score: preview.action.score
+        },
+        bonusAction: preview.bonusAction && {
+          actionId: preview.bonusAction.actionId,
+          targetIds: preview.bonusAction.targetIds,
+          score: preview.bonusAction.score
+        },
+        willDodgeOrWait: preview.willDodgeOrWait
+      }).toEqual({
+        order: 'move-then-action',
+        summary: 'Bot plans to move 10 ft, then use Strike on Target.',
+        movement: {
+          from: { x: 0, y: 0, z: 0 },
+          to: { x: 2, y: 0, z: 0 },
+          costFeet: 10,
+          steps: 2
+        },
+        action: {
+          actionId: 'strike',
+          targetIds: ['target'],
+          score: 6.4
+        },
+        bonusAction: {
+          actionId: 'offhand',
+          targetIds: ['target'],
+          score: 4.9
+        },
+        willDodgeOrWait: false
+      });
+      expect(counters['engine.bot.analysis-cache-hits']).toBeGreaterThan(0);
+      expect(counters['engine.bot.analysis-cache-action-decisions-hits']).toBeGreaterThan(0);
+      expect(counters['engine.bot.analysis-cache-living-enemies-hits']).toBeGreaterThan(0);
+    } finally {
+      configurePerformanceProfiling(false);
+      resetPerformanceMetrics();
+    }
+  });
+
+  it('does not reuse bot analysis across preview invocations', () => {
+    const state = rollInitiative(
+      createCombatState([
+        bot('rangedAttacker', { actions: [bowShot], position: { x: 0, y: 0 } }),
+        creature({ id: 'west', name: 'West', team: 'players', ac: 22, position: { x: 3, y: 0 } }),
+        creature({ id: 'south', name: 'South', team: 'players', ac: 10, position: { x: 0, y: 3 } })
+      ], 5, 5),
+      sequence([0.9, 0.1, 0.2])
+    );
+
+    expect(getBotTurnPreview(state).action?.targetIds).toEqual(['south']);
+
+    const changed = {
+      ...state,
+      creatures: state.creatures.map((candidate) =>
+        candidate.id === 'west'
+          ? { ...candidate, ac: 10 }
+          : candidate.id === 'south'
+            ? { ...candidate, ac: 22 }
+            : candidate
+      )
+    };
+    expect(getBotTurnPreview(changed).action?.targetIds).toEqual(['west']);
   });
 
   it('uses hit chance scoring to prefer a target it can hit more reliably', () => {

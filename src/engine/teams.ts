@@ -23,6 +23,19 @@ const LEGACY_TEAM_IDS: Record<string, TeamId> = {
   neutral: 'neutral'
 };
 
+export interface TeamLookup {
+  teams: CombatState['teams'];
+  byId: Map<TeamId, TeamDefinition>;
+}
+
+export function createTeamLookup(state: Pick<CombatState, 'teams'>): TeamLookup {
+  const definitions = normalizeTeamDefinitions(state.teams);
+  return {
+    teams: state.teams,
+    byId: new Map(definitions.map((team) => [team.id, team]))
+  };
+}
+
 export function normalizeTeamId(value: unknown): TeamId {
   if (typeof value !== 'string') {
     return 'neutral';
@@ -85,30 +98,34 @@ export function createNextTeamDefinition(definitions: TeamDefinition[]): TeamDef
   };
 }
 
-export function getTeamDefinition(state: Pick<CombatState, 'teams'>, teamId: TeamId): TeamDefinition {
+export function getTeamDefinition(state: Pick<CombatState, 'teams'>, teamId: TeamId, lookup?: TeamLookup): TeamDefinition {
   const id = normalizeTeamId(teamId);
-  return normalizeTeamDefinitions(state.teams).find((team) => team.id === id) ?? {
+  const definition = lookup?.teams === state.teams
+    ? lookup.byId.get(id)
+    : normalizeTeamDefinitions(state.teams).find((team) => team.id === id);
+  return definition ?? {
     id,
     name: formatTeamName(id),
     color: getTeamColorForIndex(teamNumberIndex(id))
   };
 }
 
-export function getTeamLabel(state: Pick<CombatState, 'teams'>, teamId: TeamId): string {
-  return getTeamDefinition(state, teamId).name;
+export function getTeamLabel(state: Pick<CombatState, 'teams'>, teamId: TeamId, lookup?: TeamLookup): string {
+  return getTeamDefinition(state, teamId, lookup).name;
 }
 
-export function getTeamColor(state: Pick<CombatState, 'teams'>, teamId: TeamId): string {
-  return getTeamDefinition(state, teamId).color;
+export function getTeamColor(state: Pick<CombatState, 'teams'>, teamId: TeamId, lookup?: TeamLookup): string {
+  return getTeamDefinition(state, teamId, lookup).color;
 }
 
 export function areAllies(
   creatureA: Pick<Creature, 'team'>,
   creatureB: Pick<Creature, 'team'>,
-  state: Pick<CombatState, 'teams'>
+  state: Pick<CombatState, 'teams'>,
+  lookup?: TeamLookup
 ): boolean {
-  const teamA = getTeamDefinition(state, creatureA.team);
-  const teamB = getTeamDefinition(state, creatureB.team);
+  const teamA = getTeamDefinition(state, creatureA.team, lookup);
+  const teamB = getTeamDefinition(state, creatureB.team, lookup);
   const relationship = getExplicitRelationship(teamA, teamB);
   return relationship ? relationship === 'allied' : teamA.id === teamB.id;
 }
@@ -116,10 +133,11 @@ export function areAllies(
 export function areHostile(
   creatureA: Pick<Creature, 'team'>,
   creatureB: Pick<Creature, 'team'>,
-  state: Pick<CombatState, 'teams'>
+  state: Pick<CombatState, 'teams'>,
+  lookup?: TeamLookup
 ): boolean {
-  const teamA = getTeamDefinition(state, creatureA.team);
-  const teamB = getTeamDefinition(state, creatureB.team);
+  const teamA = getTeamDefinition(state, creatureA.team, lookup);
+  const teamB = getTeamDefinition(state, creatureB.team, lookup);
   const relationship = getExplicitRelationship(teamA, teamB);
   if (relationship) {
     return relationship === 'hostile';

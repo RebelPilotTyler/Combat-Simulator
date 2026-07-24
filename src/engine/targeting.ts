@@ -1,7 +1,9 @@
 import type { ActionDefinition, ActionTargetMode, CombatState, Creature, GridPosition } from './types';
 import { canCreatureTakeReaction, hasCondition } from './conditions';
-import { getElevation, getTileHeight, isBlocked, samePosition } from './shapes';
+import { getElevation, getTileHeight, isBlocked, position3DKey, samePosition, type GridLookup } from './shapes';
 import { areHostile } from './teams';
+import { measurePerformance } from '../performance/profiling';
+import { isCombatQueryContextCurrent, type CombatQueryContext } from './queryContext';
 
 export function getDistanceInSquares(a: GridPosition, b: GridPosition): number {
   return Math.max(Math.abs(a.x - b.x), Math.abs(a.y - b.y), Math.abs(getElevation(a) - getElevation(b)));
@@ -67,15 +69,20 @@ export function isWithinReach(attacker: Creature, target: Creature, targetPositi
   return getDistanceFeet(attacker.position, targetPosition) <= getMeleeReach(attacker);
 }
 
-export function getHostileCreaturesWithinReach(state: CombatState, creature: Creature): Creature[] {
+export function getHostileCreaturesWithinReach(
+  state: CombatState,
+  creature: Creature,
+  query?: CombatQueryContext
+): Creature[] {
+  const context = isCombatQueryContextCurrent(query, state) ? query : undefined;
   return state.creatures.filter(
     (candidate) =>
       candidate.id !== creature.id &&
-      areHostile(candidate, creature, state) &&
-      !hasCondition(candidate, 'incapacitated') &&
-      !hasCondition(candidate, 'stunned') &&
-      !hasCondition(candidate, 'unconscious') &&
-      !hasCondition(candidate, 'defeated') &&
+      areHostile(candidate, creature, state, context?.teams) &&
+      !hasCondition(candidate, 'incapacitated', context?.conditions) &&
+      !hasCondition(candidate, 'stunned', context?.conditions) &&
+      !hasCondition(candidate, 'unconscious', context?.conditions) &&
+      !hasCondition(candidate, 'defeated', context?.conditions) &&
       candidate.hp > 0 &&
       isWithinReach(candidate, creature)
   );
@@ -95,27 +102,47 @@ export function getOpportunityAttackCandidates(
   state: CombatState,
   mover: Creature,
   fromPosition: GridPosition,
-  toPosition: GridPosition
+  toPosition: GridPosition,
+  query?: CombatQueryContext
 ): Creature[] {
+  const context = isCombatQueryContextCurrent(query, state) ? query : undefined;
   return state.creatures.filter(
     (enemy) =>
       enemy.id !== mover.id &&
-      areHostile(enemy, mover, state) &&
+      areHostile(enemy, mover, state, context?.teams) &&
       enemy.hp > 0 &&
-      !hasCondition(enemy, 'defeated') &&
-      !hasCondition(enemy, 'incapacitated') &&
-      !hasCondition(enemy, 'stunned') &&
-      !hasCondition(enemy, 'unconscious') &&
-      canCreatureTakeReaction(state, enemy) &&
+      !hasCondition(enemy, 'defeated', context?.conditions) &&
+      !hasCondition(enemy, 'incapacitated', context?.conditions) &&
+      !hasCondition(enemy, 'stunned', context?.conditions) &&
+      !hasCondition(enemy, 'unconscious', context?.conditions) &&
+      canCreatureTakeReaction(state, enemy, context?.conditions) &&
       !state.turnResources[enemy.id]?.reactionUsed &&
       wouldLeaveReach(mover, fromPosition, toPosition, enemy)
   );
 }
 
-export function hasLineOfSight(state: CombatState, from: GridPosition, to: GridPosition): boolean {
-  return getLineSquares(from, to)
-    .filter((position) => !samePosition(position, from) && !samePosition(position, to))
-    .every((position) => !isBlocked(position, state.grid) && !isLineBelowTileTop(state, position));
+export function hasLineOfSight(
+  state: CombatState,
+  from: GridPosition,
+  to: GridPosition,
+  query?: CombatQueryContext
+): boolean {
+  const context = isCombatQueryContextCurrent(query, state) ? query : undefined;
+  const cacheKey = `${position3DKey(from)}>${position3DKey(to)}`;
+  const cached = context?.lineOfSight.get(cacheKey);
+  if (cached !== undefined) {
+    return cached;
+  }
+
+  const visible = measurePerformance(
+    'engine.targeting.line-of-sight',
+    () =>
+      getLineSquares(from, to)
+        .filter((position) => !samePosition(position, from) && !samePosition(position, to))
+        .every((position) => !isBlocked(position, state.grid, context?.grid) && !isLineBelowTileTop(state, position, context?.grid))
+  );
+  context?.lineOfSight.set(cacheKey, visible);
+  return visible;
 }
 
 export function getLineSquares(from: GridPosition, to: GridPosition): GridPosition[] {
@@ -147,6 +174,6 @@ export function getLineSquares(from: GridPosition, to: GridPosition): GridPositi
   return points;
 }
 
-function isLineBelowTileTop(state: CombatState, position: GridPosition): boolean {
-  return getTileHeight(position, state.grid) > getElevation(position);
+function isLineBelowTileTop(state: CombatState, position: GridPosition, lookup?: GridLookup): boolean {
+  return getTileHeight(position, state.grid, lookup) > getElevation(position);
 }

@@ -25,7 +25,7 @@ import type {
   TeamDefinition,
   PendingReaction
 } from './types';
-import { getElevation, getShapeSquares, getTilePosition, isBlocked, isInBounds, samePosition } from './shapes';
+import { getElevation, getShapeSquares, getTilePosition, isBlocked, isInBounds, position3DKey, samePosition } from './shapes';
 import { getMovementOption, getMovementOptionForPath, getReachableMovementSquares, isOccupied, type MovementOption } from './movement';
 import { clampGridPosition, normalizeGridDefinition } from './grid';
 import {
@@ -86,6 +86,9 @@ import {
   runTurnRules
 } from './rules';
 import { enqueueVisualEvent, pruneVisualEvents } from './visualEvents';
+import { incrementPerformanceCounter, measurePerformance } from '../performance/profiling';
+import { createCombatQueryContext, isCombatQueryContextCurrent, type CombatQueryContext } from './queryContext';
+import { cloneJsonValue } from './jsonClone';
 
 export const BASIC_ACTIONS = [
   'Attack',
@@ -120,6 +123,12 @@ export interface OpportunityAttackPathCandidate {
   creature: Creature;
   from: GridPosition;
   to: GridPosition;
+}
+
+export interface OpportunityAttackPathLookup {
+  state: CombatState;
+  moverId: string;
+  candidatesBySegment: Map<string, Creature[]>;
 }
 
 export interface AttackDebugStats {
@@ -188,6 +197,8 @@ export interface BotActionScoreDetails {
 export const DEFAULT_RULES_SETTINGS: CombatRulesSettings = {
   flanking: { enabled: false, benefit: 'advantage' }
 };
+
+const normalizedCombatStates = new WeakSet<CombatState>();
 
 export function createCombatState(
   creatures: Creature[],
@@ -288,7 +299,10 @@ export function endTurn(state: CombatState, hooks: CombatHooks = {}): CombatStat
   const endingCreature = findCreature(next, next.activeCreatureId);
   runConditionTurnHooks(next, endingCreature, 'end');
   runTurnRules(next, endingCreature, 'onTurnEnd');
-  hooks.onTurnEnd?.(next, endingCreature);
+  if (hooks.onTurnEnd) {
+    normalizedCombatStates.delete(next);
+    hooks.onTurnEnd(next, endingCreature);
+  }
   logExpiredConditions(next, expireConditionsForTurn(next, endingCreature, 'end'));
   addLog(next, 'turn', `${endingCreature.name} ends their turn.`);
 
@@ -314,7 +328,10 @@ export function endTurn(state: CombatState, hooks: CombatHooks = {}): CombatStat
   next.turnState = next.turnResources[activeCreature.id];
   runConditionTurnHooks(next, activeCreature, 'start');
   runTurnRules(next, activeCreature, 'onTurnStart');
-  hooks.onTurnStart?.(next, activeCreature);
+  if (hooks.onTurnStart) {
+    normalizedCombatStates.delete(next);
+    hooks.onTurnStart(next, activeCreature);
+  }
   addLog(next, 'turn', `Round ${next.round}: ${activeCreature.name} starts their turn.`);
 
   return next;
@@ -988,7 +1005,10 @@ function resolveAttackAction(
     return;
   }
 
-  hooks.beforeAttackRoll?.(next, { attacker, target, action });
+  if (hooks.beforeAttackRoll) {
+    normalizedCombatStates.delete(next);
+    hooks.beforeAttackRoll(next, { attacker, target, action });
+  }
   let attackModifier = collectAttackRollModifiers(
     next,
     attacker,
@@ -1030,7 +1050,10 @@ function resolveAttackAction(
   const hit = naturalMiss ? false : naturalCritical ? true : attackModifier.autoFail ? false : attackModifier.autoSuccess ? true : attackTotal >= targetAc;
   const critical = naturalCritical || (hit && isAutomaticMeleeCritical(attacker, target, targetPosition));
 
-  hooks.afterAttackRoll?.(next, { attacker, target, action, attackTotal });
+  if (hooks.afterAttackRoll) {
+    normalizedCombatStates.delete(next);
+    hooks.afterAttackRoll(next, { attacker, target, action, attackTotal });
+  }
   runAfterAttackRollRules(next, { attacker, target, action, attackTotal, hit, critical });
   rememberAttackTarget(next, attacker.id, target.id);
   addLog(
@@ -1172,6 +1195,10 @@ export function canRunBotTurn(state: CombatState): boolean {
 }
 
 export function getBotTurnPreview(state: CombatState): BotTurnPreview {
+  return measurePerformance('engine.bot.preview', () => getBotTurnPreviewInternal(state));
+}
+
+function getBotTurnPreviewInternal(state: CombatState): BotTurnPreview {
   const next = ensureTurnState(normalizeState(cloneState(state)));
   if (!next.activeCreatureId) {
     return {
@@ -1212,13 +1239,19 @@ export function getBotTurnPreview(state: CombatState): BotTurnPreview {
     };
   }
 
-  const plan = chooseBotTurnPlan(next, bot, profile);
+  const analysis = createBotAnalysisContext(next, bot);
+  const plan = chooseBotTurnPlan(next, bot, profile, analysis);
   const movement = plan.preMovement;
   const previewPosition = movement?.position ?? bot.position;
   const actionState = movement ? { ...next, creatures: replaceBotPosition(next, bot.id, previewPosition) } : next;
   const previewBot = movement ? { ...bot, position: previewPosition } : bot;
-  const decision = plan.mainAction && !movement ? plan.mainAction : chooseBotAction(actionState, previewBot, profile);
-  const bonusDecision = decision ? chooseBotBonusAction(actionState, previewBot, profile) : undefined;
+  const actionAnalysis = movement ? createBotAnalysisContext(actionState, previewBot) : analysis;
+  const decision = plan.mainAction && !movement
+    ? plan.mainAction
+    : chooseBotAction(actionState, previewBot, profile, actionAnalysis);
+  const bonusDecision = decision
+    ? chooseBotBonusAction(actionState, previewBot, profile, actionAnalysis)
+    : undefined;
   const waitLabel = !next.turnState.actionUsed && canCreatureTakeAction(next, bot) ? 'Dodge' : 'wait';
   const summary = decision
     ? plan.order === 'move-then-action' && movement
@@ -1265,7 +1298,19 @@ export function getBotTurnPreview(state: CombatState): BotTurnPreview {
         }
       : undefined,
     willDodgeOrWait: !decision,
-    notes: getBotPreviewNotes(next, bot, profile, movement, decision, actionState, previewBot, plan, bonusDecision)
+    notes: getBotPreviewNotes(
+      next,
+      bot,
+      profile,
+      movement,
+      decision,
+      actionState,
+      previewBot,
+      plan,
+      bonusDecision,
+      analysis,
+      actionAnalysis
+    )
   };
 }
 
@@ -1287,7 +1332,8 @@ export function runBotTurnMovementStep(state: CombatState): CombatState {
     return next;
   }
 
-  const plan = chooseBotTurnPlan(next, bot, profile);
+  const analysis = createBotAnalysisContext(next, bot);
+  const plan = chooseBotTurnPlan(next, bot, profile, analysis);
   if (plan.preMovement) {
     addLog(next, 'action', `${bot.name} bot plan: ${formatBotTurnOrder(plan.order)}. ${plan.reason}`);
     addLog(next, 'action', `${bot.name} bot moves toward a better ${formatBotProfile(profile)} position.`);
@@ -1316,12 +1362,13 @@ export function runBotTurnActionStep(state: CombatState, random: RandomSource = 
     return next;
   }
 
-  const plan = chooseBotTurnPlan(next, activeBot, profile);
+  const analysis = createBotAnalysisContext(next, activeBot);
+  const plan = chooseBotTurnPlan(next, activeBot, profile, analysis);
   if (plan.order !== 'move-then-action') {
     addLog(next, 'action', `${activeBot.name} bot plan: ${formatBotTurnOrder(plan.order)}. ${plan.reason}`);
   }
 
-  const decision = plan.mainAction ?? chooseBotAction(next, activeBot, profile);
+  const decision = plan.mainAction ?? chooseBotAction(next, activeBot, profile, analysis);
   if (decision) {
     addLog(next, 'action', `${activeBot.name} bot chooses ${decision.action.name} against ${decision.targets.map((target) => target.name).join(', ')}.`);
     next = executeBotAction(next, decision, random);
@@ -1345,7 +1392,8 @@ export function runBotTurnBonusActionStep(state: CombatState, random: RandomSour
     return next;
   }
 
-  const decision = chooseBotBonusAction(next, bot, profile);
+  const analysis = createBotAnalysisContext(next, bot);
+  const decision = chooseBotBonusAction(next, bot, profile, analysis);
   if (!decision) {
     addLog(next, 'action', `${bot.name} bot skips bonus action: no useful bonus action found.`);
     return next;
@@ -1371,12 +1419,17 @@ export function runBotTurnPostMovementStep(state: CombatState): CombatState {
     return next;
   }
 
-  const movement = chooseBotPostActionMovement(next, bot, profile);
+  const analysis = createBotAnalysisContext(next, bot);
+  const movement = chooseBotPostActionMovement(next, bot, profile, analysis);
   if (!movement) {
     return next;
   }
 
-  addLog(next, 'action', `${bot.name} bot repositions after acting because ${getBotPostMovementReason(next, bot, profile)}.`);
+  addLog(
+    next,
+    'action',
+    `${bot.name} bot repositions after acting because ${getBotPostMovementReason(next, bot, profile, analysis)}.`
+  );
   next = moveActiveCreature(next, movement.path);
   return next;
 }
@@ -1403,6 +1456,28 @@ interface BotActionDecision {
   scoreDetails: BotActionScoreDetails;
 }
 
+interface BotPositionSimulation {
+  state: CombatState;
+  bot: Creature;
+  query?: CombatQueryContext;
+}
+
+interface BotAnalysisContext {
+  state: CombatState;
+  botId: string;
+  query: CombatQueryContext;
+  livingEnemies?: Creature[];
+  livingAllies?: Creature[];
+  usableActions?: ActionDefinition[];
+  reachableMovement?: MovementOption[];
+  actionDecisions: Map<string, BotActionDecision[]>;
+  positionSimulations: Map<string, BotPositionSimulation>;
+  postActionMovement: Map<BotProfile, MovementOption | null>;
+  attackOutcomes: Map<string, { hitChance: number; critChance: number }>;
+  savingFailureChances: Map<string, number>;
+  opportunityAttacks: OpportunityAttackPathLookup;
+}
+
 export type BotTurnOrder = 'move-then-action' | 'action-then-move' | 'action-only' | 'hold-position';
 
 interface BotTurnPlan {
@@ -1412,9 +1487,42 @@ interface BotTurnPlan {
   mainAction?: BotActionDecision;
 }
 
-function chooseBotTurnPlan(state: CombatState, bot: Creature, profile: BotProfile): BotTurnPlan {
-  const currentAction = chooseBotAction(state, bot, profile);
-  const threatened = getMinimumDistanceToCreatures(bot.position, getLivingEnemies(state, bot)) <= 5;
+function createBotAnalysisContext(state: CombatState, bot: Creature): BotAnalysisContext {
+  incrementPerformanceCounter('engine.bot.analysis-invocations');
+  return {
+    state,
+    botId: bot.id,
+    query: createCombatQueryContext(state),
+    actionDecisions: new Map(),
+    positionSimulations: new Map(),
+    postActionMovement: new Map(),
+    attackOutcomes: new Map(),
+    savingFailureChances: new Map(),
+    opportunityAttacks: createOpportunityAttackPathLookup(state, bot)
+  };
+}
+
+function getCurrentBotAnalysis(
+  analysis: BotAnalysisContext | undefined,
+  state: CombatState,
+  bot: Creature
+): BotAnalysisContext | undefined {
+  return analysis?.state === state && analysis.botId === bot.id ? analysis : undefined;
+}
+
+function recordBotAnalysisCache(hit: boolean, category: string): void {
+  incrementPerformanceCounter(`engine.bot.analysis-cache-${hit ? 'hits' : 'misses'}`);
+  incrementPerformanceCounter(`engine.bot.analysis-cache-${category}-${hit ? 'hits' : 'misses'}`);
+}
+
+function chooseBotTurnPlan(
+  state: CombatState,
+  bot: Creature,
+  profile: BotProfile,
+  analysis?: BotAnalysisContext
+): BotTurnPlan {
+  const currentAction = chooseBotAction(state, bot, profile, analysis);
+  const threatened = getMinimumDistanceToCreatures(bot.position, getLivingEnemies(state, bot, analysis)) <= 5;
 
   if (profile === 'rangedAttacker' && currentAction) {
     return {
@@ -1436,7 +1544,7 @@ function chooseBotTurnPlan(state: CombatState, bot: Creature, profile: BotProfil
     };
   }
 
-  const movement = chooseBotMovement(state, bot, profile);
+  const movement = chooseBotMovement(state, bot, profile, analysis);
   if (movement) {
     return {
       order: 'move-then-action',
@@ -1451,13 +1559,19 @@ function chooseBotTurnPlan(state: CombatState, bot: Creature, profile: BotProfil
   };
 }
 
-function chooseBotMovement(state: CombatState, bot: Creature, profile: BotProfile): MovementOption | undefined {
-  const enemies = getLivingEnemies(state, bot);
+function chooseBotMovement(
+  state: CombatState,
+  bot: Creature,
+  profile: BotProfile,
+  analysis?: BotAnalysisContext
+): MovementOption | undefined {
+  const context = getCurrentBotAnalysis(analysis, state, bot);
+  const enemies = getLivingEnemies(state, bot, context);
   if (enemies.length === 0 || !canCreatureMove(state, bot)) {
     return undefined;
   }
 
-  const reachable = getReachableMovementSquares(state, bot.id);
+  const reachable = getBotReachableMovement(state, bot, context);
   if (reachable.length === 0) {
     return undefined;
   }
@@ -1470,8 +1584,8 @@ function chooseBotMovement(state: CombatState, bot: Creature, profile: BotProfil
   }
 
   if (profile === 'rangedAttacker') {
-    const rangedActions = getBotUsableActions(state, bot).filter(isRangedAttackActionDefinition);
-    const currentDecision = chooseBestBotActionFromPosition(state, bot, profile, bot.position, rangedActions);
+    const rangedActions = getBotUsableActions(state, bot, context).filter(isRangedAttackActionDefinition);
+    const currentDecision = chooseBestBotActionFromPosition(state, bot, profile, bot.position, rangedActions, context);
     const threatened = getMinimumDistanceToCreatures(bot.position, enemies) <= 5;
     if (currentDecision && !threatened) {
       return undefined;
@@ -1480,15 +1594,15 @@ function chooseBotMovement(state: CombatState, bot: Creature, profile: BotProfil
     return reachable
       .map((option) => ({
         option,
-        decision: chooseBestBotActionFromPosition(state, bot, profile, option.position, rangedActions),
+        decision: chooseBestBotActionFromPosition(state, bot, profile, option.position, rangedActions, context),
         safety: getMinimumDistanceToCreatures(option.position, enemies)
       }))
       .filter((candidate) => candidate.decision)
       .sort((a, b) => b.safety - a.safety || b.decision!.score - a.decision!.score || a.option.costFeet - b.option.costFeet)[0]?.option;
   }
 
-  const meleeActions = getBotUsableActions(state, bot).filter(isMeleeAttackActionDefinition);
-  if (chooseBestBotActionFromPosition(state, bot, profile, bot.position, meleeActions)) {
+  const meleeActions = getBotUsableActions(state, bot, context).filter(isMeleeAttackActionDefinition);
+  if (chooseBestBotActionFromPosition(state, bot, profile, bot.position, meleeActions, context)) {
     return undefined;
   }
 
@@ -1497,7 +1611,7 @@ function chooseBotMovement(state: CombatState, bot: Creature, profile: BotProfil
     .map((option) => ({
       option,
       distance: getDistanceFeet(option.position, nearestEnemy.position),
-      decision: chooseBestBotActionFromPosition(state, bot, profile, option.position, meleeActions)
+      decision: chooseBestBotActionFromPosition(state, bot, profile, option.position, meleeActions, context)
     }))
     .sort((a, b) => {
       if (a.decision && !b.decision) {
@@ -1510,38 +1624,56 @@ function chooseBotMovement(state: CombatState, bot: Creature, profile: BotProfil
     })[0]?.option;
 }
 
-function chooseBotAction(state: CombatState, bot: Creature, profile: BotProfile): BotActionDecision | undefined {
-  const actions = getBotUsableActions(state, bot).filter(isBotMainActionCost);
+function chooseBotAction(
+  state: CombatState,
+  bot: Creature,
+  profile: BotProfile,
+  analysis?: BotAnalysisContext
+): BotActionDecision | undefined {
+  const context = getCurrentBotAnalysis(analysis, state, bot);
+  const actions = getBotUsableActions(state, bot, context).filter(isBotMainActionCost);
   if (profile === 'support') {
-    const supportDecision = chooseSupportBotAction(state, bot, actions);
+    const supportDecision = chooseSupportBotAction(state, bot, actions, context);
     if (supportDecision) {
       return supportDecision;
     }
   }
 
-  if (profile === 'cowardly' && getMinimumDistanceToCreatures(bot.position, getLivingEnemies(state, bot)) <= 10) {
+  if (profile === 'cowardly' && getMinimumDistanceToCreatures(bot.position, getLivingEnemies(state, bot, context)) <= 10) {
     return undefined;
   }
 
-  return chooseBestBotActionFromPosition(state, bot, profile, bot.position, actions);
+  return chooseBestBotActionFromPosition(state, bot, profile, bot.position, actions, context);
 }
 
-function chooseBotBonusAction(state: CombatState, bot: Creature, profile: BotProfile): BotActionDecision | undefined {
-  const actions = getBotUsableActions(state, bot).filter((action) => action.actionCost === 'bonusAction');
-  const offensiveDecision = chooseBestBotActionFromPosition(state, bot, profile, bot.position, actions);
-  const utilityDecisions = actions.flatMap((action) => getBotBonusUtilityDecision(state, bot, profile, action));
+function chooseBotBonusAction(
+  state: CombatState,
+  bot: Creature,
+  profile: BotProfile,
+  analysis?: BotAnalysisContext
+): BotActionDecision | undefined {
+  const context = getCurrentBotAnalysis(analysis, state, bot);
+  const actions = getBotUsableActions(state, bot, context).filter((action) => action.actionCost === 'bonusAction');
+  const offensiveDecision = chooseBestBotActionFromPosition(state, bot, profile, bot.position, actions, context);
+  const utilityDecisions = actions.flatMap((action) => getBotBonusUtilityDecision(state, bot, profile, action, context));
   return [offensiveDecision, ...utilityDecisions]
     .filter(isDefined)
     .sort((a, b) => b.score - a.score)[0];
 }
 
-function getBotBonusUtilityDecision(state: CombatState, bot: Creature, profile: BotProfile, action: ActionDefinition): BotActionDecision[] {
+function getBotBonusUtilityDecision(
+  state: CombatState,
+  bot: Creature,
+  profile: BotProfile,
+  action: ActionDefinition,
+  analysis?: BotAnalysisContext
+): BotActionDecision[] {
   if (isBotActionCandidate(action)) {
     return [];
   }
 
-  const threatened = getMinimumDistanceToCreatures(bot.position, getLivingEnemies(state, bot)) <= 5;
-  const postMovement = chooseBotPostActionMovement(state, bot, profile);
+  const threatened = getMinimumDistanceToCreatures(bot.position, getLivingEnemies(state, bot, analysis)) <= 5;
+  const postMovement = chooseBotPostActionMovement(state, bot, profile, analysis);
   const isDisengage = action.baseActionName === 'Disengage' || action.tags.includes('disengage');
   const isMobility = action.baseActionName === 'Dash' || action.tags.includes('movement');
   const score = isDisengage && threatened && postMovement
@@ -1562,34 +1694,72 @@ function getBotBonusUtilityDecision(state: CombatState, bot: Creature, profile: 
   }];
 }
 
-function chooseBotPostActionMovement(state: CombatState, bot: Creature, profile: BotProfile): MovementOption | undefined {
+function chooseBotPostActionMovement(
+  state: CombatState,
+  bot: Creature,
+  profile: BotProfile,
+  analysis?: BotAnalysisContext
+): MovementOption | undefined {
+  const context = getCurrentBotAnalysis(analysis, state, bot);
+  if (context?.postActionMovement.has(profile)) {
+    recordBotAnalysisCache(true, 'post-movement');
+    return context.postActionMovement.get(profile) ?? undefined;
+  }
+  recordBotAnalysisCache(false, 'post-movement');
   if (profile !== 'rangedAttacker' || !canCreatureMove(state, bot)) {
+    if (context) {
+      context.postActionMovement.set(profile, null);
+    }
     return undefined;
   }
 
-  const enemies = getLivingEnemies(state, bot);
+  const enemies = getLivingEnemies(state, bot, context);
   if (enemies.length === 0 || getMinimumDistanceToCreatures(bot.position, enemies) > 5) {
+    if (context) {
+      context.postActionMovement.set(profile, null);
+    }
     return undefined;
   }
 
-  const reachable = getReachableMovementSquares(state, bot.id);
+  const reachable = getBotReachableMovement(state, bot, context);
   if (reachable.length === 0) {
+    if (context) {
+      context.postActionMovement.set(profile, null);
+    }
     return undefined;
   }
 
   const currentDistance = getMinimumDistanceToCreatures(bot.position, enemies);
-  return reachable
+  const movement = reachable
     .map((option) => ({
       option,
-      opportunityAttackCount: getOpportunityAttackCandidatesForMovementPath(state, bot, option.path).length,
+      opportunityAttackCount: getOpportunityAttackCandidatesForMovementPath(
+        state,
+        bot,
+        option.path,
+        context?.query,
+        context?.opportunityAttacks
+      ).length,
       distance: getMinimumDistanceToCreatures(option.position, enemies)
     }))
     .filter((candidate) => candidate.distance > currentDistance)
     .sort((a, b) => a.opportunityAttackCount - b.opportunityAttackCount || b.distance - a.distance || a.option.costFeet - b.option.costFeet)[0]?.option;
+  if (context) {
+    context.postActionMovement.set(profile, movement ?? null);
+  }
+  return movement;
 }
 
-function getBotPostMovementReason(state: CombatState, bot: Creature, profile: BotProfile): string {
-  if (profile === 'rangedAttacker' && getMinimumDistanceToCreatures(bot.position, getLivingEnemies(state, bot)) <= 5) {
+function getBotPostMovementReason(
+  state: CombatState,
+  bot: Creature,
+  profile: BotProfile,
+  analysis?: BotAnalysisContext
+): string {
+  if (
+    profile === 'rangedAttacker' &&
+    getMinimumDistanceToCreatures(bot.position, getLivingEnemies(state, bot, analysis)) <= 5
+  ) {
     return 'a hostile creature is too close for a ranged attacker';
   }
 
@@ -1617,9 +1787,12 @@ function chooseBestBotActionFromPosition(
   bot: Creature,
   profile: BotProfile,
   position: GridPosition,
-  actions: ActionDefinition[]
+  actions: ActionDefinition[],
+  analysis?: BotAnalysisContext
 ): BotActionDecision | undefined {
-  const decisions = actions.flatMap((action) => getBotActionDecisions(state, bot, profile, position, action));
+  const decisions = actions.flatMap((action) =>
+    getBotActionDecisions(state, bot, profile, position, action, analysis)
+  );
   return decisions.sort((a, b) => b.score - a.score)[0];
 }
 
@@ -1628,14 +1801,24 @@ function getBotActionDecisions(
   bot: Creature,
   profile: BotProfile,
   position: GridPosition,
-  action: ActionDefinition
+  action: ActionDefinition,
+  analysis?: BotAnalysisContext
 ): BotActionDecision[] {
-  const enemies = getLivingEnemies(state, bot);
+  const context = getCurrentBotAnalysis(analysis, state, bot);
+  const cacheKey = `${profile}|${position3DKey(position)}|${action.id}`;
+  const cached = context?.actionDecisions.get(cacheKey);
+  if (cached) {
+    recordBotAnalysisCache(true, 'action-decisions');
+    return [...cached];
+  }
+  recordBotAnalysisCache(false, 'action-decisions');
+  const enemies = getLivingEnemies(state, bot, context);
+  let decisions: BotActionDecision[] = [];
   if (isAttackActionDefinition(action)) {
-    return enemies
-      .filter((target) => isBotAttackValidFromPosition(state, bot, action, position, target))
+    decisions = enemies
+      .filter((target) => isBotAttackValidFromPosition(state, bot, action, position, target, context))
       .map((target) => {
-        const scoreDetails = getBotAttackScoreDetails(state, bot, action, position, target, profile);
+        const scoreDetails = getBotAttackScoreDetails(state, bot, action, position, target, profile, context);
         return {
           action,
           targets: [target],
@@ -1643,26 +1826,53 @@ function getBotActionDecisions(
           scoreDetails
         };
       });
-  }
-
-  if (getRulesKind(action) === 'savingThrowEffect' && action.save && (action.damage || action.effects.some((effect) => effect.type === 'damage'))) {
-    return enemies.flatMap((target) => {
+  } else if (
+    getRulesKind(action) === 'savingThrowEffect' &&
+    action.save &&
+    (action.damage || action.effects.some((effect) => effect.type === 'damage'))
+  ) {
+    const simulation = getBotPositionSimulation(state, bot, position, context);
+    const simulationQuery = getBotSimulationQuery(simulation);
+    decisions = enemies.flatMap((target) => {
       const origin = getBotShapeOrigin(action, position, target.position);
       const direction = getBotShapeDirection(position, target.position);
       if (!isInActionRange(action, position, origin)) {
         return [];
       }
-      if ((action.tags.includes('spell') || action.kind === 'spell') && !hasLineOfSight({ ...state, creatures: replaceBotPosition(state, bot.id, position) }, position, origin)) {
+      if (
+        (action.tags.includes('spell') || action.kind === 'spell') &&
+        !hasLineOfSight(simulation.state, position, origin, simulationQuery)
+      ) {
         return [];
       }
-      const simulated = { ...state, creatures: replaceBotPosition(state, bot.id, position) };
-      const targets = getTargetsInActionShape(simulated, action, { ...bot, position }, origin, direction)
-        .filter((candidate) => areHostile(candidate, bot, simulated) && candidate.id !== bot.id);
+      const targets = getTargetsInActionShape(
+        simulation.state,
+        action,
+        simulation.bot,
+        origin,
+        direction,
+        simulationQuery
+      ).filter(
+        (candidate) =>
+          areHostile(candidate, bot, simulation.state, simulationQuery.teams) &&
+          candidate.id !== bot.id
+      );
       if (!targets.some((candidate) => candidate.id === target.id)) {
         return [];
       }
 
-      const scoreDetails = getBotSavingThrowScoreDetails(simulated, { ...bot, position }, action, position, targets, profile, origin, direction);
+      const scoreDetails = getBotSavingThrowScoreDetails(
+        simulation.state,
+        simulation.bot,
+        action,
+        position,
+        targets,
+        profile,
+        origin,
+        direction,
+        simulationQuery,
+        context
+      );
       return [{
         action,
         targets,
@@ -1674,11 +1884,19 @@ function getBotActionDecisions(
     });
   }
 
-  return [];
+  if (context) {
+    context.actionDecisions.set(cacheKey, decisions);
+  }
+  return [...decisions];
 }
 
-function chooseSupportBotAction(state: CombatState, bot: Creature, actions: ActionDefinition[]): BotActionDecision | undefined {
-  const hurtAlly = getLivingAllies(state, bot)
+function chooseSupportBotAction(
+  state: CombatState,
+  bot: Creature,
+  actions: ActionDefinition[],
+  analysis?: BotAnalysisContext
+): BotActionDecision | undefined {
+  const hurtAlly = getLivingAllies(state, bot, analysis)
     .filter((ally) => ally.hp < ally.maxHp / 2)
     .sort((a, b) => a.hp / a.maxHp - b.hp / b.maxHp)[0];
   if (!hurtAlly) {
@@ -1785,9 +2003,11 @@ function getBotPreviewNotes(
   actionState: CombatState,
   previewBot: Creature,
   plan: BotTurnPlan,
-  bonusDecision: BotActionDecision | undefined
+  bonusDecision: BotActionDecision | undefined,
+  analysis?: BotAnalysisContext,
+  actionAnalysis?: BotAnalysisContext
 ): string[] {
-  const enemies = getLivingEnemies(state, bot);
+  const enemies = getLivingEnemies(state, bot, analysis);
   const notes = [
     `Profile: ${formatBotProfile(profile)}.`,
     `Tactics: ${formatBotTargetPriority(bot.botTargetPriority ?? 'balanced')}, ${formatBotResourceStrategy(bot.botResourceStrategy ?? 'normal')}.`,
@@ -1815,10 +2035,18 @@ function getBotPreviewNotes(
     notes.push('Action fallback: no valid action remains, so the bot will wait.');
   }
 
-  return [...notes, ...getBotActionExplanationNotes(actionState, previewBot, profile)].slice(0, 10);
+  return [
+    ...notes,
+    ...getBotActionExplanationNotes(actionState, previewBot, profile, actionAnalysis)
+  ].slice(0, 10);
 }
 
-function getBotActionExplanationNotes(state: CombatState, bot: Creature, profile: BotProfile): string[] {
+function getBotActionExplanationNotes(
+  state: CombatState,
+  bot: Creature,
+  profile: BotProfile,
+  analysis?: BotAnalysisContext
+): string[] {
   const notes: string[] = [];
   const availableActions = getAvailableActions(bot, state);
   if (availableActions.length === 0) {
@@ -1842,7 +2070,7 @@ function getBotActionExplanationNotes(state: CombatState, bot: Creature, profile
       return;
     }
 
-    const decisions = getBotActionDecisions(state, bot, profile, bot.position, action);
+    const decisions = getBotActionDecisions(state, bot, profile, bot.position, action, analysis);
     if (decisions.length === 0 && isBotActionCandidate(action)) {
       notes.push(`Rejected ${action.name}: no enemy target in range or line of sight.`);
     }
@@ -1862,8 +2090,42 @@ function formatActionCost(actionCost: ActionDefinition['actionCost']): string {
   return actionCost;
 }
 
-function getBotUsableActions(state: CombatState, bot: Creature): ActionDefinition[] {
-  return getAvailableActions(bot, state).filter((action) => isBotActionCostAvailable(state, bot, action) && hasResourcesForAction(bot, action));
+function getBotUsableActions(
+  state: CombatState,
+  bot: Creature,
+  analysis?: BotAnalysisContext
+): ActionDefinition[] {
+  const context = getCurrentBotAnalysis(analysis, state, bot);
+  if (context?.usableActions) {
+    recordBotAnalysisCache(true, 'usable-actions');
+    return [...context.usableActions];
+  }
+  recordBotAnalysisCache(false, 'usable-actions');
+  const actions = getAvailableActions(bot, state).filter(
+    (action) => isBotActionCostAvailable(state, bot, action) && hasResourcesForAction(bot, action)
+  );
+  if (context) {
+    context.usableActions = actions;
+  }
+  return [...actions];
+}
+
+function getBotReachableMovement(
+  state: CombatState,
+  bot: Creature,
+  analysis?: BotAnalysisContext
+): MovementOption[] {
+  const context = getCurrentBotAnalysis(analysis, state, bot);
+  if (context?.reachableMovement) {
+    recordBotAnalysisCache(true, 'reachable-movement');
+    return [...context.reachableMovement];
+  }
+  recordBotAnalysisCache(false, 'reachable-movement');
+  const reachable = getReachableMovementSquares(state, bot.id, context?.query);
+  if (context) {
+    context.reachableMovement = reachable;
+  }
+  return [...reachable];
 }
 
 function isBotMainActionCost(action: ActionDefinition): boolean {
@@ -1893,16 +2155,26 @@ function isBotAttackValidFromPosition(
   bot: Creature,
   action: ActionDefinition,
   position: GridPosition,
-  target: Creature
+  target: Creature,
+  analysis?: BotAnalysisContext
 ): boolean {
-  if (!areHostile(target, bot, state) || target.id === bot.id || isDefeated(target)) {
+  const context = getCurrentBotAnalysis(analysis, state, bot);
+  if (!areHostile(target, bot, state, context?.query.teams) || target.id === bot.id || isDefeated(target)) {
     return false;
   }
   if (!isInActionRange(action, position, target.position)) {
     return false;
   }
-  if ((getRulesKind(action) === 'rangedAttack' || action.tags.includes('ranged')) && !hasLineOfSight({ ...state, creatures: replaceBotPosition(state, bot.id, position) }, position, target.position)) {
-    return false;
+  if (getRulesKind(action) === 'rangedAttack' || action.tags.includes('ranged')) {
+    const simulation = getBotPositionSimulation(state, bot, position, context);
+    if (!hasLineOfSight(
+      simulation.state,
+      position,
+      target.position,
+      getBotSimulationQuery(simulation)
+    )) {
+      return false;
+    }
   }
   return canCreatureTargetHarmfulEffect(bot, target);
 }
@@ -1913,21 +2185,29 @@ function getBotAttackScoreDetails(
   action: ActionDefinition,
   position: GridPosition,
   target: Creature,
-  profile: BotProfile
+  profile: BotProfile,
+  analysis?: BotAnalysisContext
 ): BotActionScoreDetails {
-  const simulatedState = { ...state, creatures: replaceBotPosition(state, bot.id, position) };
-  const simulatedBot = { ...bot, position };
+  const simulation = getBotPositionSimulation(state, bot, position, analysis);
+  const simulatedState = simulation.state;
+  const simulatedBot = simulation.bot;
   const actionKind = getRulesKind(action);
   const targetPosition = target.position;
   const attackModifier = getBotAttackRollModifier(simulatedState, simulatedBot, target, action, targetPosition);
   const rollMode = resolveRollMode(attackModifier);
   const attackBonus = getEffectiveAttackBonus(action, simulatedBot, simulatedState) + (attackModifier.flatModifier ?? 0);
   const targetAc = getEffectiveAC(target, simulatedState);
-  const outcome = getAttackOutcomeChances(attackBonus, targetAc, rollMode, {
-    autoFail: attackModifier.autoFail,
-    autoSuccess: attackModifier.autoSuccess,
-    automaticCritical: isAutomaticMeleeCritical(simulatedBot, target, targetPosition)
-  });
+  const outcome = getAttackOutcomeChances(
+    attackBonus,
+    targetAc,
+    rollMode,
+    {
+      autoFail: attackModifier.autoFail,
+      autoSuccess: attackModifier.autoSuccess,
+      automaticCritical: isAutomaticMeleeCritical(simulatedBot, target, targetPosition)
+    },
+    analysis
+  );
   const damage = estimateDiceParts(action.damage?.dice ?? '');
   const expectedDamage = outcome.hitChance * damage.total + outcome.critChance * damage.dice;
   const profileBonus =
@@ -1979,29 +2259,60 @@ function getBotSavingThrowScoreDetails(
   enemyTargets: Creature[],
   profile: BotProfile,
   origin: GridPosition,
-  direction: CardinalDirection
+  direction: CardinalDirection,
+  query?: CombatQueryContext,
+  analysis?: BotAnalysisContext
 ): BotActionScoreDetails {
   const save = action.save ?? action.effects.find((effect) => effect.save)?.save;
   const damage = estimateDiceParts(action.damage?.dice ?? action.effects.find((effect) => effect.damage)?.damage?.dice ?? '');
-  const allTargets = getTargetsInActionShape(state, action, bot, origin, direction).filter((target) => target.id !== bot.id);
-  const allyTargets = allTargets.filter((target) => areAllies(target, bot, state));
+  const allTargets = getTargetsInActionShape(state, action, bot, origin, direction, query)
+    .filter((target) => target.id !== bot.id);
+  const allyTargets = allTargets.filter((target) => areAllies(target, bot, state, query?.teams));
   const saveDc = save ? getEffectiveSaveDc(action, bot, state) ?? save.dc : undefined;
   const enemyExpectedDamage = save && saveDc
     ? enemyTargets.reduce((total, target) => {
-        const failureChance = getSavingThrowFailureChance(state, bot, target, action, save.ability, saveDc);
+        const failureChance = getSavingThrowFailureChance(
+          state,
+          bot,
+          target,
+          action,
+          save.ability,
+          saveDc,
+          analysis
+        );
         const successDamage = save.halfDamageOnSuccess ? damage.total * 0.5 : 0;
         return total + failureChance * damage.total + (1 - failureChance) * successDamage;
       }, 0)
     : damage.total * enemyTargets.length;
   const friendlyExpectedDamage = save && saveDc
     ? allyTargets.reduce((total, target) => {
-        const failureChance = getSavingThrowFailureChance(state, bot, target, action, save.ability, saveDc);
+        const failureChance = getSavingThrowFailureChance(
+          state,
+          bot,
+          target,
+          action,
+          save.ability,
+          saveDc,
+          analysis
+        );
         const successDamage = save.halfDamageOnSuccess ? damage.total * 0.5 : 0;
         return total + failureChance * damage.total + (1 - failureChance) * successDamage;
       }, 0)
     : damage.total * allyTargets.length;
   const representativeFailureChance = save && saveDc && enemyTargets.length > 0
-    ? enemyTargets.reduce((total, target) => total + getSavingThrowFailureChance(state, bot, target, action, save.ability, saveDc), 0) / enemyTargets.length
+    ? enemyTargets.reduce(
+        (total, target) =>
+          total + getSavingThrowFailureChance(
+            state,
+            bot,
+            target,
+            action,
+            save.ability,
+            saveDc,
+            analysis
+          ),
+        0
+      ) / enemyTargets.length
     : undefined;
   const profileBonus = profile === 'rangedAttacker' || profile === 'support' ? 1 : 0;
   const targetPriorityBonus = enemyTargets.reduce(
@@ -2069,8 +2380,23 @@ function getAttackOutcomeChances(
   attackBonus: number,
   targetAc: number,
   rollMode: RollMode,
-  options: { autoFail?: boolean; autoSuccess?: boolean; automaticCritical?: boolean }
+  options: { autoFail?: boolean; autoSuccess?: boolean; automaticCritical?: boolean },
+  analysis?: BotAnalysisContext
 ): { hitChance: number; critChance: number } {
+  const cacheKey = [
+    attackBonus,
+    targetAc,
+    rollMode,
+    options.autoFail ? 1 : 0,
+    options.autoSuccess ? 1 : 0,
+    options.automaticCritical ? 1 : 0
+  ].join('|');
+  const cached = analysis?.attackOutcomes.get(cacheKey);
+  if (cached) {
+    recordBotAnalysisCache(true, 'attack-outcomes');
+    return cached;
+  }
+  recordBotAnalysisCache(false, 'attack-outcomes');
   const rolls = getD20OutcomeRolls(rollMode);
   const outcomes = rolls.map(([first, second]) => {
     const d20 = chooseD20(first, second, rollMode);
@@ -2080,10 +2406,12 @@ function getAttackOutcomeChances(
     const critical = naturalCritical || (hit && Boolean(options.automaticCritical));
     return { hit, critical };
   });
-  return {
+  const result = {
     hitChance: outcomes.filter((outcome) => outcome.hit).length / outcomes.length,
     critChance: outcomes.filter((outcome) => outcome.critical).length / outcomes.length
   };
+  analysis?.attackOutcomes.set(cacheKey, result);
+  return result;
 }
 
 function getSavingThrowFailureChance(
@@ -2092,8 +2420,22 @@ function getSavingThrowFailureChance(
   target: Creature,
   action: ActionDefinition,
   ability: Ability,
-  saveDc: number
+  saveDc: number,
+  analysis?: BotAnalysisContext
 ): number {
+  const cacheKey = [
+    position3DKey(source.position),
+    target.id,
+    action.id,
+    ability,
+    saveDc
+  ].join('|');
+  const cached = analysis?.savingFailureChances.get(cacheKey);
+  if (cached !== undefined) {
+    recordBotAnalysisCache(true, 'saving-failure');
+    return cached;
+  }
+  recordBotAnalysisCache(false, 'saving-failure');
   const saveRollModifier = mergeRollModifiers(
     collectSavingThrowModifiers(state, target, ability),
     collectBeforeSavingThrowRuleModifiers(state, { source, target, action, ability })
@@ -2106,7 +2448,9 @@ function getSavingThrowFailureChance(
     const success = saveRollModifier.autoFail ? false : saveRollModifier.autoSuccess ? true : d20 + saveBonus >= saveDc;
     return !success;
   }).length;
-  return failures / rolls.length;
+  const failureChance = failures / rolls.length;
+  analysis?.savingFailureChances.set(cacheKey, failureChance);
+  return failureChance;
 }
 
 function getD20OutcomeRolls(rollMode: RollMode): Array<[number, number | undefined]> {
@@ -2283,12 +2627,47 @@ function estimateDiceAverage(dice: string): number {
   return estimateDiceParts(dice).total;
 }
 
-function getLivingEnemies(state: CombatState, creature: Creature): Creature[] {
-  return state.creatures.filter((candidate) => candidate.id !== creature.id && areHostile(candidate, creature, state) && !isDefeated(candidate));
+function getLivingEnemies(
+  state: CombatState,
+  creature: Creature,
+  analysis?: BotAnalysisContext
+): Creature[] {
+  const context = getCurrentBotAnalysis(analysis, state, creature);
+  if (context?.livingEnemies) {
+    recordBotAnalysisCache(true, 'living-enemies');
+    return [...context.livingEnemies];
+  }
+  recordBotAnalysisCache(false, 'living-enemies');
+  const enemies = state.creatures.filter(
+    (candidate) =>
+      candidate.id !== creature.id &&
+      areHostile(candidate, creature, state, context?.query.teams) &&
+      !isDefeated(candidate)
+  );
+  if (context) {
+    context.livingEnemies = enemies;
+  }
+  return [...enemies];
 }
 
-function getLivingAllies(state: CombatState, creature: Creature): Creature[] {
-  return state.creatures.filter((candidate) => areAllies(candidate, creature, state) && !isDefeated(candidate));
+function getLivingAllies(
+  state: CombatState,
+  creature: Creature,
+  analysis?: BotAnalysisContext
+): Creature[] {
+  const context = getCurrentBotAnalysis(analysis, state, creature);
+  if (context?.livingAllies) {
+    recordBotAnalysisCache(true, 'living-allies');
+    return [...context.livingAllies];
+  }
+  recordBotAnalysisCache(false, 'living-allies');
+  const allies = state.creatures.filter(
+    (candidate) => areAllies(candidate, creature, state, context?.query.teams) && !isDefeated(candidate)
+  );
+  if (context) {
+    context.livingAllies = allies;
+  }
+  return [...allies];
 }
 
 function getMinimumDistanceToCreatures(position: GridPosition, creatures: Creature[]): number {
@@ -2314,6 +2693,42 @@ function getBotShapeDirection(sourcePosition: GridPosition, targetPosition: Grid
 
 function replaceBotPosition(state: CombatState, botId: string, position: GridPosition): Creature[] {
   return state.creatures.map((creature) => (creature.id === botId ? { ...creature, position } : creature));
+}
+
+function getBotPositionSimulation(
+  state: CombatState,
+  bot: Creature,
+  position: GridPosition,
+  analysis?: BotAnalysisContext
+): BotPositionSimulation {
+  const context = getCurrentBotAnalysis(analysis, state, bot);
+  const key = position3DKey(position);
+  const cached = context?.positionSimulations.get(key);
+  if (cached) {
+    recordBotAnalysisCache(true, 'position-simulations');
+    return cached;
+  }
+  recordBotAnalysisCache(false, 'position-simulations');
+  const simulatedBot = { ...bot, position };
+  const simulatedState = {
+    ...state,
+    creatures: state.creatures.map((creature) =>
+      creature.id === bot.id ? { ...creature, position } : creature
+    )
+  };
+  const simulation = {
+    state: simulatedState,
+    bot: simulatedBot
+  };
+  context?.positionSimulations.set(key, simulation);
+  return simulation;
+}
+
+function getBotSimulationQuery(simulation: BotPositionSimulation): CombatQueryContext {
+  if (!simulation.query) {
+    simulation.query = createCombatQueryContext(simulation.state);
+  }
+  return simulation.query;
 }
 
 function isMeleeAttackActionDefinition(action: ActionDefinition): boolean {
@@ -2384,11 +2799,12 @@ export function getTargetsInShape(
   state: CombatState,
   actionId: string,
   origin: GridPosition,
-  direction?: CardinalDirection
+  direction?: CardinalDirection,
+  query?: CombatQueryContext
 ): Creature[] {
   const source = getActiveCreature(state);
   const action = findAction(source, actionId, state);
-  return getTargetsInActionShape(state, action, source, origin, direction);
+  return getTargetsInActionShape(state, action, source, origin, direction, query);
 }
 
 export function getAttackDebugStats(
@@ -2472,9 +2888,11 @@ export function getActionShapeSquares(
   state: CombatState,
   action: ActionDefinition,
   origin: GridPosition,
-  direction?: CardinalDirection
+  direction?: CardinalDirection,
+  query?: CombatQueryContext
 ): GridPosition[] {
-  return getShapeSquares(action.shape ?? { type: 'single' }, origin, state.grid, direction);
+  const context = isCombatQueryContextCurrent(query, state) ? query : undefined;
+  return getShapeSquares(action.shape ?? { type: 'single' }, origin, state.grid, direction, context);
 }
 
 function getShapeOriginForAction(
@@ -2495,27 +2913,34 @@ function getTargetsInActionShape(
   action: ActionDefinition,
   source: Creature,
   origin: GridPosition,
-  direction?: CardinalDirection
+  direction?: CardinalDirection,
+  query?: CombatQueryContext
 ): Creature[] {
+  return measurePerformance(
+    'engine.targeting.action-shape-targets',
+    () => getTargetsInActionShapeInternal(state, action, source, origin, direction, query)
+  );
+}
+
+function getTargetsInActionShapeInternal(
+  state: CombatState,
+  action: ActionDefinition,
+  source: Creature,
+  origin: GridPosition,
+  direction?: CardinalDirection,
+  query?: CombatQueryContext
+): Creature[] {
+  const context = isCombatQueryContextCurrent(query, state) ? query : undefined;
+  const normalizedOrigin = getTilePosition(origin, state.grid, context?.grid);
+  const squareKeys = new Set(
+    getActionShapeSquares(state, action, normalizedOrigin, direction, context).map(position3DKey)
+  );
   return state.creatures.filter(
     (creature) =>
       creature.id !== source.id &&
       !isDefeated(creature) &&
-      isPositionInActionShape(state, action, origin, creature.position, direction)
+      squareKeys.has(position3DKey(getTilePosition(creature.position, state.grid, context?.grid)))
   );
-}
-
-function isPositionInActionShape(
-  state: CombatState,
-  action: ActionDefinition,
-  origin: GridPosition,
-  position: GridPosition,
-  direction?: CardinalDirection
-): boolean {
-  const normalizedOrigin = getTilePosition(origin, state.grid);
-  const normalizedPosition = getTilePosition(position, state.grid);
-
-  return getActionShapeSquares(state, action, normalizedOrigin, direction).some((square) => samePosition(square, normalizedPosition));
 }
 
 function isAutomaticMeleeCritical(attacker: Creature, target: Creature, targetPosition: GridPosition): boolean {
@@ -2682,7 +3107,10 @@ function applyDamage(
     damageType: getActionDamageType(action),
     random
   }));
-  hooks.beforeDamage?.(state, { source, target, action, amount: modifiedAmount });
+  if (hooks.beforeDamage) {
+    normalizedCombatStates.delete(state);
+    hooks.beforeDamage(state, { source, target, action, amount: modifiedAmount });
+  }
 
   target.hp = Math.max(0, target.hp - modifiedAmount);
   if (modifiedAmount > 0) {
@@ -2698,11 +3126,17 @@ function applyDamage(
 
   runAfterDamageHooks(state, source, target, action, modifiedAmount);
   runAfterDamageRules(state, { source, target, action, amount: modifiedAmount });
-  hooks.afterDamage?.(state, { source, target, action, amount: modifiedAmount });
+  if (hooks.afterDamage) {
+    normalizedCombatStates.delete(state);
+    hooks.afterDamage(state, { source, target, action, amount: modifiedAmount });
+  }
   resolveConcentrationAfterDamage(state, source, target, action, modifiedAmount, random);
   if (target.hp === 0 && !hasCondition(target, 'defeated')) {
     applyConditionToCreature(target, createAppliedCondition('defeated'));
-    hooks.onCreatureDefeated?.(state, target);
+    if (hooks.onCreatureDefeated) {
+      normalizedCombatStates.delete(state);
+      hooks.onCreatureDefeated(state, target);
+    }
     addLog(state, 'defeat', `${target.name} is defeated.`);
     enqueueVisualEvent(state, { kind: 'creatureDefeated', creatureId: target.id, sourceCreatureId: source.id, label: 'Defeated' });
     runDefeatedRules(state, target, source, action, random);
@@ -3144,6 +3578,19 @@ function createTurnState(creature?: Creature, state?: CombatState) {
 }
 
 function ensureTurnState(state: CombatState): CombatState {
+  if (hasCompleteTurnResources(state)) {
+    incrementPerformanceCounter('engine.state.ensure-turn-fast-path');
+    if (!state.turnState) {
+      const creature = state.activeCreatureId ? findCreature(state, state.activeCreatureId) : undefined;
+      state.turnState = createTurnState(creature, state);
+    }
+    if (state.activeCreatureId) {
+      syncActiveTurnState(state);
+    }
+    return state;
+  }
+
+  incrementPerformanceCounter('engine.state.ensure-turn-full');
   state.turnResources = state.turnResources ?? {};
   state.creatures.forEach((creature) => {
     const existing = state.turnResources[creature.id];
@@ -3169,6 +3616,25 @@ function ensureTurnState(state: CombatState): CombatState {
   return state;
 }
 
+function hasCompleteTurnResources(state: CombatState): boolean {
+  if (!state.turnResources) {
+    return false;
+  }
+
+  return state.creatures.every((creature) => {
+    const resource = state.turnResources[creature.id];
+    return Boolean(
+      resource &&
+      typeof resource.creatureId === 'string' &&
+      typeof resource.remainingMovement === 'number' &&
+      typeof resource.movementRemaining === 'number' &&
+      typeof resource.actionUsed === 'boolean' &&
+      typeof resource.bonusActionUsed === 'boolean' &&
+      typeof resource.reactionUsed === 'boolean'
+    );
+  });
+}
+
 function getResource(state: CombatState, creatureId: string) {
   const creature = findCreature(state, creatureId);
   state.turnResources = state.turnResources ?? {};
@@ -3185,9 +3651,13 @@ function syncActiveTurnState(state: CombatState): void {
 export function getOpportunityAttackCandidatesForMovementPath(
   state: CombatState,
   mover: Creature,
-  path: GridPosition[]
+  path: GridPosition[],
+  query?: CombatQueryContext,
+  lookup?: OpportunityAttackPathLookup
 ): OpportunityAttackPathCandidate[] {
-  if (hasCondition(mover, 'disengaged')) {
+  const context = isCombatQueryContextCurrent(query, state) ? query : undefined;
+  const pathLookup = lookup?.state === state && lookup.moverId === mover.id ? lookup : undefined;
+  if (hasCondition(mover, 'disengaged', context?.conditions)) {
     return [];
   }
 
@@ -3197,7 +3667,16 @@ export function getOpportunityAttackCandidatesForMovementPath(
   for (let index = 1; index < path.length; index += 1) {
     const from = path[index - 1];
     const to = path[index];
-    getOpportunityAttackCandidates(state, mover, from, to).forEach((creature) => {
+    const segmentKey = `${position3DKey(from)}>${position3DKey(to)}`;
+    let segmentCandidates = pathLookup?.candidatesBySegment.get(segmentKey);
+    if (segmentCandidates) {
+      incrementPerformanceCounter('engine.movement.oa-segment-cache-hits');
+    } else {
+      segmentCandidates = getOpportunityAttackCandidates(state, mover, from, to, context);
+      pathLookup?.candidatesBySegment.set(segmentKey, segmentCandidates);
+      incrementPerformanceCounter('engine.movement.oa-segment-cache-misses');
+    }
+    segmentCandidates.forEach((creature) => {
       if (triggeredCreatureIds.has(creature.id)) {
         return;
       }
@@ -3208,6 +3687,17 @@ export function getOpportunityAttackCandidatesForMovementPath(
   }
 
   return candidates;
+}
+
+export function createOpportunityAttackPathLookup(
+  state: CombatState,
+  mover: Creature
+): OpportunityAttackPathLookup {
+  return {
+    state,
+    moverId: mover.id,
+    candidatesBySegment: new Map()
+  };
 }
 
 function findOpportunityAttackAction(creature: Creature): ActionDefinition | undefined {
@@ -3258,6 +3748,39 @@ function formatPosition(position: GridPosition): string {
 }
 
 function normalizeState(state: CombatState): CombatState {
+  return measurePerformance('engine.state.normalize', () => {
+    if (normalizedCombatStates.has(state)) {
+      incrementPerformanceCounter('engine.state.normalize-fast-path');
+      restoreNormalizedActionShape(state.creatures);
+      if (state.visualEvents) {
+        state.visualEvents = pruneVisualEvents(state.visualEvents);
+      }
+      syncActiveTurnState(state);
+      return state;
+    }
+
+    incrementPerformanceCounter('engine.state.normalize-full');
+    const normalized = normalizeStateInternal(state);
+    normalizedCombatStates.add(normalized);
+    return normalized;
+  });
+}
+
+function restoreNormalizedActionShape(creatures: Creature[]): void {
+  creatures.forEach((creature) => {
+    creature.actions.forEach((action) => {
+      if (!Object.prototype.hasOwnProperty.call(action, 'type')) {
+        action.type = action.kind === 'multiattack' || action.kind === 'basicAction'
+          ? undefined
+          : isRulesActionKind(action.kind)
+            ? action.kind
+            : undefined;
+      }
+    });
+  });
+}
+
+function normalizeStateInternal(state: CombatState): CombatState {
   state.grid = {
     ...state.grid,
     blocked: state.grid.blocked ?? [],
@@ -3496,9 +4019,16 @@ function addLog(state: CombatState, type: CombatLogEntry['type'], message: strin
 }
 
 function cloneState(state: CombatState): CombatState {
-  return JSON.parse(JSON.stringify(state)) as CombatState;
+  const cloned = measurePerformance(
+    'engine.state.clone',
+    () => cloneJsonValue(state)
+  );
+  if (normalizedCombatStates.has(state)) {
+    normalizedCombatStates.add(cloned);
+  }
+  return cloned;
 }
 
 function cloneJson<T>(value: T): T {
-  return JSON.parse(JSON.stringify(value)) as T;
+  return cloneJsonValue(value);
 }

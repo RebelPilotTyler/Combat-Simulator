@@ -1,4 +1,31 @@
 import type { CardinalDirection, GridDefinition, GridPosition, ShapeDefinition } from './types';
+import { measurePerformance } from '../performance/profiling';
+
+export interface GridLookup {
+  grid: GridDefinition;
+  blockedKeys: Set<string>;
+  heightByTile: Map<string, number>;
+}
+
+export interface ShapeQueryLookup {
+  grid: GridLookup;
+  shapeSquares: Map<string, GridPosition[]>;
+}
+
+export function createGridLookup(grid: GridDefinition): GridLookup {
+  const heightByTile = new Map<string, number>();
+  (grid.heights ?? []).forEach((height) => {
+    const key = positionKey(height);
+    if (!heightByTile.has(key)) {
+      heightByTile.set(key, height.z ?? 0);
+    }
+  });
+  return {
+    grid,
+    blockedKeys: new Set(grid.blocked.map(positionKey)),
+    heightByTile
+  };
+}
 
 export function getElevation(position: GridPosition): number {
   return position.z ?? 0;
@@ -16,8 +43,10 @@ export function isInBounds(position: GridPosition, grid: GridDefinition): boolea
   return position.x >= 0 && position.y >= 0 && position.x < grid.width && position.y < grid.height;
 }
 
-export function isBlocked(position: GridPosition, grid: GridDefinition): boolean {
-  return grid.blocked.some((blocked) => sameTilePosition(blocked, position));
+export function isBlocked(position: GridPosition, grid: GridDefinition, lookup?: GridLookup): boolean {
+  return lookup?.grid === grid
+    ? lookup.blockedKeys.has(positionKey(position))
+    : grid.blocked.some((blocked) => sameTilePosition(blocked, position));
 }
 
 export function positionKey(position: GridPosition): string {
@@ -28,15 +57,17 @@ export function position3DKey(position: GridPosition): string {
   return `${position.x},${position.y},${getElevation(position)}`;
 }
 
-export function getTileHeight(position: GridPosition, grid: GridDefinition): number {
-  return grid.heights?.find((height) => sameTilePosition(height, position))?.z ?? 0;
+export function getTileHeight(position: GridPosition, grid: GridDefinition, lookup?: GridLookup): number {
+  return lookup?.grid === grid
+    ? lookup.heightByTile.get(positionKey(position)) ?? 0
+    : grid.heights?.find((height) => sameTilePosition(height, position))?.z ?? 0;
 }
 
-export function getTilePosition(position: GridPosition, grid: GridDefinition): GridPosition {
+export function getTilePosition(position: GridPosition, grid: GridDefinition, lookup?: GridLookup): GridPosition {
   return {
     x: position.x,
     y: position.y,
-    z: position.z ?? getTileHeight(position, grid)
+    z: position.z ?? getTileHeight(position, grid, lookup)
   };
 }
 
@@ -44,21 +75,44 @@ export function getShapeSquares(
   shape: ShapeDefinition,
   origin: GridPosition,
   grid: GridDefinition,
-  direction: CardinalDirection = shape.direction ?? 'north'
+  direction: CardinalDirection = shape.direction ?? 'north',
+  query?: ShapeQueryLookup
 ): GridPosition[] {
-  const normalizedOrigin = getTilePosition(origin, grid);
-  const rawSquares = buildRawShape(shape, normalizedOrigin, grid, direction);
+  const cacheKey = query?.grid.grid === grid ? getShapeCacheKey(shape, origin, direction) : undefined;
+  const cached = cacheKey ? query?.shapeSquares.get(cacheKey) : undefined;
+  if (cached) {
+    return cached;
+  }
+  const squares = measurePerformance(
+    'engine.targeting.shape-squares',
+    () => getShapeSquaresInternal(shape, origin, grid, direction, query?.grid)
+  );
+  if (cacheKey) {
+    query!.shapeSquares.set(cacheKey, squares);
+  }
+  return squares;
+}
+
+function getShapeSquaresInternal(
+  shape: ShapeDefinition,
+  origin: GridPosition,
+  grid: GridDefinition,
+  direction: CardinalDirection,
+  lookup?: GridLookup
+): GridPosition[] {
+  const normalizedOrigin = getTilePosition(origin, grid, lookup);
+  const rawSquares = buildRawShape(shape, normalizedOrigin, grid, direction, lookup);
   const seen = new Set<string>();
 
   return rawSquares.reduce<GridPosition[]>((squares, square) => {
-    const positionedSquare = getTilePosition(square, grid);
+    const positionedSquare = getTilePosition(square, grid, lookup);
     const key = position3DKey(positionedSquare);
     if (
       seen.has(key) ||
       !isInBounds(square, grid) ||
-      isBlocked(square, grid) ||
-      getTileHeight(positionedSquare, grid) > getElevation(positionedSquare) ||
-      !hasLineOfEffect(normalizedOrigin, positionedSquare, grid)
+      isBlocked(square, grid, lookup) ||
+      getTileHeight(positionedSquare, grid, lookup) > getElevation(positionedSquare) ||
+      !hasLineOfEffect(normalizedOrigin, positionedSquare, grid, lookup)
     ) {
       return squares;
     }
@@ -69,14 +123,14 @@ export function getShapeSquares(
   }, []);
 }
 
-export function hasLineOfEffect(from: GridPosition, to: GridPosition, grid: GridDefinition): boolean {
-  const normalizedFrom = getTilePosition(from, grid);
-  const normalizedTo = getTilePosition(to, grid);
+export function hasLineOfEffect(from: GridPosition, to: GridPosition, grid: GridDefinition, lookup?: GridLookup): boolean {
+  const normalizedFrom = getTilePosition(from, grid, lookup);
+  const normalizedTo = getTilePosition(to, grid, lookup);
   return getLineOfEffectSquares(normalizedFrom, normalizedTo)
     .filter((position) => !samePosition(position, normalizedFrom) && !samePosition(position, normalizedTo))
     .every((position) => {
-      const tilePosition = getTilePosition(position, grid);
-      return !isBlocked(tilePosition, grid) && getTileHeight(tilePosition, grid) <= getElevation(position);
+      const tilePosition = getTilePosition(position, grid, lookup);
+      return !isBlocked(tilePosition, grid, lookup) && getTileHeight(tilePosition, grid, lookup) <= getElevation(position);
     });
 }
 
@@ -171,7 +225,8 @@ function buildRawShape(
   shape: ShapeDefinition,
   origin: GridPosition,
   grid: GridDefinition,
-  direction: CardinalDirection
+  direction: CardinalDirection,
+  lookup?: GridLookup
 ): GridPosition[] {
   if (shape.type === 'single') {
     return [origin];
@@ -183,7 +238,7 @@ function buildRawShape(
 
     for (let y = Math.max(0, origin.y - radius); y <= Math.min(grid.height - 1, origin.y + radius); y += 1) {
       for (let x = Math.max(0, origin.x - radius); x <= Math.min(grid.width - 1, origin.x + radius); x += 1) {
-        const candidateElevations = uniqueNumbers([getTileHeight({ x, y }, grid), getElevation(origin)]);
+        const candidateElevations = uniqueNumbers([getTileHeight({ x, y }, grid, lookup), getElevation(origin)]);
         candidateElevations.forEach((z) => {
           const square = { x, y, z };
           const distance = Math.max(
@@ -204,7 +259,7 @@ function buildRawShape(
   if (shape.type === 'line') {
     const length = shape.length ?? 1;
     return Array.from({ length }, (_, index) =>
-      projectShapeSquareHeight(origin, offsetInDirection(origin, direction, index + 1), grid)
+      projectShapeSquareHeight(origin, offsetInDirection(origin, direction, index + 1), grid, lookup)
     );
   }
 
@@ -214,22 +269,33 @@ function buildRawShape(
   for (let distance = 1; distance <= length; distance += 1) {
     const spread = distance - 1;
     for (let side = -spread; side <= spread; side += 1) {
-      squares.push(projectShapeSquareHeight(origin, offsetCone(origin, direction, distance, side), grid));
+      squares.push(projectShapeSquareHeight(origin, offsetCone(origin, direction, distance, side), grid, lookup));
     }
   }
 
   return squares;
 }
 
-function projectShapeSquareHeight(origin: GridPosition, square: GridPosition, grid: GridDefinition): GridPosition {
+function projectShapeSquareHeight(origin: GridPosition, square: GridPosition, grid: GridDefinition, lookup?: GridLookup): GridPosition {
   return {
     ...square,
-    z: Math.max(getElevation(origin), getTileHeight(square, grid))
+    z: Math.max(getElevation(origin), getTileHeight(square, grid, lookup))
   };
 }
 
 function uniqueNumbers(values: number[]): number[] {
   return [...new Set(values)];
+}
+
+function getShapeCacheKey(shape: ShapeDefinition, origin: GridPosition, direction: CardinalDirection): string {
+  return [
+    shape.type,
+    shape.radius ?? '',
+    shape.length ?? '',
+    shape.direction ?? '',
+    direction,
+    position3DKey(origin)
+  ].join('|');
 }
 
 function offsetInDirection(

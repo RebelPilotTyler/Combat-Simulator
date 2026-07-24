@@ -4,10 +4,12 @@ import {
   useRef,
   useState,
   useCallback,
+  memo,
   type CSSProperties,
   type Dispatch,
   type MouseEvent,
   type PointerEvent,
+  type ReactNode,
   type RefObject,
   type SetStateAction,
   type WheelEvent
@@ -23,7 +25,6 @@ import {
   getActionShapeSquares,
   getAttackDebugStats,
   getBotTurnPreview,
-  getOpportunityAttackCandidatesForMovementPath,
   getTargetsInShape,
   isDefeated,
   moveActiveCreature,
@@ -74,7 +75,8 @@ import {
   getEffectiveSpeed,
   getUnavailableActionReason
 } from './engine/features';
-import { getMovementOptionsForDestination, getReachableMovementSquares, type MovementOption } from './engine/movement';
+import { getReachableMovementSquares } from './engine/movement';
+import { analyzePreferredMovementOptions, type PreferredMovementAnalysis } from './engine/preferredMovement';
 import { formatBaseEffectiveBonus, formatBaseEffectiveNumber, getConditionTags, getHpPercent } from './engine/presentation';
 import { parseCombatStateJson, serializeCombatState } from './engine/serialization';
 import { getActiveVisualEvents } from './engine/visualEvents';
@@ -108,8 +110,18 @@ import type {
   VisualEvent
 } from './engine/types';
 import { getVisibleGridCells, getVisibleGridWindow, type GridWindow } from './ui/gridWindow';
+import {
+  EXPANDED_COMBAT_LOG_WINDOW_SIZE,
+  getCombatLogAnchorStart,
+  getCombatLogWindow
+} from './ui/combatLogWindow';
 import { canStartBotTurn, shouldAutoRunBotTurn, shouldRunBotTurnShortcut, shouldStopAutoRunAfterBotAction } from './ui/botTurnControls';
 import { HOTBAR_PAGE_SIZE, getActionForNumberHotkey, getNumberHotkeyIndex, isTypingShortcutTarget, moveGridCursor } from './ui/keyboard';
+import { createFrameQueue, type FrameQueue } from './ui/frameQueue';
+import { createBattlefield3DProjection } from './ui/battlefield3dProjection';
+import { PerformanceProfiler } from './performance/PerformanceProfiler';
+import { incrementPerformanceCounter, measurePerformance } from './performance/profiling';
+import { createCombatQueryContext, type CombatQueryContext } from './engine/queryContext';
 
 const directions: CardinalDirection[] = ['north', 'east', 'south', 'west'];
 type SelectionMode = 'move' | 'target';
@@ -156,6 +168,12 @@ interface UiSettings {
 }
 
 const UI_SETTINGS_KEY = 'dnd5e-combat.uiSettings.v1';
+
+function useStableCallback<Args extends unknown[], Result>(callback: (...args: Args) => Result): (...args: Args) => Result {
+  const callbackRef = useRef(callback);
+  callbackRef.current = callback;
+  return useCallback((...args: Args) => callbackRef.current(...args), []);
+}
 
 export function App() {
   const [uiSettings, setUiSettings] = useState<UiSettings>(loadUiSettings);
@@ -228,14 +246,26 @@ export function App() {
     originY: number;
   } | undefined>(undefined);
 
-  const activeCreature = combat.activeCreatureId ? findCreature(combat, combat.activeCreatureId) : undefined;
-  const selectedCreature = selectedCreatureId ? findCreature(combat, selectedCreatureId) : undefined;
-  const activeCreatureActions = activeCreature ? getAvailableActions(activeCreature, combat) : [];
-  const activeActions = useMemo(() => activeCreatureActions, [activeCreatureActions]);
-  const selectedAction = activeActions.find((action) => action.id === selectedActionId);
-  const movementOptions = useMemo(
-    () => (activeCreature ? getReachableMovementSquares(combat, activeCreature.id) : []),
+  const combatQuery = useMemo(() => createCombatQueryContext(combat), [combat]);
+  const activeCreature = useMemo(
+    () => (combat.activeCreatureId ? combatQuery.creatureById.get(combat.activeCreatureId) : undefined),
+    [combat.activeCreatureId, combatQuery]
+  );
+  const selectedCreature = useMemo(
+    () => (selectedCreatureId ? combatQuery.creatureById.get(selectedCreatureId) : undefined),
+    [combatQuery, selectedCreatureId]
+  );
+  const activeActions = useMemo(
+    () => (activeCreature ? getAvailableActions(activeCreature, combat) : []),
     [activeCreature, combat]
+  );
+  const selectedAction = useMemo(
+    () => activeActions.find((action) => action.id === selectedActionId),
+    [activeActions, selectedActionId]
+  );
+  const movementOptions = useMemo(
+    () => (activeCreature ? getReachableMovementSquares(combat, activeCreature.id, combatQuery) : []),
+    [activeCreature, combat, combatQuery]
   );
 
   const highlightedSquares = useMemo(() => {
@@ -244,12 +274,12 @@ export function App() {
     }
 
     if (getActionTargetMode(selectedAction) === 'point' && !areaOrigin) {
-      return getPointTargetSquares(combat, activeCreature, selectedAction);
+      return getPointTargetSquares(combat, activeCreature, selectedAction, combatQuery);
     }
 
     const origin = getShapeOrigin(selectedAction, activeCreature.position, areaOrigin);
-    return getActionShapeSquares(combat, selectedAction, origin, direction);
-  }, [activeCreature, areaOrigin, combat, direction, movementOptions, selectedAction, selectionMode]);
+    return getActionShapeSquares(combat, selectedAction, origin, direction, combatQuery);
+  }, [activeCreature, areaOrigin, combat, combatQuery, direction, movementOptions, selectedAction, selectionMode]);
 
   const highlightedKeys = useMemo(() => new Set(highlightedSquares.map(positionKey)), [highlightedSquares]);
 
@@ -259,33 +289,35 @@ export function App() {
   const mapToolSquares = useMemo(
     () =>
       uiSettings.showMapTools
-        ? getMapToolSquares(combat, mapTool, mapToolStart, mapToolEnd, mapToolDirection, mapToolRadiusFeet, mapToolLengthFeet)
+        ? getMapToolSquares(combat, mapTool, mapToolStart, mapToolEnd, mapToolDirection, mapToolRadiusFeet, mapToolLengthFeet, combatQuery)
         : [],
-    [combat, mapTool, mapToolDirection, mapToolEnd, mapToolLengthFeet, mapToolRadiusFeet, mapToolStart, uiSettings.showMapTools]
+    [combat, combatQuery, mapTool, mapToolDirection, mapToolEnd, mapToolLengthFeet, mapToolRadiusFeet, mapToolStart, uiSettings.showMapTools]
   );
   const mapToolKeys = useMemo(() => new Set(mapToolSquares.map(positionKey)), [mapToolSquares]);
   const visibleMapToolKeys = useMemo(() => (uiSettings.showMapTools ? mapToolKeys : new Set<string>()), [mapToolKeys, uiSettings.showMapTools]);
   const movementKeys = useMemo(() => new Set(movementOptions.map((option) => position3DKey(option.position))), [movementOptions]);
-  const movementOptionByKey = useMemo(
+  const preferredMovementAnalysis = useMemo<PreferredMovementAnalysis>(
     () =>
-      new Map(
-        movementOptions.map((option) => [
-          position3DKey(option.position),
-          activeCreature ? getPreferredMovementOption(combat, activeCreature, option) : option
-        ])
+      measurePerformance(
+        'ui.movement.preferred-routes',
+        () => activeCreature
+          ? analyzePreferredMovementOptions(combat, activeCreature, movementOptions, combatQuery)
+          : {
+              optionByDestination: new Map(),
+              opportunityCandidatesByDestination: new Map()
+            }
       ),
-    [activeCreature, combat, movementOptions]
+    [activeCreature, combat, combatQuery, movementOptions]
   );
+  const movementOptionByKey = preferredMovementAnalysis.optionByDestination;
   const opportunityMovementKeys = useMemo(
     () =>
       new Set(
-        activeCreature
-          ? [...movementOptionByKey.values()]
-              .filter((option) => getOpportunityAttackCandidatesForMovementPath(combat, activeCreature, option.path).length > 0)
-              .map((option) => position3DKey(option.position))
-          : []
+        [...preferredMovementAnalysis.opportunityCandidatesByDestination.entries()]
+          .filter(([, candidates]) => candidates.length > 0)
+          .map(([destinationKey]) => destinationKey)
       ),
-    [activeCreature, combat, movementOptionByKey]
+    [preferredMovementAnalysis]
   );
   const selectedMovementOption = useMemo(
     () =>
@@ -296,20 +328,26 @@ export function App() {
   );
   const selectedMovementOpportunityCount = useMemo(
     () =>
-      activeCreature && selectedMovementOption
-        ? getOpportunityAttackCandidatesForMovementPath(combat, activeCreature, selectedMovementOption.path).length
+      selectedMovementOption
+        ? preferredMovementAnalysis.opportunityCandidatesByDestination.get(position3DKey(selectedMovementOption.position))?.length ?? 0
         : 0,
-    [activeCreature, combat, selectedMovementOption]
+    [preferredMovementAnalysis, selectedMovementOption]
   );
   const movementPathTileKeys = useMemo(
     () => new Set((selectedMovementOption?.path ?? []).map(positionKey)),
     [selectedMovementOption]
   );
-  const targetsInArea =
-    activeCreature && selectedAction
-      ? getTargetsForAction(combat, activeCreature, selectedAction, selectedTargetId, areaOrigin, direction)
-      : [];
-  const selectedTarget = selectedTargetId ? findCreature(combat, selectedTargetId) : undefined;
+  const targetsInArea = useMemo(
+    () =>
+      activeCreature && selectedAction
+        ? getTargetsForAction(combat, activeCreature, selectedAction, selectedTargetId, areaOrigin, direction, combatQuery)
+        : [],
+    [activeCreature, areaOrigin, combat, combatQuery, direction, selectedAction, selectedTargetId]
+  );
+  const selectedTarget = useMemo(
+    () => (selectedTargetId ? findCreature(combat, selectedTargetId) : undefined),
+    [combat, selectedTargetId]
+  );
   const selectedCustomConditionTemplate = useMemo(
     () =>
       conditionToApply.startsWith('custom:')
@@ -317,20 +355,38 @@ export function App() {
         : undefined,
     [conditionToApply, customConditionLibrary]
   );
-  const selectedAttackDebug =
-    selectedAction && selectedTarget && activeCreature && isAttackAction(selectedAction)
-      ? getAttackDebugStats(combat, selectedAction.id, selectedTarget.id, 0)
-      : undefined;
-  const keyboardHint = getKeyboardHint(selectionMode, selectedAction, gridCursor, combat);
-  const mapToolResult = uiSettings.showMapTools ? getMapToolResult(combat, mapTool, mapToolStart, mapToolEnd, mapToolSquares) : '';
+  const selectedAttackDebug = useMemo(
+    () =>
+      selectedAction && selectedTarget && activeCreature && isAttackAction(selectedAction)
+        ? getAttackDebugStats(combat, selectedAction.id, selectedTarget.id, 0)
+        : undefined,
+    [activeCreature, combat, selectedAction, selectedTarget]
+  );
+  const keyboardHint = useMemo(
+    () => getKeyboardHint(selectionMode, selectedAction, gridCursor, combat),
+    [combat, gridCursor, selectedAction, selectionMode]
+  );
+  const mapToolResult = useMemo(
+    () => (uiSettings.showMapTools ? getMapToolResult(combat, mapTool, mapToolStart, mapToolEnd, mapToolSquares, combatQuery) : ''),
+    [combat, combatQuery, mapTool, mapToolEnd, mapToolSquares, mapToolStart, uiSettings.showMapTools]
+  );
   const activeBotPreview = useMemo(
     () => (activeCreature?.controlMode === 'bot' ? getBotTurnPreview(combat) : undefined),
     [activeCreature?.controlMode, activeCreature?.id, combat]
   );
-  const activeVisualEvents = useMemo(
-    () => (uiSettings.visualEffectsMode === 'off' ? [] : getActiveVisualEvents(combat.visualEvents, visualEffectNow)),
-    [combat.visualEvents, uiSettings.visualEffectsMode, visualEffectNow]
-  );
+  const previousActiveVisualEventsRef = useRef<VisualEvent[]>([]);
+  const activeVisualEvents = useMemo(() => {
+    const nextEvents = uiSettings.visualEffectsMode === 'off' ? [] : getActiveVisualEvents(combat.visualEvents, visualEffectNow);
+    const previousEvents = previousActiveVisualEventsRef.current;
+    if (
+      nextEvents.length === previousEvents.length &&
+      nextEvents.every((event, index) => event === previousEvents[index])
+    ) {
+      return previousEvents;
+    }
+    previousActiveVisualEventsRef.current = nextEvents;
+    return nextEvents;
+  }, [combat.visualEvents, uiSettings.visualEffectsMode, visualEffectNow]);
 
   useEffect(() => {
     if (uiSettings.visualEffectsMode === 'off' || activeVisualEvents.length === 0) {
@@ -582,7 +638,11 @@ export function App() {
         setShowHelp(true);
       } else if (['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'].includes(event.key)) {
         const movementKey = battlemapView === '3d' ? getCameraRelativeArrowKey(event.key, cameraYaw) : event.key;
-        setGridCursor((current) => getTilePosition(moveGridCursor(current, movementKey, combat.grid.width, combat.grid.height), combat.grid));
+        setGridCursor((current) => getTilePosition(
+          moveGridCursor(current, movementKey, combat.grid.width, combat.grid.height),
+          combat.grid,
+          combatQuery.grid
+        ));
       } else if (battlemapView === '3d' && (event.key === 'PageUp' || event.key === 'PageDown')) {
         event.preventDefault();
         adjustGridCursorElevation(event.key === 'PageUp' ? 1 : -1);
@@ -602,6 +662,7 @@ export function App() {
     battlemapView,
     cameraYaw,
     combat,
+    combatQuery,
     gridCursor,
     selectedAction,
     selectedTargetId,
@@ -616,7 +677,7 @@ export function App() {
 
   function adjustGridCursorElevation(delta: number) {
     setGridCursor((current) => {
-      const tileHeight = getTileHeight(current, combat.grid);
+      const tileHeight = getTileHeight(current, combat.grid, combatQuery.grid);
       return {
         ...current,
         z: Math.max(tileHeight, getElevation(current) + delta)
@@ -675,7 +736,7 @@ export function App() {
     }
 
     if (selectedAction && activeCreature && getActionTargetMode(selectedAction) === 'point') {
-      if (!isValidPointTarget(combat, activeCreature, selectedAction, gridCursor)) {
+      if (!isValidPointTarget(combat, activeCreature, selectedAction, gridCursor, combatQuery)) {
         return;
       }
       if (areaOrigin && samePosition(areaOrigin, gridCursor)) {
@@ -750,7 +811,7 @@ export function App() {
     }
 
     if (selectedAction && activeCreature && getActionTargetMode(selectedAction) === 'point') {
-      if (isValidPointTarget(combat, activeCreature, selectedAction, position)) {
+      if (isValidPointTarget(combat, activeCreature, selectedAction, position, combatQuery)) {
         setAreaOrigin(position);
       }
       return;
@@ -910,7 +971,7 @@ export function App() {
       return;
     }
 
-    const targets = getTargetsForAction(combat, activeCreature, selectedAction, selectedTargetId, areaOrigin, direction);
+    const targets = getTargetsForAction(combat, activeCreature, selectedAction, selectedTargetId, areaOrigin, direction, combatQuery);
     if (targets.length === 0) {
       return;
     }
@@ -1166,8 +1227,21 @@ export function App() {
     );
   }
 
+  const stableHandleCellClick = useStableCallback(handleCellClick);
+  const stableAdjustGridCursorElevation = useStableCallback(adjustGridCursorElevation);
+  const stableHandleHudDragStart = useStableCallback(handleHudDragStart);
+  const stableHandleHudDragMove = useStableCallback(handleHudDragMove);
+  const stableHandleHudDragEnd = useStableCallback(handleHudDragEnd);
+  const stableCloseHudPanel = useStableCallback(closeHudPanel);
+  const stableCopyFullCombatLog = useStableCallback(copyFullCombatLog);
+  const stableHandleBasicAction = useStableCallback(handleBasicAction);
+  const stableResetTargeting = useStableCallback(resetTargeting);
+  const stableCancelSelection = useStableCallback(cancelSelection);
+  const stableStopBotTurnSequence = useStableCallback(stopBotTurnSequence);
+  const stableRunBotTurnSequence = useStableCallback(runBotTurnSequence);
+  const stableHandleCreatureActionSelect = useStableCallback(handleCreatureActionSelect);
+
   const combatLayoutClass = ['combat-hud', `mobile-tab-${workbenchTab}`].join(' ');
-  const visibleLogEntries = logExpanded ? combat.log : combat.log.slice(0, 5);
 
   return (
     // App shell: swaps between the combat HUD and encounter editor.
@@ -1231,42 +1305,18 @@ export function App() {
       {/* Combat: main HUD layout wrapper */}
       <section className={combatLayoutClass}>
         {/* Combat: initiative / roster HUD */}
-        <aside className={['panel', 'initiative-hud', openHudPanels.roster ? 'hud-open' : ''].join(' ')} tabIndex={0} aria-label="Initiative and creature list">
-          {renderHudPanelBar('roster', 'Roster')}
-          <div className="round-card">
-            <strong>Round {combat.round || '-'}</strong>
-            <span>{activeCreature?.name ?? 'No initiative'}</span>
-          </div>
-          <h2>Initiative</h2>
-          <section className="initiative-tracker">
-            {combat.initiative.length === 0 && <span>No initiative yet.</span>}
-            {combat.initiative.map((entry) => {
-              const creature = findCreature(combat, entry.creatureId);
-              return (
-                <button
-                  className={[
-                    'initiative-item',
-                    creature.id === combat.activeCreatureId ? 'active-initiative' : '',
-                    isDefeated(creature) ? 'defeated-initiative' : ''
-                  ].join(' ')}
-                  key={entry.creatureId}
-                  onClick={() => setSelectedCreatureId(creature.id)}
-                  title={getConditionLabels(creature)}
-                >
-                  <span className="team-dot" style={{ backgroundColor: getTeamColor(combat, creature.team) }} />
-                  <strong>{creature.name}</strong>
-                  <small>{creature.controlMode === 'bot' ? 'Bot' : 'Manual'}</small>
-                  <HpBar creature={creature} compact />
-                  <span>
-                    HP {creature.hp}/{creature.maxHp}
-                  </span>
-                  <ConditionTags creature={creature} />
-                </button>
-              );
-            })}
-          </section>
-
-        </aside>
+        <PerformanceProfiler id="initiative">
+          <InitiativePanel
+            combat={combat}
+            query={combatQuery}
+            open={Boolean(openHudPanels.roster)}
+            onClose={stableCloseHudPanel}
+            onDragEnd={stableHandleHudDragEnd}
+            onDragMove={stableHandleHudDragMove}
+            onDragStart={stableHandleHudDragStart}
+            onSelectCreature={setSelectedCreatureId}
+          />
+        </PerformanceProfiler>
 
         <section className="combat-hud-main">
         {/* Combat: map stage / battlemap controls */}
@@ -1388,72 +1438,79 @@ export function App() {
           </div>
           {/* Combat: 2D vs 3D battlefield render */}
           {battlemapView === '2d' ? (
-            <Battlefield2DView
-              combat={combat}
-              gridCellSize={gridCellSize}
-              gridCursor={gridCursor}
-              highlightedKeys={highlightedKeys}
-              mapToolEnd={mapToolEnd}
-              mapToolKeys={visibleMapToolKeys}
-              mapToolStart={mapToolStart}
-              movementKeys={movementKeys}
-              movementPathTileKeys={movementPathTileKeys}
-              opportunityMovementKeys={opportunityMovementKeys}
-              onCellClick={handleCellClick}
-              selectedCreatureId={selectedCreatureId}
-              selectionMode={selectionMode}
-              showGridCoordinates={uiSettings.showGridCoordinates}
-              visualEffectsMode={uiSettings.visualEffectsMode}
-              visualEffectsTextSize={uiSettings.visualEffectsTextSize}
-              visualEvents={activeVisualEvents}
-              viewportRef={gridRef}
-            />
+            <PerformanceProfiler id="battlefield-2d">
+              <MemoizedBattlefield2DView
+                combat={combat}
+                query={combatQuery}
+                gridCellSize={gridCellSize}
+                gridCursor={gridCursor}
+                highlightedKeys={highlightedKeys}
+                mapToolEnd={mapToolEnd}
+                mapToolKeys={visibleMapToolKeys}
+                mapToolStart={mapToolStart}
+                movementKeys={movementKeys}
+                movementPathTileKeys={movementPathTileKeys}
+                opportunityMovementKeys={opportunityMovementKeys}
+                onCellClick={stableHandleCellClick}
+                selectedCreatureId={selectedCreatureId}
+                selectionMode={selectionMode}
+                showGridCoordinates={uiSettings.showGridCoordinates}
+                visualEffectsMode={uiSettings.visualEffectsMode}
+                visualEffectsTextSize={uiSettings.visualEffectsTextSize}
+                visualEvents={activeVisualEvents}
+                viewportRef={gridRef}
+              />
+            </PerformanceProfiler>
           ) : (
-            <Battlefield3DView
-              cameraPitch={cameraPitch}
-              cameraPanX={cameraPanX}
-              cameraPanY={cameraPanY}
-              cameraYaw={cameraYaw}
-              cameraZoom={cameraZoom}
-              combat={combat}
-              gridCursor={gridCursor}
-              gridCellSize={gridCellSize}
-              highlightedKeys={highlightedKeys}
-              mapToolKeys={visibleMapToolKeys}
-              movementKeys={movementKeys}
-              movementPathTileKeys={movementPathTileKeys}
-              opportunityMovementKeys={opportunityMovementKeys}
-              onCellClick={handleCellClick}
-              onCursorElevationChange={adjustGridCursorElevation}
-              selectedCreatureId={selectedCreatureId}
-              settings={uiSettings}
-              visualEffectsIntensity={uiSettings.visualEffectsIntensity}
-              visualEffectsTextSize={uiSettings.visualEffectsTextSize}
-              visualEvents={activeVisualEvents}
-              setCameraPanX={setCameraPanX}
-              setCameraPanY={setCameraPanY}
-              setCameraPitch={setCameraPitch}
-              setCameraYaw={setCameraYaw}
-              setCameraZoom={setCameraZoom}
-              viewportRef={gridRef}
-            />
+            <PerformanceProfiler id="battlefield-3d">
+              <MemoizedBattlefield3DView
+                cameraPitch={cameraPitch}
+                cameraPanX={cameraPanX}
+                cameraPanY={cameraPanY}
+                cameraYaw={cameraYaw}
+                cameraZoom={cameraZoom}
+                combat={combat}
+                query={combatQuery}
+                gridCursor={gridCursor}
+                gridCellSize={gridCellSize}
+                highlightedKeys={highlightedKeys}
+                mapToolKeys={visibleMapToolKeys}
+                movementKeys={movementKeys}
+                movementPathTileKeys={movementPathTileKeys}
+                opportunityMovementKeys={opportunityMovementKeys}
+                onCellClick={stableHandleCellClick}
+                onCursorElevationChange={stableAdjustGridCursorElevation}
+                selectedCreatureId={selectedCreatureId}
+                settings={uiSettings}
+                visualEffectsIntensity={uiSettings.visualEffectsIntensity}
+                visualEffectsTextSize={uiSettings.visualEffectsTextSize}
+                visualEvents={activeVisualEvents}
+                setCameraPanX={setCameraPanX}
+                setCameraPanY={setCameraPanY}
+                setCameraPitch={setCameraPitch}
+                setCameraYaw={setCameraYaw}
+                setCameraZoom={setCameraZoom}
+                viewportRef={gridRef}
+              />
+            </PerformanceProfiler>
           )}
         </section>
 
         {/* Combat: active creature HUD */}
-        <aside className={['panel', 'creature-status-hud', openHudPanels.actions ? 'hud-open' : ''].join(' ')} tabIndex={0} aria-label="Active creature and actions">
+        <PerformanceProfiler id="creature-status">
+          <aside className={['panel', 'creature-status-hud', openHudPanels.actions ? 'hud-open' : ''].join(' ')} tabIndex={0} aria-label="Active creature and actions">
           {renderHudPanelBar('actions', 'Actions')}
           <h2>Active Creature</h2>
           {activeCreature ? (
             <>
-              <CreatureSummary creature={activeCreature} state={combat} />
+              <MemoizedCreatureSummary creature={activeCreature} state={combat} />
               <div className="turn-state">
                 <span>Movement: {combat.turnState.remainingMovement} ft</span>
                 <span>Action used: {combat.turnState.actionUsed ? 'yes' : 'no'}</span>
                 <span>Bonus action used: {combat.turnState.bonusActionUsed ? 'yes' : 'no'}</span>
                 <span>Reaction used: {combat.turnState.reactionUsed ? 'yes' : 'no'}</span>
               </div>
-              {activeBotPreview && <BotTurnPreviewPanel preview={activeBotPreview} />}
+              {activeBotPreview && <MemoizedBotTurnPreviewPanel preview={activeBotPreview} />}
               {/* Combat: target/action resolution panel */}
               {selectedAction && (
                 <div className="target-panel" ref={targetPanelRef} tabIndex={0} aria-label="Target panel">
@@ -1590,7 +1647,7 @@ export function App() {
 
           {/* Combat: selected creature HUD */}
           <h2>Selected</h2>
-          {selectedCreature ? <CreatureSummary creature={selectedCreature} state={combat} /> : <p>No creature selected.</p>}
+          {selectedCreature ? <MemoizedCreatureSummary creature={selectedCreature} state={combat} /> : <p>No creature selected.</p>}
           {selectedCreature?.id === combat.activeCreatureId && (
             <div className="turn-state">
               <span>Remaining movement: {combat.turnState.remainingMovement} ft</span>
@@ -1674,169 +1731,64 @@ export function App() {
               </div>
             </details>
           )}
-        </aside>
+          </aside>
+        </PerformanceProfiler>
 
         {/* Combat: bottom action bar */}
-        <section className="panel action-bar" aria-label="Available actions">
-          {activeCreature ? (
-            <>
-              <div className="action-bar-header">
-                <div className="action-bar-title">
-                  <h2>Actions</h2>
-                  <span>
-                    {selectedAction
-                      ? `${selectedAction.name} - ${describeAction(selectedAction)}`
-                      : selectionMode === 'move'
-                        ? 'Movement mode'
-                        : 'Choose an action'}
-                  </span>
-                </div>
-                <div className="mode-actions">
-                  {activeCreature.controlMode === 'bot' && (
-                    <button className="selected-action" disabled={botTurnSequence.running} onClick={() => void runBotTurnSequence(false)}>
-                      Run Bot Turn (B)
-                    </button>
-                  )}
-                  <button className={selectionMode === 'move' ? 'selected-action' : ''} onClick={() => resetTargeting()}>
-                    Move
-                  </button>
-                  <button onClick={cancelSelection}>Cancel</button>
-                </div>
-              </div>
-              {botTurnSequence.running && (
-                <div className="bot-turn-status" role="status" aria-live="polite">
-                  <span>{botTurnSequence.step}</span>
-                  <button onClick={() => stopBotTurnSequence(botTurnSequence.auto)}>
-                    {botTurnSequence.auto ? 'Stop Auto' : 'Cancel'}
-                  </button>
-                </div>
-              )}
-              <div className="action-bar-grid">
-                {/* Combat: basic actions */}
-                <section className="basic-action-strip" aria-label="Basic actions">
-                  <h3>Basic</h3>
-                  <div className="action-list">
-                    {BASIC_ACTIONS.map((actionName) => (
-                      <button
-                        disabled={combat.turnState.actionUsed}
-                        key={actionName}
-                        title={getBasicActionDescription(actionName)}
-                        onClick={() => handleBasicAction(actionName)}
-                      >
-                        {actionName}
-                      </button>
-                    ))}
-                  </div>
-                  <details className="compact-details">
-                    <summary>Options</summary>
-                    <div className="basic-options">
-                      <label>
-                        Basic target
-                        <select value={basicTargetId ?? ''} onChange={(event) => setBasicTargetId(event.target.value || undefined)}>
-                          <option value="">None</option>
-                          {combat.creatures
-                            .filter((creature) => creature.id !== activeCreature.id && !isDefeated(creature))
-                            .map((creature) => (
-                              <option key={creature.id} value={creature.id}>
-                                {creature.name}
-                              </option>
-                            ))}
-                        </select>
-                      </label>
-                      <label>
-                        Help mode
-                        <select value={helpMode} onChange={(event) => setHelpMode(event.target.value as HelpMode)}>
-                          <option value="ally">Help ally</option>
-                          <option value="enemy">Help against enemy</option>
-                        </select>
-                      </label>
-                      <label>
-                        Ready action
-                        <select value={readyActionId ?? activeActions[0]?.id ?? ''} onChange={(event) => setReadyActionId(event.target.value || undefined)}>
-                          {activeActions.map((action) => (
-                            <option key={action.id} value={action.id}>
-                              {action.name}
-                            </option>
-                          ))}
-                        </select>
-                      </label>
-                      <label>
-                        Ready trigger
-                        <input value={readyTrigger} onChange={(event) => setReadyTrigger(event.target.value)} />
-                      </label>
-                      <label>
-                        Search
-                        <select value={searchMode} onChange={(event) => setSearchMode(event.target.value as SearchMode)}>
-                          <option value="perception">WIS / Perception</option>
-                          <option value="investigation">INT / Investigation</option>
-                        </select>
-                      </label>
-                      <label>
-                        Shove
-                        <select value={shoveOutcome} onChange={(event) => setShoveOutcome(event.target.value as ShoveOutcome)}>
-                          <option value="prone">Knock prone</option>
-                          <option value="push">Push 5 ft</option>
-                        </select>
-                      </label>
-                      <label>
-                        Improvised ability
-                        <select value={improvisedAbility} onChange={(event) => setImprovisedAbility(event.target.value as Ability | '')}>
-                          <option value="">No roll</option>
-                          <option value="str">STR</option>
-                          <option value="dex">DEX</option>
-                          <option value="con">CON</option>
-                          <option value="int">INT</option>
-                          <option value="wis">WIS</option>
-                          <option value="cha">CHA</option>
-                        </select>
-                      </label>
-                      <label>
-                        Note
-                        <input value={basicNote} onChange={(event) => setBasicNote(event.target.value)} />
-                      </label>
-                    </div>
-                  </details>
-                </section>
-                {/* Combat: creature actions */}
-                <CreatureActionGroups
-                  actions={activeActions}
-                  page={actionPages[actionTab] ?? 0}
-                  selectedActionId={selectedActionId}
-                  selectedTab={actionTab}
-                  onChangePage={(page) => setActionPages((current) => ({ ...current, [actionTab]: page }))}
-                  onSelectTab={setActionTab}
-                  getDisabledReason={(action) => getActionDisabledReason(activeCreature, action, combat.turnState)}
-                  onSelect={handleCreatureActionSelect}
-                />
-              </div>
-            </>
-          ) : (
-            <p>Roll initiative to begin.</p>
-          )}
-        </section>
+        <PerformanceProfiler id="actions">
+          <ActionBar
+            actionPages={actionPages}
+            actionTab={actionTab}
+            activeActions={activeActions}
+            activeCreature={activeCreature}
+            basicNote={basicNote}
+            basicTargetId={basicTargetId}
+            botTurnSequence={botTurnSequence}
+            combat={combat}
+            helpMode={helpMode}
+            improvisedAbility={improvisedAbility}
+            readyActionId={readyActionId}
+            readyTrigger={readyTrigger}
+            searchMode={searchMode}
+            selectedAction={selectedAction}
+            selectedActionId={selectedActionId}
+            selectionMode={selectionMode}
+            shoveOutcome={shoveOutcome}
+            onBasicAction={stableHandleBasicAction}
+            onCancelSelection={stableCancelSelection}
+            onCreatureActionSelect={stableHandleCreatureActionSelect}
+            onResetTargeting={stableResetTargeting}
+            onRunBotTurn={stableRunBotTurnSequence}
+            onStopBotTurn={stableStopBotTurnSequence}
+            setActionPages={setActionPages}
+            setActionTab={setActionTab}
+            setBasicNote={setBasicNote}
+            setBasicTargetId={setBasicTargetId}
+            setHelpMode={setHelpMode}
+            setImprovisedAbility={setImprovisedAbility}
+            setReadyActionId={setReadyActionId}
+            setReadyTrigger={setReadyTrigger}
+            setSearchMode={setSearchMode}
+            setShoveOutcome={setShoveOutcome}
+          />
+        </PerformanceProfiler>
 
         {/* Combat: log/feed */}
-        <section className={['panel', 'combat-feed', openHudPanels.log ? 'hud-open' : ''].join(' ')}>
-          {renderHudPanelBar('log', 'Log')}
-          <div className="panel-heading-row">
-            <h2>Combat Log</h2>
-            <div className="combat-log-heading-actions">
-              <button disabled={combat.log.length === 0} onClick={copyFullCombatLog}>
-                {logCopyStatus === 'copied' ? 'Copied!' : logCopyStatus === 'error' ? 'Copy Failed' : 'Copy Full Log'}
-              </button>
-              <button onClick={() => setLogExpanded((current) => !current)}>
-                {logExpanded ? 'Show Recent' : 'Full History'}
-              </button>
-            </div>
-          </div>
-          <ol className="combat-log" ref={logRef} tabIndex={0} aria-label="Combat log">
-            {visibleLogEntries.map((entry) => (
-              <li key={entry.id}>
-                <strong>{entry.type}</strong> {entry.message}
-              </li>
-            ))}
-          </ol>
-        </section>
+        <PerformanceProfiler id="combat-log">
+          <CombatLogPanel
+            copyStatus={logCopyStatus}
+            expanded={logExpanded}
+            log={combat.log}
+            logRef={logRef}
+            open={Boolean(openHudPanels.log)}
+            onClose={stableCloseHudPanel}
+            onCopy={stableCopyFullCombatLog}
+            onDragEnd={stableHandleHudDragEnd}
+            onDragMove={stableHandleHudDragMove}
+            onDragStart={stableHandleHudDragStart}
+            onToggleExpanded={setLogExpanded}
+          />
+        </PerformanceProfiler>
 
         {/* Combat: import/export data panel */}
         {uiSettings.showAdvancedTools && (
@@ -1905,13 +1857,497 @@ export function App() {
   );
 }
 
+const HudPanelBar = memo(function HudPanelBar({
+  panel,
+  title,
+  onClose,
+  onDragStart,
+  onDragMove,
+  onDragEnd
+}: {
+  panel: HudPanel;
+  title: string;
+  onClose: (panel: HudPanel) => void;
+  onDragStart: (panel: HudPanel, event: PointerEvent<HTMLDivElement>) => void;
+  onDragMove: (event: PointerEvent<HTMLDivElement>) => void;
+  onDragEnd: (event: PointerEvent<HTMLDivElement>) => void;
+}) {
+  return (
+    <div
+      className="hud-panel-bar"
+      onPointerDown={(event) => onDragStart(panel, event)}
+      onPointerMove={onDragMove}
+      onPointerUp={onDragEnd}
+      onPointerCancel={onDragEnd}
+    >
+      <span>{title}</span>
+      <button
+        className="hud-panel-close"
+        onPointerDown={(event) => event.stopPropagation()}
+        onClick={() => onClose(panel)}
+        aria-label={`Close ${title.toLowerCase()} panel`}
+      >
+        Close
+      </button>
+    </div>
+  );
+});
+
+const InitiativePanel = memo(function InitiativePanel({
+  combat,
+  query,
+  open,
+  onClose,
+  onDragStart,
+  onDragMove,
+  onDragEnd,
+  onSelectCreature
+}: {
+  combat: CombatState;
+  query: CombatQueryContext;
+  open: boolean;
+  onClose: (panel: HudPanel) => void;
+  onDragStart: (panel: HudPanel, event: PointerEvent<HTMLDivElement>) => void;
+  onDragMove: (event: PointerEvent<HTMLDivElement>) => void;
+  onDragEnd: (event: PointerEvent<HTMLDivElement>) => void;
+  onSelectCreature: Dispatch<SetStateAction<string | undefined>>;
+}) {
+  const activeCreature = combat.activeCreatureId ? query.creatureById.get(combat.activeCreatureId) : undefined;
+
+  return (
+    <aside className={['panel', 'initiative-hud', open ? 'hud-open' : ''].join(' ')} tabIndex={0} aria-label="Initiative and creature list">
+      <HudPanelBar
+        panel="roster"
+        title="Roster"
+        onClose={onClose}
+        onDragEnd={onDragEnd}
+        onDragMove={onDragMove}
+        onDragStart={onDragStart}
+      />
+      <div className="round-card">
+        <strong>Round {combat.round || '-'}</strong>
+        <span>{activeCreature?.name ?? 'No initiative'}</span>
+      </div>
+      <h2>Initiative</h2>
+      <section className="initiative-tracker">
+        {combat.initiative.length === 0 && <span>No initiative yet.</span>}
+        {combat.initiative.map((entry) => {
+          const creature = query.creatureById.get(entry.creatureId) ?? findCreature(combat, entry.creatureId);
+          return (
+            <button
+              className={[
+                'initiative-item',
+                creature.id === combat.activeCreatureId ? 'active-initiative' : '',
+                isDefeated(creature) ? 'defeated-initiative' : ''
+              ].join(' ')}
+              key={entry.creatureId}
+              onClick={() => onSelectCreature(creature.id)}
+              title={getConditionLabels(creature)}
+            >
+              <span className="team-dot" style={{ backgroundColor: getTeamColor(combat, creature.team, query.teams) }} />
+              <strong>{creature.name}</strong>
+              <small>{creature.controlMode === 'bot' ? 'Bot' : 'Manual'}</small>
+              <MemoizedHpBar creature={creature} compact />
+              <span>
+                HP {creature.hp}/{creature.maxHp}
+              </span>
+              <MemoizedConditionTags creature={creature} />
+            </button>
+          );
+        })}
+      </section>
+    </aside>
+  );
+});
+
+const CombatLogPanel = memo(function CombatLogPanel({
+  copyStatus,
+  expanded,
+  log,
+  logRef,
+  open,
+  onClose,
+  onCopy,
+  onDragStart,
+  onDragMove,
+  onDragEnd,
+  onToggleExpanded
+}: {
+  copyStatus?: 'copied' | 'error';
+  expanded: boolean;
+  log: CombatState['log'];
+  logRef: RefObject<HTMLOListElement | null>;
+  open: boolean;
+  onClose: (panel: HudPanel) => void;
+  onCopy: () => Promise<void>;
+  onDragStart: (panel: HudPanel, event: PointerEvent<HTMLDivElement>) => void;
+  onDragMove: (event: PointerEvent<HTMLDivElement>) => void;
+  onDragEnd: (event: PointerEvent<HTMLDivElement>) => void;
+  onToggleExpanded: Dispatch<SetStateAction<boolean>>;
+}) {
+  const [windowAnchorId, setWindowAnchorId] = useState<string>();
+  const requestedWindowStart = useMemo(
+    () => getCombatLogAnchorStart(log, windowAnchorId),
+    [log, windowAnchorId]
+  );
+  const logWindow = useMemo(
+    () => getCombatLogWindow(log.length, expanded, requestedWindowStart),
+    [expanded, log.length, requestedWindowStart]
+  );
+  const visibleEntries = useMemo(
+    () => log.slice(logWindow.start, logWindow.end),
+    [log, logWindow.end, logWindow.start]
+  );
+
+  incrementPerformanceCounter('react.combat-log.entries-rendered', visibleEntries.length);
+  if (logWindow.windowed) {
+    incrementPerformanceCounter('react.combat-log.windowed-renders');
+    incrementPerformanceCounter('react.combat-log.entries-skipped', log.length - visibleEntries.length);
+  }
+
+  const showNewerLogEntries = useCallback(() => {
+    const start = Math.max(0, logWindow.start - EXPANDED_COMBAT_LOG_WINDOW_SIZE);
+    setWindowAnchorId(start === 0 ? undefined : log[start]?.id);
+    logRef.current?.scrollTo({ top: 0 });
+  }, [log, logRef, logWindow.start]);
+
+  const showOlderLogEntries = useCallback(() => {
+    setWindowAnchorId(log[logWindow.end]?.id);
+    logRef.current?.scrollTo({ top: 0 });
+  }, [log, logRef, logWindow.end]);
+
+  const toggleExpanded = useCallback(() => {
+    setWindowAnchorId(undefined);
+    logRef.current?.scrollTo({ top: 0 });
+    onToggleExpanded((current) => !current);
+  }, [logRef, onToggleExpanded]);
+
+  return (
+    <section className={['panel', 'combat-feed', open ? 'hud-open' : ''].join(' ')}>
+      <HudPanelBar
+        panel="log"
+        title="Log"
+        onClose={onClose}
+        onDragEnd={onDragEnd}
+        onDragMove={onDragMove}
+        onDragStart={onDragStart}
+      />
+      <div className="panel-heading-row">
+        <h2>Combat Log</h2>
+        <div className="combat-log-heading-actions">
+          <button disabled={log.length === 0} onClick={onCopy}>
+            {copyStatus === 'copied' ? 'Copied!' : copyStatus === 'error' ? 'Copy Failed' : 'Copy Full Log'}
+          </button>
+          <button onClick={toggleExpanded}>
+            {expanded ? 'Show Recent' : 'Full History'}
+          </button>
+        </div>
+      </div>
+      {logWindow.windowed && (
+        <div className="combat-log-window-controls" role="group" aria-label="Combat log history navigation">
+          <button disabled={!logWindow.hasNewer} onClick={showNewerLogEntries}>
+            Newer
+          </button>
+          <span aria-live="polite">
+            {logWindow.start + 1}–{logWindow.end} of {log.length}
+          </span>
+          <button disabled={!logWindow.hasOlder} onClick={showOlderLogEntries}>
+            Older
+          </button>
+        </div>
+      )}
+      <ol
+        className={['combat-log', expanded ? 'expanded' : ''].join(' ')}
+        ref={logRef}
+        tabIndex={0}
+        aria-label="Combat log"
+        start={logWindow.start + 1}
+      >
+        {visibleEntries.map((entry) => (
+          <li key={entry.id}>
+            <strong>{entry.type}</strong> {entry.message}
+          </li>
+        ))}
+      </ol>
+    </section>
+  );
+});
+
+const ActionBar = memo(function ActionBar({
+  actionPages,
+  actionTab,
+  activeActions,
+  activeCreature,
+  basicNote,
+  basicTargetId,
+  botTurnSequence,
+  combat,
+  helpMode,
+  improvisedAbility,
+  readyActionId,
+  readyTrigger,
+  searchMode,
+  selectedAction,
+  selectedActionId,
+  selectionMode,
+  shoveOutcome,
+  onBasicAction,
+  onCancelSelection,
+  onCreatureActionSelect,
+  onResetTargeting,
+  onRunBotTurn,
+  onStopBotTurn,
+  setActionPages,
+  setActionTab,
+  setBasicNote,
+  setBasicTargetId,
+  setHelpMode,
+  setImprovisedAbility,
+  setReadyActionId,
+  setReadyTrigger,
+  setSearchMode,
+  setShoveOutcome
+}: {
+  actionPages: Partial<Record<ActionDefinition['actionCost'], number>>;
+  actionTab: ActionDefinition['actionCost'];
+  activeActions: ActionDefinition[];
+  activeCreature?: Creature;
+  basicNote: string;
+  basicTargetId?: string;
+  botTurnSequence: BotTurnSequenceState;
+  combat: CombatState;
+  helpMode: HelpMode;
+  improvisedAbility: Ability | '';
+  readyActionId?: string;
+  readyTrigger: string;
+  searchMode: SearchMode;
+  selectedAction?: ActionDefinition;
+  selectedActionId?: string;
+  selectionMode: SelectionMode;
+  shoveOutcome: ShoveOutcome;
+  onBasicAction: (actionName: BasicActionName) => void;
+  onCancelSelection: () => void;
+  onCreatureActionSelect: (action: ActionDefinition) => void;
+  onResetTargeting: (actionId?: string) => void;
+  onRunBotTurn: (auto?: boolean) => Promise<void>;
+  onStopBotTurn: (disableAutoRun?: boolean) => void;
+  setActionPages: Dispatch<SetStateAction<Partial<Record<ActionDefinition['actionCost'], number>>>>;
+  setActionTab: Dispatch<SetStateAction<ActionDefinition['actionCost']>>;
+  setBasicNote: Dispatch<SetStateAction<string>>;
+  setBasicTargetId: Dispatch<SetStateAction<string | undefined>>;
+  setHelpMode: Dispatch<SetStateAction<HelpMode>>;
+  setImprovisedAbility: Dispatch<SetStateAction<Ability | ''>>;
+  setReadyActionId: Dispatch<SetStateAction<string | undefined>>;
+  setReadyTrigger: Dispatch<SetStateAction<string>>;
+  setSearchMode: Dispatch<SetStateAction<SearchMode>>;
+  setShoveOutcome: Dispatch<SetStateAction<ShoveOutcome>>;
+}) {
+  const basicTargets = useMemo(
+    () =>
+      activeCreature
+        ? combat.creatures.filter((creature) => creature.id !== activeCreature.id && !isDefeated(creature))
+        : [],
+    [activeCreature, combat.creatures]
+  );
+  const changeActionPage = useCallback(
+    (page: number) => setActionPages((current) => ({ ...current, [actionTab]: page })),
+    [actionTab, setActionPages]
+  );
+  const getDisabledReason = useCallback(
+    (action: ActionDefinition) =>
+      activeCreature ? getActionDisabledReason(activeCreature, action, combat.turnState) : 'No active creature.',
+    [activeCreature, combat.turnState]
+  );
+
+  return (
+    <section className="panel action-bar" aria-label="Available actions">
+      {activeCreature ? (
+        <>
+          <div className="action-bar-header">
+            <div className="action-bar-title">
+              <h2>Actions</h2>
+              <span>
+                {selectedAction
+                  ? `${selectedAction.name} - ${describeAction(selectedAction)}`
+                  : selectionMode === 'move'
+                    ? 'Movement mode'
+                    : 'Choose an action'}
+              </span>
+            </div>
+            <div className="mode-actions">
+              {activeCreature.controlMode === 'bot' && (
+                <button className="selected-action" disabled={botTurnSequence.running} onClick={() => void onRunBotTurn(false)}>
+                  Run Bot Turn (B)
+                </button>
+              )}
+              <button className={selectionMode === 'move' ? 'selected-action' : ''} onClick={() => onResetTargeting()}>
+                Move
+              </button>
+              <button onClick={onCancelSelection}>Cancel</button>
+            </div>
+          </div>
+          {botTurnSequence.running && (
+            <div className="bot-turn-status" role="status" aria-live="polite">
+              <span>{botTurnSequence.step}</span>
+              <button onClick={() => onStopBotTurn(botTurnSequence.auto)}>
+                {botTurnSequence.auto ? 'Stop Auto' : 'Cancel'}
+              </button>
+            </div>
+          )}
+          <div className="action-bar-grid">
+            <section className="basic-action-strip" aria-label="Basic actions">
+              <h3>Basic</h3>
+              <div className="action-list">
+                {BASIC_ACTIONS.map((actionName) => (
+                  <button
+                    disabled={combat.turnState.actionUsed}
+                    key={actionName}
+                    title={getBasicActionDescription(actionName)}
+                    onClick={() => onBasicAction(actionName)}
+                  >
+                    {actionName}
+                  </button>
+                ))}
+              </div>
+              <details className="compact-details">
+                <summary>Options</summary>
+                <div className="basic-options">
+                  <label>
+                    Basic target
+                    <select value={basicTargetId ?? ''} onChange={(event) => setBasicTargetId(event.target.value || undefined)}>
+                      <option value="">None</option>
+                      {basicTargets.map((creature) => (
+                        <option key={creature.id} value={creature.id}>
+                          {creature.name}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                  <label>
+                    Help mode
+                    <select value={helpMode} onChange={(event) => setHelpMode(event.target.value as HelpMode)}>
+                      <option value="ally">Help ally</option>
+                      <option value="enemy">Help against enemy</option>
+                    </select>
+                  </label>
+                  <label>
+                    Ready action
+                    <select value={readyActionId ?? activeActions[0]?.id ?? ''} onChange={(event) => setReadyActionId(event.target.value || undefined)}>
+                      {activeActions.map((action) => (
+                        <option key={action.id} value={action.id}>
+                          {action.name}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                  <label>
+                    Ready trigger
+                    <input value={readyTrigger} onChange={(event) => setReadyTrigger(event.target.value)} />
+                  </label>
+                  <label>
+                    Search
+                    <select value={searchMode} onChange={(event) => setSearchMode(event.target.value as SearchMode)}>
+                      <option value="perception">WIS / Perception</option>
+                      <option value="investigation">INT / Investigation</option>
+                    </select>
+                  </label>
+                  <label>
+                    Shove
+                    <select value={shoveOutcome} onChange={(event) => setShoveOutcome(event.target.value as ShoveOutcome)}>
+                      <option value="prone">Knock prone</option>
+                      <option value="push">Push 5 ft</option>
+                    </select>
+                  </label>
+                  <label>
+                    Improvised ability
+                    <select value={improvisedAbility} onChange={(event) => setImprovisedAbility(event.target.value as Ability | '')}>
+                      <option value="">No roll</option>
+                      <option value="str">STR</option>
+                      <option value="dex">DEX</option>
+                      <option value="con">CON</option>
+                      <option value="int">INT</option>
+                      <option value="wis">WIS</option>
+                      <option value="cha">CHA</option>
+                    </select>
+                  </label>
+                  <label>
+                    Note
+                    <input value={basicNote} onChange={(event) => setBasicNote(event.target.value)} />
+                  </label>
+                </div>
+              </details>
+            </section>
+            <MemoizedCreatureActionGroups
+              actions={activeActions}
+              page={actionPages[actionTab] ?? 0}
+              selectedActionId={selectedActionId}
+              selectedTab={actionTab}
+              onChangePage={changeActionPage}
+              onSelectTab={setActionTab}
+              getDisabledReason={getDisabledReason}
+              onSelect={onCreatureActionSelect}
+            />
+          </div>
+        </>
+      ) : (
+        <p>Roll initiative to begin.</p>
+      )}
+    </section>
+  );
+});
+
 const GRID_CELL_GAP = 2;
 const GRID_OVERSCAN_CELLS = 3;
 const MAX_FULL_3D_TILES = 900;
 const CULLED_3D_TILE_RADIUS = 17;
 
+type CameraFrameDelta =
+  | { kind: 'orbit'; yaw: number; pitch: number }
+  | { kind: 'pan'; x: number; y: number }
+  | { kind: 'zoom'; amount: number }
+  | { kind: 'set-yaw'; value: number }
+  | { kind: 'set-pitch'; value: number }
+  | { kind: 'set-zoom'; value: number };
+
+const Battlefield3DTerrainLayer = memo(function Battlefield3DTerrainLayer({
+  children,
+  tileCount
+}: {
+  children: ReactNode;
+  tileCount: number;
+}) {
+  incrementPerformanceCounter('react.battlefield-3d.terrain-layer-renders');
+  incrementPerformanceCounter('react.battlefield-3d.tiles-rendered', tileCount);
+  return <g data-render-layer="terrain">{children}</g>;
+});
+
+const Battlefield3DEffectsLayer = memo(function Battlefield3DEffectsLayer({
+  children,
+  effectCount
+}: {
+  children: ReactNode;
+  effectCount: number;
+}) {
+  incrementPerformanceCounter('react.battlefield-3d.effects-layer-renders');
+  incrementPerformanceCounter('react.battlefield-3d.effects-rendered', effectCount);
+  return <g data-render-layer="effects">{children}</g>;
+});
+
+const Battlefield3DCreatureLayer = memo(function Battlefield3DCreatureLayer({
+  children,
+  creatureCount
+}: {
+  children: ReactNode;
+  creatureCount: number;
+}) {
+  incrementPerformanceCounter('react.battlefield-3d.creature-layer-renders');
+  incrementPerformanceCounter('react.battlefield-3d.creatures-rendered', creatureCount);
+  return <g data-render-layer="creatures">{children}</g>;
+});
+
 function Battlefield2DView({
   combat,
+  query,
   gridCursor,
   gridCellSize,
   highlightedKeys,
@@ -1931,6 +2367,7 @@ function Battlefield2DView({
   viewportRef
 }: {
   combat: CombatState;
+  query: CombatQueryContext;
   gridCursor: GridPosition;
   gridCellSize: number;
   highlightedKeys: Set<string>;
@@ -2008,12 +2445,8 @@ function Battlefield2DView({
   }, [cellSize, combat.grid.height, combat.grid.width, viewportRef]);
 
   const visibleCells = useMemo(() => getVisibleGridCells(visibleWindow), [visibleWindow]);
-  const creatureByTile = useMemo(
-    () => new Map(combat.creatures.map((creature) => [positionKey(creature.position), creature])),
-    [combat.creatures]
-  );
   const visualEventsByCreature = useMemo(() => groupVisualEventsByCreature(visualEvents), [visualEvents]);
-  const blockedKeys = useMemo(() => new Set(combat.grid.blocked.map(positionKey)), [combat.grid.blocked]);
+  incrementPerformanceCounter('react.battlefield-2d.cells-rendered', visibleCells.length);
 
   return (
     <div
@@ -2026,10 +2459,11 @@ function Battlefield2DView({
     >
       <div className="grid-board virtual-grid-board" style={{ height: boardHeight, width: boardWidth }}>
         {visibleCells.map(({ x, y }) => {
-          const position = getTilePosition({ x, y }, combat.grid);
+          const position = getTilePosition({ x, y }, combat.grid, query.grid);
           const key = positionKey(position);
-          const creature = creatureByTile.get(key);
-          const blocked = blockedKeys.has(key);
+          const creatures = query.creaturesByTile.get(key);
+          const creature = creatures?.[creatures.length - 1];
+          const blocked = query.grid.blockedKeys.has(key);
           const movement = selectionMode === 'move' && movementKeys.has(position3DKey(position));
           const movementPath = movementPathTileKeys.has(positionKey(position));
           const opportunityMovement = movement && opportunityMovementKeys.has(position3DKey(position));
@@ -2041,7 +2475,7 @@ function Battlefield2DView({
           const cursor = samePosition(gridCursor, position);
           const toolStart = mapToolStart ? samePosition(mapToolStart, position) : false;
           const toolEnd = mapToolEnd ? samePosition(mapToolEnd, position) : false;
-          const tileHeight = getTileHeight(position, combat.grid);
+          const tileHeight = getTileHeight(position, combat.grid, query.grid);
 
           return (
             <button
@@ -2071,13 +2505,13 @@ function Battlefield2DView({
                 <span className="token-stack" title={`${creature.name} at ${formatPosition(creature.position)} HP ${creature.hp}/${creature.maxHp} ${getConditionLabels(creature)}`}>
                   <span
                     className={`token ${isDefeated(creature) ? 'defeated' : ''} ${getTokenVisualClass(creatureVisualEvents, visualEffectsMode)}`}
-                    style={{ backgroundColor: getTeamColor(combat, creature.team) }}
+                    style={{ backgroundColor: getTeamColor(combat, creature.team, query.teams) }}
                   >
                     {getCreatureShortLabel(creature)}
                   </span>
-                  <VisualEventOverlay events={creatureVisualEvents} mode={visualEffectsMode} textSize={visualEffectsTextSize} />
-                  <HpBar creature={creature} compact />
-                  <ConditionTags creature={creature} compact />
+                  <MemoizedVisualEventOverlay events={creatureVisualEvents} mode={visualEffectsMode} textSize={visualEffectsTextSize} />
+                  <MemoizedHpBar creature={creature} compact />
+                  <MemoizedConditionTags creature={creature} compact />
                 </span>
               )}
             </button>
@@ -2090,6 +2524,7 @@ function Battlefield2DView({
 
 function Battlefield3DView({
   combat,
+  query,
   gridCursor,
   gridCellSize,
   highlightedKeys,
@@ -2117,6 +2552,7 @@ function Battlefield3DView({
   viewportRef
 }: {
   combat: CombatState;
+  query: CombatQueryContext;
   gridCursor: GridPosition;
   gridCellSize: number;
   highlightedKeys: Set<string>;
@@ -2153,16 +2589,82 @@ function Battlefield3DView({
   );
   const svgWidth = Math.max(860, boardWidth * 1.75 + 220);
   const svgHeight = Math.max(500, boardHeight * 1.35 + maxElevation * 48 + 180);
-  const unitSize = cellSize * 1.16 * cameraZoom;
-  const yawRadians = (cameraYaw * Math.PI) / 180;
-  const pitchRadians = (cameraPitch * Math.PI) / 180;
-  const pitchScale = Math.max(0.38, Math.sin(pitchRadians));
-  const zScale = 0.72;
+  const { projectPoint, getProjectedDepth, projectTileCorners } = useMemo(
+    () => createBattlefield3DProjection({
+      gridWidth: combat.grid.width,
+      gridHeight: combat.grid.height,
+      svgWidth,
+      svgHeight,
+      cellSize,
+      cameraYaw,
+      cameraPitch,
+      cameraZoom,
+      cameraPanX,
+      cameraPanY
+    }),
+    [
+      cameraPanX,
+      cameraPanY,
+      cameraPitch,
+      cameraYaw,
+      cameraZoom,
+      cellSize,
+      combat.grid.height,
+      combat.grid.width,
+      svgHeight,
+      svgWidth
+    ]
+  );
   const viewportStyle = {
     minHeight: Math.max(500, svgHeight * 0.72)
   };
   const dragState = useRef<{ x: number; y: number; mode: 'orbit' | 'pan' } | undefined>(undefined);
-  const blockedTileKeys = useMemo(() => new Set(combat.grid.blocked.map(positionKey)), [combat.grid.blocked]);
+  const cameraFrameQueue = useRef<FrameQueue<CameraFrameDelta> | undefined>(undefined);
+  if (!cameraFrameQueue.current) {
+    cameraFrameQueue.current = createFrameQueue((deltas) => {
+      const yawDeltas = deltas.filter((delta) => delta.kind === 'orbit' || delta.kind === 'set-yaw');
+      const pitchDeltas = deltas.filter((delta) => delta.kind === 'orbit' || delta.kind === 'set-pitch');
+      const panDeltas = deltas.filter(
+        (delta): delta is Extract<CameraFrameDelta, { kind: 'pan' }> => delta.kind === 'pan'
+      );
+      const zoomDeltas = deltas.filter((delta) => delta.kind === 'zoom' || delta.kind === 'set-zoom');
+
+      if (yawDeltas.length > 0) {
+        setCameraYaw((current) =>
+          yawDeltas.reduce(
+            (value, delta) => delta.kind === 'set-yaw' ? delta.value : clampNumber(value + delta.yaw, -360, 360),
+            current
+          )
+        );
+      }
+      if (pitchDeltas.length > 0) {
+        setCameraPitch((current) =>
+          pitchDeltas.reduce(
+            (value, delta) => delta.kind === 'set-pitch' ? delta.value : clampNumber(value + delta.pitch, 8, 88),
+            current
+          )
+        );
+      }
+      if (panDeltas.length > 0) {
+        setCameraPanX((current) => panDeltas.reduce((value, delta) => value + delta.x, current));
+        setCameraPanY((current) => panDeltas.reduce((value, delta) => value + delta.y, current));
+      }
+      if (zoomDeltas.length > 0) {
+        setCameraZoom((current) =>
+          zoomDeltas.reduce(
+            (value, delta) =>
+              delta.kind === 'set-zoom'
+                ? delta.value
+                : clampNumber(Number((value + delta.amount).toFixed(2)), 0.35, 2.5),
+            current
+          )
+        );
+      }
+      incrementPerformanceCounter('react.battlefield-3d.camera-frames');
+      incrementPerformanceCounter('react.battlefield-3d.camera-events-applied', deltas.length);
+    });
+  }
+  useEffect(() => () => cameraFrameQueue.current?.dispose(), []);
   const effectiveVisualEffectsIntensity = settings.visualEffectsMode === 'reduced' ? 'low' : visualEffectsIntensity;
   const visualIntensity = getVisualIntensityConfig(effectiveVisualEffectsIntensity);
   const movementTileKeys = useMemo(() => new Set([...movementKeys].map((key) => key.split(',').slice(0, 2).join(','))), [movementKeys]);
@@ -2211,13 +2713,19 @@ function Battlefield3DView({
     dragState.current = { ...dragState.current, x: event.clientX, y: event.clientY };
 
     if (dragState.current.mode === 'pan') {
-      setCameraPanX((current) => current + (settings.invertCameraPanX ? -dx : dx));
-      setCameraPanY((current) => current + (settings.invertCameraPanY ? -dy : dy));
+      cameraFrameQueue.current?.enqueue({
+        kind: 'pan',
+        x: settings.invertCameraPanX ? -dx : dx,
+        y: settings.invertCameraPanY ? -dy : dy
+      });
       return;
     }
 
-    setCameraYaw((current) => clampNumber(current + (settings.invertCameraOrbitX ? -dx : dx) * 0.5, -360, 360));
-    setCameraPitch((current) => clampNumber(current + (settings.invertCameraOrbitY ? dy : -dy) * 0.35, 8, 88));
+    cameraFrameQueue.current?.enqueue({
+      kind: 'orbit',
+      yaw: (settings.invertCameraOrbitX ? -dx : dx) * 0.5,
+      pitch: (settings.invertCameraOrbitY ? dy : -dy) * 0.35
+    });
   }
 
   function handlePointerUp(event: PointerEvent<HTMLDivElement>) {
@@ -2227,38 +2735,10 @@ function Battlefield3DView({
 
   function handleWheel(event: WheelEvent<HTMLDivElement>) {
     event.preventDefault();
-    setCameraZoom((current) =>
-      clampNumber(Number((current + (settings.invertCameraZoom ? event.deltaY : -event.deltaY) * 0.001).toFixed(2)), 0.35, 2.5)
-    );
-  }
-
-  function projectPoint(x: number, y: number, z: number) {
-    const centeredX = x - combat.grid.width / 2;
-    const centeredY = y - combat.grid.height / 2;
-    const rotatedX = centeredX * Math.cos(yawRadians) - centeredY * Math.sin(yawRadians);
-    const rotatedY = centeredX * Math.sin(yawRadians) + centeredY * Math.cos(yawRadians);
-
-    return {
-      x: svgWidth / 2 + rotatedX * unitSize + cameraPanX,
-      y: svgHeight / 2 + rotatedY * unitSize * pitchScale - z * unitSize * zScale + cameraPanY,
-      depth: rotatedY + z * 0.35
-    };
-  }
-
-  function getProjectedDepth(x: number, y: number): number {
-    const centeredX = x - combat.grid.width / 2;
-    const centeredY = y - combat.grid.height / 2;
-    return centeredX * Math.sin(yawRadians) + centeredY * Math.cos(yawRadians);
-  }
-
-  function projectTileCorners(x: number, y: number, z: number) {
-    const inset = 0.045;
-    return {
-      northWest: projectPoint(x + inset, y + inset, z),
-      northEast: projectPoint(x + 1 - inset, y + inset, z),
-      southEast: projectPoint(x + 1 - inset, y + 1 - inset, z),
-      southWest: projectPoint(x + inset, y + 1 - inset, z)
-    };
+    cameraFrameQueue.current?.enqueue({
+      kind: 'zoom',
+      amount: (settings.invertCameraZoom ? event.deltaY : -event.deltaY) * 0.001
+    });
   }
 
   function formatPolygon(points: Array<{ x: number; y: number }>): string {
@@ -2393,9 +2873,9 @@ function Battlefield3DView({
 
   function renderTile(tile: { x: number; y: number }) {
     const { x, y } = tile;
-    const position = getTilePosition({ x, y }, combat.grid);
-    const tileHeight = getTileHeight(position, combat.grid);
-    const blocked = blockedTileKeys.has(positionKey(position));
+    const position = getTilePosition({ x, y }, combat.grid, query.grid);
+    const tileHeight = getTileHeight(position, combat.grid, query.grid);
+    const blocked = query.grid.blockedKeys.has(positionKey(position));
     const highlighted = highlightedKeys.has(positionKey(position));
     const movement = movementKeys.has(position3DKey(position)) || movementTileKeys.has(positionKey(position));
     const movementPath = movementPathTileKeys.has(positionKey(position));
@@ -2445,7 +2925,7 @@ function Battlefield3DView({
     }
 
     const color = getSafeVisualColor(event.color);
-    const squares = getShapeSquares(event.shape, event.origin, combat.grid, event.direction);
+    const squares = getShapeSquares(event.shape, event.origin, combat.grid, event.direction, query);
     const limitedSquares = squares.slice(0, visualIntensity.shapeSquareLimit);
     const originPoint = projectPoint(event.origin.x + 0.5, event.origin.y + 0.5, getElevation(event.origin) + 0.16);
     return (
@@ -2458,7 +2938,7 @@ function Battlefield3DView({
           stroke={color}
         />
         {limitedSquares.map((square, index) => {
-          const tileHeight = getTileHeight(square, combat.grid);
+          const tileHeight = getTileHeight(square, combat.grid, query.grid);
           const corners = projectTileCorners(square.x, square.y, tileHeight + 0.06);
           const center = projectPoint(square.x + 0.5, square.y + 0.5, tileHeight + 0.1);
           return (
@@ -2571,33 +3051,77 @@ function Battlefield3DView({
     );
   }
 
-  const sortedCreatures = [...combat.creatures].sort(
-    (a, b) => getProjectedDepth(a.position.x + 0.5, a.position.y + 0.5) - getProjectedDepth(b.position.x + 0.5, b.position.y + 0.5)
+  const sortedCreatures = useMemo(
+    () => [...combat.creatures].sort(
+      (a, b) => getProjectedDepth(a.position.x + 0.5, a.position.y + 0.5) - getProjectedDepth(b.position.x + 0.5, b.position.y + 0.5)
+    ),
+    [cameraYaw, combat.creatures, combat.grid.height, combat.grid.width]
   );
   const visualEventsByCreature = useMemo(() => groupVisualEventsByCreature(visualEvents), [visualEvents]);
-  const shapeVisualEvents = visualEvents.filter((event) => event.kind === 'shapeEffect');
-  const impactVisualEvents = visualEvents.filter((event) => event.kind === 'attackImpact');
-
-  return (
-    <div
-      className="battlefield-3d-viewport"
-      ref={viewportRef}
-      style={viewportStyle}
-      aria-label="Experimental 3D battlefield view"
-      role="grid"
-      tabIndex={0}
-      title="3D grid focused. Use arrow keys to move the cursor and Enter to select."
-      onPointerDown={handlePointerDown}
-      onPointerMove={handlePointerMove}
-      onPointerUp={handlePointerUp}
-      onPointerCancel={handlePointerUp}
-      onWheel={handleWheel}
-    >
-      <svg className="battlefield-3d-svg" viewBox={`0 0 ${svgWidth} ${svgHeight}`} role="img" aria-label="Projected 3D battlefield">
-        <rect className="battlefield-3d-sky" height={svgHeight} width={svgWidth} x={0} y={0} />
+  const shapeVisualEvents = useMemo(
+    () => visualEvents.filter((event) => event.kind === 'shapeEffect'),
+    [visualEvents]
+  );
+  const impactVisualEvents = useMemo(
+    () => visualEvents.filter((event) => event.kind === 'attackImpact'),
+    [visualEvents]
+  );
+  const terrainLayer = useMemo(
+    () => (
+      <Battlefield3DTerrainLayer tileCount={tileCoordinates.length}>
         {tileCoordinates.map(renderTile)}
+      </Battlefield3DTerrainLayer>
+    ),
+    [
+      cameraPanX,
+      cameraPanY,
+      cameraPitch,
+      cameraYaw,
+      cameraZoom,
+      cellSize,
+      combat.grid,
+      gridCursor,
+      highlightedKeys,
+      mapToolKeys,
+      movementKeys,
+      movementPathTileKeys,
+      movementTileKeys,
+      onCellClick,
+      opportunityMovementKeys,
+      opportunityMovementTileKeys,
+      query.grid,
+      settings.showGridCoordinates,
+      svgHeight,
+      svgWidth,
+      tileCoordinates
+    ]
+  );
+  const effectsLayer = useMemo(
+    () => (
+      <Battlefield3DEffectsLayer effectCount={shapeVisualEvents.length + impactVisualEvents.length}>
         {shapeVisualEvents.map(renderShapeVisualEvent)}
         {impactVisualEvents.map(renderAttackImpactEvent)}
+      </Battlefield3DEffectsLayer>
+    ),
+    [
+      cameraPanX,
+      cameraPanY,
+      cameraPitch,
+      cameraYaw,
+      cameraZoom,
+      cellSize,
+      combat.grid,
+      effectiveVisualEffectsIntensity,
+      impactVisualEvents,
+      query,
+      shapeVisualEvents,
+      svgHeight,
+      svgWidth
+    ]
+  );
+  const creatureLayer = useMemo(
+    () => (
+      <Battlefield3DCreatureLayer creatureCount={sortedCreatures.length}>
         {sortedCreatures.map((creature) => {
           const center = projectPoint(creature.position.x + 0.5, creature.position.y + 0.5, getElevation(creature.position) + 0.28);
           const base = projectPoint(creature.position.x + 0.5, creature.position.y + 0.5, getElevation(creature.position));
@@ -2623,7 +3147,7 @@ function Battlefield3DView({
                 className="creature-3d-side"
                 cx={center.x}
                 cy={center.y + 7}
-                fill={darkenColor(getTeamColor(combat, creature.team))}
+                fill={darkenColor(getTeamColor(combat, creature.team, query.teams))}
                 rx={cellSize * 0.3}
                 ry={cellSize * 0.12}
               />
@@ -2631,7 +3155,7 @@ function Battlefield3DView({
                 className={selected || active ? 'creature-3d-top emphasized' : 'creature-3d-top'}
                 cx={center.x}
                 cy={center.y}
-                fill={getTeamColor(combat, creature.team)}
+                fill={getTeamColor(combat, creature.team, query.teams)}
                 rx={cellSize * 0.31}
                 ry={cellSize * 0.14}
               />
@@ -2646,6 +3170,47 @@ function Battlefield3DView({
             </g>
           );
         })}
+      </Battlefield3DCreatureLayer>
+    ),
+    [
+      cameraPanX,
+      cameraPanY,
+      cameraPitch,
+      cameraYaw,
+      cameraZoom,
+      cellSize,
+      combat,
+      query.teams,
+      selectedCreatureId,
+      settings.visualEffectsMode,
+      sortedCreatures,
+      svgHeight,
+      svgWidth,
+      visualEffectsTextSize,
+      visualEventsByCreature
+    ]
+  );
+
+  return (
+    <div
+      className="battlefield-3d-viewport"
+      ref={viewportRef}
+      style={viewportStyle}
+      aria-label="Experimental 3D battlefield view"
+      role="grid"
+      tabIndex={0}
+      title="3D grid focused. Use arrow keys to move the cursor and Enter to select."
+      onPointerDown={handlePointerDown}
+      onPointerMove={handlePointerMove}
+      onPointerUp={handlePointerUp}
+      onPointerCancel={handlePointerUp}
+      onWheel={handleWheel}
+    >
+      <svg className="battlefield-3d-svg" viewBox={`0 0 ${svgWidth} ${svgHeight}`} role="img" aria-label="Projected 3D battlefield">
+        <rect className="battlefield-3d-sky" height={svgHeight} width={svgWidth} x={0} y={0} />
+        {terrainLayer}
+        {effectsLayer}
+        {creatureLayer}
       </svg>
       <details
         className="camera-controls-3d"
@@ -2661,7 +3226,9 @@ function Battlefield3DView({
             step={5}
             type="range"
             value={cameraYaw}
-            onChange={(event) => setCameraYaw(Number(event.target.value))}
+            onChange={(event) => {
+              cameraFrameQueue.current?.enqueue({ kind: 'set-yaw', value: Number(event.target.value) });
+            }}
           />
         </label>
         <label>
@@ -2672,7 +3239,9 @@ function Battlefield3DView({
             step={5}
             type="range"
             value={cameraPitch}
-            onChange={(event) => setCameraPitch(Number(event.target.value))}
+            onChange={(event) => {
+              cameraFrameQueue.current?.enqueue({ kind: 'set-pitch', value: Number(event.target.value) });
+            }}
           />
         </label>
         <label>
@@ -2683,11 +3252,14 @@ function Battlefield3DView({
             step={0.1}
             type="range"
             value={cameraZoom}
-            onChange={(event) => setCameraZoom(Number(event.target.value))}
+            onChange={(event) => {
+              cameraFrameQueue.current?.enqueue({ kind: 'set-zoom', value: Number(event.target.value) });
+            }}
           />
         </label>
         <button
           onClick={() => {
+            cameraFrameQueue.current?.flush();
             setCameraYaw(-35);
             setCameraPitch(58);
             setCameraZoom(1);
@@ -2711,6 +3283,9 @@ function Battlefield3DView({
     </div>
   );
 }
+
+const MemoizedBattlefield2DView = memo(Battlefield2DView);
+const MemoizedBattlefield3DView = memo(Battlefield3DView);
 
 function get3DTileCoordinates({
   gridWidth,
@@ -2833,7 +3408,7 @@ function CreatureSummary({ creature, state }: { creature: Creature; state: Comba
           Tactics: {formatBotTargetPriorityLabel(creature.botTargetPriority ?? 'balanced')}, {formatBotResourceStrategyLabel(creature.botResourceStrategy ?? 'normal')}
         </span>
       )}
-      <HpBar creature={creature} />
+      <MemoizedHpBar creature={creature} />
       <span>
         HP {creature.hp}/{creature.maxHp}
       </span>
@@ -2860,6 +3435,8 @@ function CreatureSummary({ creature, state }: { creature: Creature; state: Comba
     </div>
   );
 }
+
+const MemoizedCreatureSummary = memo(CreatureSummary);
 
 function BotTurnPreviewPanel({ preview }: { preview: BotTurnPreview }) {
   return (
@@ -2956,6 +3533,8 @@ function BotTurnPreviewPanel({ preview }: { preview: BotTurnPreview }) {
   );
 }
 
+const MemoizedBotTurnPreviewPanel = memo(BotTurnPreviewPanel);
+
 function CreatureActionGroups({
   actions,
   page,
@@ -3047,6 +3626,8 @@ function CreatureActionGroups({
     </section>
   );
 }
+
+const MemoizedCreatureActionGroups = memo(CreatureActionGroups);
 
 function getActionPageCount(actions: ActionDefinition[], actionCost: ActionDefinition['actionCost']): number {
   return Math.max(1, Math.ceil(actions.filter((action) => action.actionCost === actionCost).length / HOTBAR_PAGE_SIZE));
@@ -3548,7 +4129,8 @@ function getTargetsForAction(
   action: ActionDefinition,
   selectedTargetId?: string,
   areaOrigin?: GridPosition,
-  direction?: CardinalDirection
+  direction?: CardinalDirection,
+  query?: CombatQueryContext
 ): Creature[] {
   if (getActionTargetMode(action) === 'creature' && action.shape?.type === 'single') {
     return selectedTargetId ? [findCreature(combat, selectedTargetId)] : [];
@@ -3556,7 +4138,7 @@ function getTargetsForAction(
 
   if ((action.type ?? action.kind) === 'savingThrowEffect') {
     const origin = getShapeOrigin(action, activeCreature.position, areaOrigin);
-    return getTargetsInShape(combat, action.id, origin, direction);
+    return getTargetsInShape(combat, action.id, origin, direction, query);
   }
 
   return [];
@@ -3565,14 +4147,15 @@ function getTargetsForAction(
 function getPointTargetSquares(
   combat: CombatState,
   activeCreature: Creature,
-  action: ActionDefinition
+  action: ActionDefinition,
+  query: CombatQueryContext
 ): GridPosition[] {
   const squares: GridPosition[] = [];
 
   for (let y = 0; y < combat.grid.height; y += 1) {
     for (let x = 0; x < combat.grid.width; x += 1) {
-      const position = getTilePosition({ x, y }, combat.grid);
-      if (isValidPointTarget(combat, activeCreature, action, position)) {
+      const position = getTilePosition({ x, y }, combat.grid, query.grid);
+      if (isValidPointTarget(combat, activeCreature, action, position, query)) {
         squares.push(position);
       }
     }
@@ -3585,39 +4168,15 @@ function isValidPointTarget(
   combat: CombatState,
   activeCreature: Creature,
   action: ActionDefinition,
-  position: GridPosition
+  position: GridPosition,
+  query: CombatQueryContext
 ): boolean {
   const requiresLineOfSight = action.tags.includes('spell') || action.kind === 'spell';
   return (
-    !isBlocked(position, combat.grid) &&
+    !isBlocked(position, combat.grid, query.grid) &&
     isInActionRange(action, activeCreature.position, position) &&
-    (!requiresLineOfSight || hasLineOfSight(combat, activeCreature.position, position))
+    (!requiresLineOfSight || hasLineOfSight(combat, activeCreature.position, position, query))
   );
-}
-
-function getPreferredMovementOption(
-  combat: CombatState,
-  activeCreature: Creature,
-  option: MovementOption
-): MovementOption {
-  const alternatives = getMovementOptionsForDestination(combat, activeCreature.id, option.position);
-  if (alternatives.length === 0) {
-    return option;
-  }
-
-  return alternatives.reduce((best, candidate) => {
-    const bestRisk = getOpportunityAttackCandidatesForMovementPath(combat, activeCreature, best.path).length;
-    const candidateRisk = getOpportunityAttackCandidatesForMovementPath(combat, activeCreature, candidate.path).length;
-    if (candidateRisk !== bestRisk) {
-      return candidateRisk < bestRisk ? candidate : best;
-    }
-
-    if (candidate.costFeet !== best.costFeet) {
-      return candidate.costFeet < best.costFeet ? candidate : best;
-    }
-
-    return candidate.path.length < best.path.length ? candidate : best;
-  }, alternatives[0]);
 }
 
 function formatPathElevationSummary(path: GridPosition[]): string {
@@ -3638,7 +4197,8 @@ function getMapToolSquares(
   end: GridPosition | undefined,
   direction: CardinalDirection,
   radiusFeet: number,
-  lengthFeet: number
+  lengthFeet: number,
+  query: CombatQueryContext
 ): GridPosition[] {
   if (tool === 'select' || !start) {
     return [];
@@ -3653,7 +4213,7 @@ function getMapToolSquares(
       ? { type: 'radius', radius: feetToSquares(radiusFeet) }
       : { type: tool, length: feetToSquares(lengthFeet), direction };
 
-  return getShapeSquares(shape, start, combat.grid, direction);
+  return getShapeSquares(shape, start, combat.grid, direction, query);
 }
 
 function getMapToolResult(
@@ -3661,7 +4221,8 @@ function getMapToolResult(
   tool: MapTool,
   start: GridPosition | undefined,
   end: GridPosition | undefined,
-  squares: GridPosition[]
+  squares: GridPosition[],
+  query: CombatQueryContext
 ): string {
   if (tool === 'select') {
     return 'Combat controls active.';
@@ -3677,8 +4238,8 @@ function getMapToolResult(
     const straightDistance = Math.round(
       Math.hypot(target.x - start.x, target.y - start.y, getElevation(target) - getElevation(start)) * 5
     );
-    const blocked = squares.filter((square) => combat.grid.blocked.some((cell) => sameTilePosition(cell, square))).length;
-    const losText = tool === 'lineOfSight' ? ` LOS ${hasLineOfSight(combat, start, target) ? 'clear' : 'blocked'}.` : '';
+    const blocked = squares.filter((square) => query.grid.blockedKeys.has(positionKey(square))).length;
+    const losText = tool === 'lineOfSight' ? ` LOS ${hasLineOfSight(combat, start, target, query) ? 'clear' : 'blocked'}.` : '';
     return `${formatPosition(start)} to ${formatPosition(target)}: ${gridDistance} ft grid, ${straightDistance} ft straight.${blocked ? ` ${blocked} blocked square(s) crossed.` : ''}${losText}`;
   }
 
@@ -3813,6 +4374,8 @@ function VisualEventOverlay({
     </span>
   );
 }
+
+const MemoizedVisualEventOverlay = memo(VisualEventOverlay);
 
 function getTokenVisualClass(events: VisualEvent[], mode: VisualEffectsMode): string {
   if (mode === 'off') {
@@ -4015,6 +4578,8 @@ function HpBar({ creature, compact = false }: { creature: Creature; compact?: bo
   );
 }
 
+const MemoizedHpBar = memo(HpBar);
+
 function ConditionTags({ creature, compact = false }: { creature: Creature; compact?: boolean }) {
   const tags = getConditionTags(creature.conditions);
   if (tags.length === 0) {
@@ -4029,6 +4594,8 @@ function ConditionTags({ creature, compact = false }: { creature: Creature; comp
     </span>
   );
 }
+
+const MemoizedConditionTags = memo(ConditionTags);
 
 function getCreatureShortLabel(creature: Creature): string {
   const words = creature.name.split(/\s+/).filter(Boolean);

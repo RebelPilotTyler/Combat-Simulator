@@ -40,6 +40,22 @@ export type UtilityConditionId = (typeof UTILITY_CONDITION_IDS)[number];
 
 export const ALL_CONDITION_IDS = [...CORE_CONDITION_IDS, ...UTILITY_CONDITION_IDS] as const;
 
+export interface ConditionLookup {
+  normalizedByCreatureId: Map<string, AppliedCondition[]>;
+  idsByCreatureId: Map<string, Set<string>>;
+}
+
+export function createConditionLookup(creatures: Creature[]): ConditionLookup {
+  const normalizedByCreatureId = new Map<string, AppliedCondition[]>();
+  const idsByCreatureId = new Map<string, Set<string>>();
+  creatures.forEach((creature) => {
+    const normalized = normalizeConditions(creature.conditions);
+    normalizedByCreatureId.set(creature.id, normalized);
+    idsByCreatureId.set(creature.id, new Set(normalized.map((condition) => condition.id)));
+  });
+  return { normalizedByCreatureId, idsByCreatureId };
+}
+
 function disadvantageOnOwnAttacks(context: AttackRollModifierContext): RollModifier | undefined {
   return context.conditionBearer.id === context.attacker.id ? { disadvantage: true } : undefined;
 }
@@ -399,8 +415,9 @@ export function normalizeConditions(conditions: Array<AppliedCondition | string>
   });
 }
 
-export function hasCondition(creature: Creature, conditionId: string): boolean {
-  return normalizeConditions(creature.conditions).some((condition) => condition.id === conditionId);
+export function hasCondition(creature: Creature, conditionId: string, lookup?: ConditionLookup): boolean {
+  return lookup?.idsByCreatureId.get(creature.id)?.has(conditionId)
+    ?? normalizeConditions(creature.conditions).some((condition) => condition.id === conditionId);
 }
 
 export function getConditionLabel(condition: AppliedCondition): string {
@@ -633,8 +650,8 @@ export function runConditionTurnHooks(
   });
 }
 
-export function canCreatureMove(state: CombatState, creature: Creature): boolean {
-  return normalizeConditions(creature.conditions).every((condition) => {
+export function canCreatureMove(state: CombatState, creature: Creature, lookup?: ConditionLookup): boolean {
+  return getLookupConditions(creature, lookup).every((condition) => {
     const hook = getConditionDefinition(condition.id).hooks.canMove;
     return hook ? hook({ state, creature, condition }) : true;
   });
@@ -647,18 +664,22 @@ export function canCreatureTakeAction(state: CombatState, creature: Creature): b
   });
 }
 
-export function canCreatureTakeReaction(state: CombatState, creature: Creature): boolean {
-  return normalizeConditions(creature.conditions).every((condition) => {
+export function canCreatureTakeReaction(state: CombatState, creature: Creature, lookup?: ConditionLookup): boolean {
+  return getLookupConditions(creature, lookup).every((condition) => {
     const hook = getConditionDefinition(condition.id).hooks.canTakeReaction;
     return hook ? hook({ state, creature, condition }) : true;
   });
 }
 
-export function getMovementCostMultiplier(state: CombatState, creature: Creature): number {
-  return normalizeConditions(creature.conditions).reduce((multiplier, condition) => {
+export function getMovementCostMultiplier(state: CombatState, creature: Creature, lookup?: ConditionLookup): number {
+  return getLookupConditions(creature, lookup).reduce((multiplier, condition) => {
     const hook = getConditionDefinition(condition.id).hooks.movementCostModifier;
     return multiplier * (hook ? hook({ state, creature, condition }) : 1) * getConditionRuleMovementCostMultiplier(condition);
   }, 1);
+}
+
+function getLookupConditions(creature: Creature, lookup?: ConditionLookup): AppliedCondition[] {
+  return lookup?.normalizedByCreatureId.get(creature.id) ?? normalizeConditions(creature.conditions);
 }
 
 function getConditionRuleMovementCostMultiplier(condition: AppliedCondition): number {
